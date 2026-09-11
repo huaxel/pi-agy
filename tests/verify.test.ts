@@ -44,7 +44,7 @@ describe("detectVerifyCommand", () => {
   it("prefers just ci when justfile has ci recipe", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
     await writeFile(path.join(tmp, "justfile"), "ci:\n  echo ok\n");
-    assert.equal(await detectVerifyCommand(tmp), "just ci");
+    assert.equal(await detectVerifyCommand(tmp, { justAvailable: async () => true }), "just ci");
   });
 
   it("falls back to npm test", async () => {
@@ -68,7 +68,7 @@ describe("detectVerifyCommand", () => {
   it("recognizes uppercase Justfile aliases", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
     await writeFile(path.join(tmp, "Justfile"), "alias ci := check\n");
-    assert.equal(await detectVerifyCommand(tmp), "just ci");
+    assert.equal(await detectVerifyCommand(tmp, { justAvailable: async () => true }), "just ci");
   });
 
   it("finds verification commands in a repository ancestor", async () => {
@@ -76,13 +76,13 @@ describe("detectVerifyCommand", () => {
     const nested = path.join(root, "packages", "app");
     await mkdir(nested, { recursive: true });
     await writeFile(path.join(root, "justfile"), "ci:\n  echo ok\n");
-    assert.equal(await detectVerifyCommand(nested), "just ci");
+    assert.equal(await detectVerifyCommand(nested, { justAvailable: async () => true }), "just ci");
   });
 
   it("recognizes hidden .justfile", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
     await writeFile(path.join(tmp, ".justfile"), "ci:\n  echo ok\n");
-    assert.equal(await detectVerifyCommand(tmp), "just ci");
+    assert.equal(await detectVerifyCommand(tmp, { justAvailable: async () => true }), "just ci");
   });
 
   it("stops at the repository boundary", async () => {
