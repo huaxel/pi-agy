@@ -1,0 +1,58 @@
+{
+  "name": "@juanbenjumea/pi-agy",
+  "version": "0.5.0",
+  "description": "Enhanced Antigravity CLI (agy) bridge for Pi — streaming progress, conversation continuity, repo-aware verify, and diff summaries.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Juan Benjumea",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-skill",
+    "agy",
+    "antigravity",
+    "gemini",
+    "google-ai",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huaxel/pi-agy"
+  },
+  "bugs": {
+    "url": "https://github.com/huaxel/pi-agy/issues"
+  },
+  "homepage": "https://github.com/huaxel/pi-agy#readme",
+  "scripts": {
+    "test": "node --import ./tests/resolve-hook.mjs --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit --pretty false",
+    "pack:check": "npm pack --dry-run --json"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "extensions/",
+    "skills/"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.34.41",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
