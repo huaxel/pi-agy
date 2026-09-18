@@ -24,7 +24,7 @@ import {
   type GitBaseline,
 } from "./postflight.js";
 import { runPreflight } from "./preflight.js";
-import { getSession, saveSession } from "./sessions.js";
+import { getSession, saveSession, conversationSummary } from "./sessions.js";
 
 export type AgyMode = "plan" | "accept-edits" | "sandbox";
 
@@ -192,6 +192,7 @@ export async function executeAgyTask(
               run.conversation_id,
               effectiveModel,
               AbortSignal.timeout(10_000),
+              conversationSummary(options.prompt),
             );
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
@@ -260,6 +261,7 @@ export async function executeAgyTask(
           conversationId,
           effectiveModel,
           AbortSignal.timeout(10_000),
+          conversationSummary(options.prompt),
         );
       } catch {
         // Preserve the original agy failure; session persistence is best effort.

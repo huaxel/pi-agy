@@ -129,6 +129,7 @@ describe("/agy command", () => {
               conversation_id: "conv-1111",
               model: "flash-medium",
               updated_at: new Date().toISOString(),
+              summary: "fix git conflicts",
             },
           ],
         },
@@ -178,7 +179,7 @@ describe("/agy command", () => {
         } as unknown as ExtensionCommandContext);
 
         assert.deepEqual(selections, [
-          "1. flash-medium · just now · conv-111…",
+          "1. fix git conflicts · flash-medium · just now · conv-111…",
           "accept-edits — writes files (default)",
         ]);
         const args = await readFakeAgyArgs(bin);

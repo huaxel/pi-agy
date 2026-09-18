@@ -8,7 +8,7 @@ import {
   type AgyModel,
 } from "./lib/cli.js";
 import { executeAgyTask } from "./lib/execute.js";
-import { truncate } from "./lib/output.js";
+import { describeWhen, truncate } from "./lib/output.js";
 import { describePreRunDirt } from "./lib/postflight.js";
 import { getHistory, getSession } from "./lib/sessions.js";
 
@@ -263,7 +263,8 @@ async function runSessionsPicker(ctx: ExtensionCommandContext): Promise<void> {
   const options = history.map((entry, index) => {
     const id = entry.conversation_id.slice(0, 8);
     const model = entry.model ?? "unknown model";
-    return `${index + 1}. ${model} · ${describeWhen(entry.updated_at)} · ${id}…`;
+    const summary = entry.summary ? `${entry.summary.slice(0, 50)} · ` : "";
+    return `${index + 1}. ${summary}${model} · ${describeWhen(entry.updated_at)} · ${id}…`;
   });
   const pick = await ctx.ui.select("resume agy conversation", options);
   if (!pick) {
@@ -380,17 +381,6 @@ function createStatusThrottler(ctx: ExtensionCommandContext, intervalMs = 300) {
       }, intervalMs - (now - lastEmit));
     }
   };
-}
-
-function describeWhen(iso: string): string {
-  const ms = Date.now() - Date.parse(iso);
-  if (!Number.isFinite(ms)) return "unknown age";
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
 }
 
 function optionKey(option: string): string {

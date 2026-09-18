@@ -42,6 +42,7 @@ agy_execute prompt="Generate exhaustive unit tests for src/auth/" model=flash-lo
 agy_execute prompt="Plan the migration to ESM" model=sonnet mode=plan digest=true
 agy_execute prompt="Implement the approved plan" conversation_id=<id> mode=accept-edits
 agy_execute prompt="Adversarial review the diff" model=opus effort=high mode=plan
+agy_history
 agy_usage
 ```
 
@@ -72,7 +73,7 @@ agy_usage
 
 - **Quota discovery** — `agy_usage` and `/agy usage` report model-specific remaining quota and reset times; executions refresh quota snapshots and return machine-readable `quota_status` as well.
 - **Streaming progress** — live tool steps via `stream-json` and Pi `onUpdate`.
-- **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default); runs that time out or are cancelled are recorded too and stay resumable.
+- **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default) with one-line task summaries; runs that time out or are cancelled are recorded too and stay resumable, and the `agy_history` tool lets agents list past conversations.
 - **Repo-aware verify** — prefers `just ci` when a justfile defines `ci:`.
 - **Diff summary** — accept-edits results append newly-dirty files only; pre-existing dirt is listed separately, never misattributed.
 - **Per-directory lock** — serializes concurrent agy calls on the same tree across Pi processes (symlink-aware).

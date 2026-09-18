@@ -39,7 +39,7 @@ import {
 } from "../extensions/lib/stream.js";
 import { parseJsonResponse } from "../extensions/lib/parse.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
-import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
+import { conversationSummary, createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
 describe("session store", () => {
   it("uses PI_CODING_AGENT_DIR for the default store path", () => {
     const previous = process.env.PI_CODING_AGENT_DIR;
@@ -154,6 +154,33 @@ describe("session store", () => {
 
     assert.equal(await store.getSession("/p"), undefined);
     assert.deepEqual(await store.getHistory("/p"), []);
+  });
+
+  it("stores task summaries with each conversation", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-sessions-"));
+    const store = createSessionStore(path.join(tmp, "agy-sessions.json"));
+    await store.saveSession("/p", "c1", "flash-low", undefined, "first task");
+    await store.saveSession("/p", "c2", "sonnet", undefined, "second task");
+    let history = await store.getHistory("/p");
+    assert.equal(history[0]?.summary, "second task");
+    assert.equal(history[1]?.summary, "first task");
+
+    // Re-saving an id keeps it once, moves it to the front, refreshes the
+    // summary, and never duplicates.
+    await store.saveSession("/p", "c1", "flash-low", undefined, "first task again");
+    history = await store.getHistory("/p");
+    assert.equal(history.length, 2);
+    assert.equal(history[0]?.conversation_id, "c1");
+    assert.equal(history[0]?.summary, "first task again");
+  });
+
+  it("collapses prompts into compact one-line summaries", () => {
+    assert.equal(conversationSummary("line one\n  line\ttwo   three"), "line one line two three");
+    assert.equal(conversationSummary("short prompt"), "short prompt");
+    const long = "word ".repeat(60);
+    const summarized = conversationSummary(long);
+    assert.ok(summarized.length <= 81);
+    assert.ok(summarized.endsWith("…"));
   });
 });
 

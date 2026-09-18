@@ -58,11 +58,89 @@ describe("extension registration", () => {
     };
     piAgyExtension(fakePi as unknown as ExtensionAPI);
     assert.deepEqual(commands, ["agy"]);
-    assert.equal(tools.length, 2);
+    assert.equal(tools.length, 3);
     assert.equal(tools[0].name, "agy_execute");
-    assert.equal(tools[1].name, "agy_usage");
+    assert.equal(tools[1].name, "agy_history");
+    assert.equal(tools[2].name, "agy_usage");
     assert.ok(tools[0].parameters);
     assert.ok(tools[1].parameters);
+    assert.ok(tools[2].parameters);
+  });
+
+  it("lists recorded conversations through agy_history", async () => {
+    type HistoryTool = {
+      execute: (...args: any[]) => Promise<{
+        content: Array<{ text: string }>;
+        details: { dir: string; conversations: Array<{ conversation_id: string; summary?: string }> };
+      }>;
+    };
+    let historyTool: HistoryTool | undefined;
+    const fakePi = {
+      registerCommand: () => {},
+      registerTool: (tool: { name: string; execute?: (...args: any[]) => Promise<any> }) => {
+        if (tool.name === "agy_history" && tool.execute) {
+          historyTool = tool as unknown as HistoryTool;
+        }
+      },
+    };
+    piAgyExtension(fakePi as unknown as ExtensionAPI);
+    assert.ok(historyTool);
+
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const workDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-workdir-"));
+    await writeFile(
+      path.join(agentDir, "agy-sessions.json"),
+      JSON.stringify({
+        [path.resolve(workDir)]: {
+          last_conversation_id: "conv-1",
+          last_model: "flash-low",
+          updated_at: new Date().toISOString(),
+          history: [
+            {
+              conversation_id: "conv-1",
+              model: "flash-low",
+              updated_at: new Date().toISOString(),
+              summary: "fix git conflicts",
+            },
+            {
+              conversation_id: "conv-2",
+              model: "sonnet",
+              updated_at: new Date(Date.now() - 3_600_000).toISOString(),
+              summary: "review the auth diff",
+            },
+          ],
+        },
+      }),
+    );
+    try {
+      const result = await historyTool!.execute("hist-1", {}, undefined, undefined, {
+        cwd: workDir,
+      });
+      assert.match(result.content[0].text, new RegExp(`agy conversations for .*${workDir}`));
+      assert.match(result.content[0].text, /conv-1/);
+      assert.match(result.content[0].text, /flash-low · just now/);
+      assert.match(result.content[0].text, /fix git conflicts/);
+      assert.match(result.content[0].text, /sonnet · 1h ago/);
+      assert.match(result.content[0].text, /review the auth diff/);
+      assert.match(result.content[0].text, /Resume with agy_execute conversation_id/);
+      assert.equal(result.details.conversations.length, 2);
+
+      const limited = await historyTool!.execute("hist-2", { limit: 1 }, undefined, undefined, {
+        cwd: workDir,
+      });
+      assert.equal(limited.details.conversations.length, 1);
+      assert.equal(limited.details.conversations[0].conversation_id, "conv-1");
+
+      const empty = await historyTool!.execute("hist-3", {}, undefined, undefined, {
+        cwd: path.join(workDir, "subdir"),
+      });
+      assert.match(empty.content[0].text, /No agy conversations are recorded/);
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
   });
 
   it("reports targeted quota status through agy_usage", async () => {
@@ -302,6 +380,10 @@ describe("shared executor", () => {
         assert.equal(result.details.model, "flash-medium");
         const store = JSON.parse(await readFile(path.join(agentDir, "agy-sessions.json"), "utf8"));
         assert.equal(store[path.resolve(process.cwd())].last_model, "flash-medium");
+        assert.equal(
+          store[path.resolve(process.cwd())].history[0].summary,
+          "inspect the project",
+        );
       });
     } finally {
       if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

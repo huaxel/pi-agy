@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+- New `agy_history` tool: list recorded agy conversations for a working directory (ids, models, ages, task summaries) so agents can discover and resume past work without remembering ids; read-only, no model turn spent.
+- Record a one-line task summary (collapsed first ~80 chars of the prompt) with every saved conversation — surfaced in `agy_history` and the `/agy sessions` picker; stored locally, backward compatible with existing stores.
+- `getHistory` normalizes entries (drops malformed fields, keeps only known ones).
+
 ## 0.5.9
 
 - Parse the real agy 1.2.6 `/usage` schema (`command.data.groups[].buckets[]`): usage groups carry the model family in `name`, which the quota reader now honors — live runs previously fell back to dumping the raw JSON envelope and reported `quota_status: unknown`. Found by an end-to-end run against the real CLI.

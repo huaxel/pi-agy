@@ -18,7 +18,7 @@ Requires Node.js >= 20.3.
 |---------|----------|-----------|
 | Live progress | Final text only | `stream-json` → Pi `onUpdate` cards |
 | Model aliases | Hardcoded ids | Live `agy models` catalog (newest stable generation wins; preview/experimental ignored), static map fallback |
-| Conversation resume | None | `conversation_id`, `continue`, session store, `/agy sessions` picker — runs that time out or are cancelled are recorded too |
+| Conversation resume | None | `conversation_id`, `continue`, session store with task summaries, `/agy sessions` picker, `agy_history` discovery tool — runs that time out or are cancelled are recorded too |
 | Verify injection | `npm test` only | `just ci` first, then `npm test`/`uv run pytest` |
 | Post-write summary | None | Appends `git diff --stat` for newly-dirty files only; pre-existing dirt (including renames and unstaged edits) is listed separately and never misattributed |
 | Preflight | Every call | Health/model checks cached 5 min per process; model quotas refresh every minute |
@@ -68,6 +68,11 @@ Use `agy_usage` with `model` (for example `model=sonnet`) for a targeted
 headless `/usage` continue without failing the task. The extension requires
 agy 1.1.11+ before invoking `/usage`; older versions are refused safely because
 that command could otherwise consume model quota as a prompt.
+
+The `agy_history` tool lists recorded conversations for a directory — ids,
+models, ages, and one-line task summaries — so agents can find a
+`conversation_id` to resume; `/agy sessions` offers the same in the TUI
+picker. Summaries are stored locally (first ~80 chars of each prompt).
 
 ## Human-callable `/agy` command
 

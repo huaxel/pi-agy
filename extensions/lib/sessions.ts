@@ -17,6 +17,8 @@ export interface AgyConversationEntry {
   conversation_id: string;
   model?: string;
   updated_at: string;
+  /** Short task excerpt so humans and agents can tell conversations apart. */
+  summary?: string;
 }
 
 export interface AgySessionRecord {
@@ -66,7 +68,14 @@ export interface AgySessionStore {
     conversationId: string,
     model?: string,
     signal?: AbortSignal,
+    summary?: string,
   ): Promise<void>;
+}
+
+/** Collapse a prompt into a short one-line task summary. */
+export function conversationSummary(prompt: string, max = 80): string {
+  const collapsed = prompt.trim().replace(/\s+/g, " ");
+  return collapsed.length > max ? collapsed.slice(0, max) + "…" : collapsed;
 }
 
 /**
@@ -145,7 +154,15 @@ export function createSessionStore(
               typeof entry.conversation_id === "string" &&
               typeof entry.updated_at === "string",
           )
-          .slice()
+          .map((entry) => {
+            const normalized: AgyConversationEntry = {
+              conversation_id: entry.conversation_id,
+              updated_at: entry.updated_at,
+            };
+            if (typeof entry.model === "string") normalized.model = entry.model;
+            if (typeof entry.summary === "string") normalized.summary = entry.summary;
+            return normalized;
+          })
       : [];
   }
 
@@ -227,6 +244,7 @@ export function createSessionStore(
     conversationId: string,
     model?: string,
     signal?: AbortSignal,
+    summary?: string,
   ): Promise<void> {
     const operation = waitForMutation(signal).then(() =>
       withStoreLock(async () => {
@@ -239,7 +257,7 @@ export function createSessionStore(
           last_model: model,
           updated_at: updatedAt,
           history: [
-            { conversation_id: conversationId, model, updated_at: updatedAt },
+            { conversation_id: conversationId, model, updated_at: updatedAt, summary },
             ...(Array.isArray(record.history) ? record.history : []).filter(
               (entry) =>
                 entry &&
@@ -276,6 +294,7 @@ export function saveSession(
   conversationId: string,
   model?: string,
   signal?: AbortSignal,
+  summary?: string,
 ): Promise<void> {
-  return defaultStore.saveSession(dir, conversationId, model, signal);
+  return defaultStore.saveSession(dir, conversationId, model, signal, summary);
 }

@@ -19,7 +19,8 @@ import {
   validateAgyExecutionOptions,
   type AgyMode,
 } from "./lib/execute.js";
-import { truncate } from "./lib/output.js";
+import { describeWhen, truncate } from "./lib/output.js";
+import { getHistory } from "./lib/sessions.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -191,6 +192,56 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: truncate(result.text || "(empty response)") }],
         details: result.details,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "agy_history",
+    label: "Antigravity Conversations",
+    description:
+      "List recorded agy conversations for a working directory (most recent first) with ids, models, ages, and task summaries — find a conversation_id to resume with agy_execute. Read-only; no model turn is spent.",
+    promptSnippet: "List recorded agy conversations before resuming one",
+    parameters: Type.Object({
+      dir: Type.Optional(
+        Type.String({
+          description: "Working directory. Defaults to current project root.",
+        }),
+      ),
+      limit: Type.Optional(
+        Type.Number({
+          description: "Maximum conversations to list (default 10).",
+          minimum: 1,
+          maximum: 10,
+          default: 10,
+        }),
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const cwd = params.dir ? path.resolve(ctx.cwd, params.dir) : ctx.cwd;
+      const history = await getHistory(cwd);
+      const limited = history.slice(0, params.limit ?? 10);
+      if (limited.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `No agy conversations are recorded for ${cwd} yet. They are recorded automatically when agy_execute completes or is interrupted with a conversation id.`,
+          }],
+          details: { dir: cwd, conversations: [] },
+        };
+      }
+      const lines = limited.map((entry, index) => {
+        const model = entry.model ?? "unknown model";
+        const summary = entry.summary ? ` · ${entry.summary}` : "";
+        return `${index + 1}. ${entry.conversation_id} · ${model} · ${describeWhen(entry.updated_at)}${summary}`;
+      });
+      const text =
+        `agy conversations for ${cwd} (most recent first):\n${lines.join("\n")}\n\n` +
+        "Resume with agy_execute conversation_id=<id>, or continue=true for the most recent.";
+      return {
+        content: [{ type: "text", text }],
+        details: { dir: cwd, conversations: limited },
       };
     },
   });
