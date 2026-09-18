@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.5
+
+- Preserve completed responses past the deadline: a result that fully arrived before cancellation or timeout is returned with an explanatory note instead of being discarded — previously a kill landing between delivery and process exit threw the finished response away.
+- Post-run steps cut short by the deadline (diff summary) are skipped with a note instead of failing the whole run after agy already finished.
+- Persist the conversation under a fresh bounded signal on the success path too, so a save racing the deadline still records the resumable id.
+
 ## 0.5.4
 
 - Fix pre-existing unstaged modifications being misattributed to agy: porcelain paths are now parsed by fixed column — `line.trim()` before `slice(3)` ate the path's first character for ` M` lines, so unstaged dirt never matched `diff --name-only` and always looked newly-dirty. Found by the agy plan-mode cross-review.

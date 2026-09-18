@@ -418,6 +418,91 @@ describe("shared executor", () => {
     }
   });
 
+  it("returns a completed response even when the run is cancelled after delivery", async () => {
+    const raw =
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "late-conv", response: "late but complete", status: "SUCCESS" },
+      }) + "\n";
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      await withFakeAgy(
+        raw,
+        async () => {
+          resetPreflightCache();
+          const controller = new AbortController();
+          setTimeout(() => controller.abort(), 300);
+          const result = await executeAgyTask(
+            {
+              prompt: "finish then hang",
+              mode: "plan",
+              dir: process.cwd(),
+              timeout_ms: 60_000,
+              new_session: true,
+              stream: true,
+            },
+            controller.signal,
+          );
+          assert.match(result.text, /late but complete/);
+          assert.match(result.text, /was cancelled; the completed result is preserved/);
+          assert.equal(result.details.conversation_id, "late-conv");
+          const store = JSON.parse(
+            await readFile(path.join(agentDir, "agy-sessions.json"), "utf8"),
+          );
+          assert.equal(store[path.resolve(process.cwd())].last_conversation_id, "late-conv");
+        },
+        0, // failures
+        0, // delayMs
+        "", // failureOutput
+        "", // failureConversationId
+        "{}", // usageOutput
+        60_000, // hangAfterOutputMs — the result arrives, then agy hangs
+      );
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+  });
+
+  it("returns a completed response when the budget expires after delivery", async () => {
+    const raw =
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "deadline-conv", response: "done at the wire", status: "SUCCESS" },
+      }) + "\n";
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      await withFakeAgy(
+        raw,
+        async () => {
+          resetPreflightCache();
+          const result = await executeAgyTask(
+            {
+              prompt: "finish then hang",
+              mode: "plan",
+              dir: process.cwd(),
+              timeout_ms: 1_000,
+              new_session: true,
+              stream: true,
+            },
+            undefined,
+          );
+          assert.match(result.text, /done at the wire/);
+          assert.match(result.text, /was timing out; the completed result is preserved/);
+          assert.equal(result.details.conversation_id, "deadline-conv");
+        },
+        0, 0, "", "", "{}", 60_000,
+      );
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+  });
+
   it("rejects invalid session and timeout inputs before spawning agy", async () => {
     await assert.rejects(
       executeAgyTask(

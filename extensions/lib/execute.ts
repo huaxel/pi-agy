@@ -185,13 +185,19 @@ export async function executeAgyTask(
 
         if (run.conversation_id) {
           try {
-            await saveSession(options.dir, run.conversation_id, effectiveModel, abortSignal);
+            // Fresh bounded signal: the composed one may already be aborted
+            // when the run finished at the deadline edge (see below).
+            await saveSession(
+              options.dir,
+              run.conversation_id,
+              effectiveModel,
+              AbortSignal.timeout(10_000),
+            );
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
             onProgress?.(`agy: warning — could not persist session: ${reason}`);
           }
         }
-        remainingBudget(startedAt, options.timeout_ms);
 
         let text = run.response;
         const quotaSummary = quota?.models.length
@@ -200,16 +206,23 @@ export async function executeAgyTask(
         if (quotaSummary) text = `${text}\n\n## agy quota snapshot\n${quotaSummary}`;
         let changedFiles: string[] | undefined;
         let preexistingFiles: string[] | undefined;
+        // The agy run itself is complete; from here, an expiring budget or a
+        // racing cancellation must never discard its response. Skip the
+        // post-run steps with a note instead of throwing the result away.
         if (options.mode === "accept-edits") {
-          const diff = await summarizeGitDiffSince(baseline, options.dir, abortSignal);
-          if (diff.summary) text = `${text}\n\n${diff.summary}`;
-          changedFiles = diff.newFiles;
-          preexistingFiles = diff.preexistingFiles;
+          try {
+            const diff = await summarizeGitDiffSince(baseline, options.dir, abortSignal);
+            if (diff.summary) text = `${text}\n\n${diff.summary}`;
+            changedFiles = diff.newFiles;
+            preexistingFiles = diff.preexistingFiles;
+          } catch (error) {
+            if (!abortSignal.aborted) throw error;
+            text += "\n\n(diff summary skipped: the run reached its deadline as agy finished)";
+          }
         }
         if (abortSignal.aborted) {
-          throw new Error(signal?.aborted ? "agy was cancelled" : "agy timed out");
+          text += `\n\nagy finished as the run was ${signal?.aborted ? "cancelled" : "timing out"}; the completed result is preserved.`;
         }
-        remainingBudget(startedAt, options.timeout_ms);
 
         return {
           text,

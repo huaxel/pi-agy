@@ -1009,6 +1009,14 @@ function spawnAgyInternal(
           runResult = processStreamLine(lineBuffer, runResult, onProgress);
         }
 
+        // A fully delivered result outranks the kill: when cancellation or
+        // timeout lands after the response arrived, the work is done and the
+        // response must not be discarded.
+        if (runResult.response_complete) {
+          resolve(finalizeRunResult(out, runResult));
+          return;
+        }
+
         if (sig === "SIGTERM" || sig === "SIGKILL" || code === null) {
           reject(
             withConversationId(
