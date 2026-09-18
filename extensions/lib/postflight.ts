@@ -12,6 +12,36 @@ export interface GitBaseline {
   unavailable: boolean;
 }
 
+/** Parse `git status --porcelain` v1 output into the set of dirty paths. */
+export function parsePorcelainStatus(stdout: string): Set<string> {
+  const dirtyFiles = new Set<string>();
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    // Porcelain v1: `XY <path>` — two fixed status columns, one space, path.
+    // Never trim before slicing: unstaged statuses (` M`) carry meaning in
+    // the leading space, and trim-then-slice(3) eats the path's first char.
+    const status = line.slice(0, 2);
+    const file = line.slice(3).trim();
+    if (!file) continue;
+    // Rename/copy entries print `ORIG -> NEW` while `diff --name-only`
+    // reports only NEW, so record both sides — otherwise a pre-existing
+    // rename looks newly-dirty after the run and is misattributed to agy.
+    // Split at the LAST arrow (paths may contain " -> ") and keep git's
+    // C-quoting verbatim so entries match `diff --name-only` output.
+    const isRenameOrCopy = status.includes("R") || status.includes("C");
+    const arrow = isRenameOrCopy ? file.lastIndexOf(" -> ") : -1;
+    if (arrow !== -1) {
+      const orig = file.slice(0, arrow).trim();
+      const renamed = file.slice(arrow + " -> ".length).trim();
+      if (orig) dirtyFiles.add(orig);
+      if (renamed) dirtyFiles.add(renamed);
+    } else {
+      dirtyFiles.add(file);
+    }
+  }
+  return dirtyFiles;
+}
+
 /** Capture dirty state before accept-edits so the summary can attribute only new changes to agy. */
 export async function captureGitBaseline(cwd: string, signal?: AbortSignal): Promise<GitBaseline> {
   try {
@@ -21,29 +51,7 @@ export async function captureGitBaseline(cwd: string, signal?: AbortSignal): Pro
       signal,
       timeout: 10_000,
     });
-    const dirtyFiles = new Set<string>();
-    for (const line of stdout.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      // Porcelain v1: XY <path>[ -> <orig>]. Rename/copy entries print
-      // `ORIG -> NEW` while `diff --name-only` reports only NEW, so record
-      // both sides — otherwise a pre-existing rename looks newly-dirty
-      // after the run and is misattributed to agy.
-      const status = trimmed.slice(0, 2);
-      const file = trimmed.slice(3).trim();
-      if (!file) continue;
-      const isRenameOrCopy = status.includes("R") || status.includes("C");
-      const arrow = file.indexOf(" -> ");
-      if (isRenameOrCopy && arrow !== -1) {
-        const orig = file.slice(0, arrow).trim();
-        const renamed = file.slice(arrow + " -> ".length).trim();
-        if (orig) dirtyFiles.add(orig);
-        if (renamed) dirtyFiles.add(renamed);
-      } else {
-        dirtyFiles.add(file);
-      }
-    }
-    return { dirtyFiles, unavailable: false };
+    return { dirtyFiles: parsePorcelainStatus(stdout), unavailable: false };
   } catch {
     if (signal?.aborted) throw new Error("agy was cancelled");
     return { dirtyFiles: new Set(), unavailable: true };

@@ -18,7 +18,9 @@ export async function withFakeAgy<T>(
   const failureEncoded = Buffer.from(failureOutput).toString("base64");
   const usageEncoded = Buffer.from(usageOutput).toString("base64");
   const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bin-"));
-  const encoded = Buffer.from(output).toString("base64");
+  // Output travels via a file: argv strings are capped at ~128 KB, which
+  // megabyte-scale payloads would exceed.
+  await writeFile(path.join(bin, "output.b64"), Buffer.from(output).toString("base64"));
   await writeFile(
     path.join(bin, "agy"),
     `#!/usr/bin/env bash
@@ -52,7 +54,7 @@ case "$1" in
       exit 1
     fi
     printf '%s\\n' '{"event":"init","init":{"model":"fake"}}'
-    printf '%s' '${encoded}' | base64 --decode
+    base64 --decode "$dir/output.b64"
     if [ "${hangAfterOutputMs}" -gt 0 ]; then sleep "${hangSeconds}"; fi
     ;;
 esac

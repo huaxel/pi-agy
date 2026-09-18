@@ -29,7 +29,12 @@ import { executeAgyTask } from "../extensions/lib/execute.js";
 import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withDirLock } from "../extensions/lib/lock.js";
 import { detectVerifyCommand } from "../extensions/lib/verify.js";
-import { summarizeGitDiff, captureGitBaseline, summarizeGitDiffSince } from "../extensions/lib/postflight.js";
+import {
+  summarizeGitDiff,
+  captureGitBaseline,
+  summarizeGitDiffSince,
+  parsePorcelainStatus,
+} from "../extensions/lib/postflight.js";
 import { loadAgyConfig, resetDefaultModelCache, resolveDefaultModel } from "../extensions/lib/config.js";
 import {
   accumulateRunResult,
@@ -40,6 +45,55 @@ import {
 import { parseJsonResponse } from "../extensions/lib/parse.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
+describe("parsePorcelainStatus", () => {
+  it("keeps fixed porcelain columns for unstaged statuses", () => {
+    const files = parsePorcelainStatus(" M src.ts\nA  added.ts\nM  staged.ts\n?? untracked.txt\n");
+    for (const expected of ["src.ts", "added.ts", "staged.ts", "untracked.txt"]) {
+      assert.ok(files.has(expected), `missing ${expected}`);
+    }
+  });
+
+  it("records both sides of renames and copies across XY variants", () => {
+    const files = parsePorcelainStatus(
+      "R  old.ts -> new.ts\nRM old2.ts -> new2.ts\n R wt-old.ts -> wt-new.ts\nC  c-old.ts -> c-new.ts\n",
+    );
+    for (const expected of [
+      "old.ts",
+      "new.ts",
+      "old2.ts",
+      "new2.ts",
+      "wt-old.ts",
+      "wt-new.ts",
+      "c-old.ts",
+      "c-new.ts",
+    ]) {
+      assert.ok(files.has(expected), `missing ${expected}`);
+    }
+  });
+
+  it("splits renames at the last arrow when paths contain arrows", () => {
+    const files = parsePorcelainStatus("R  a -> b -> c\n");
+    assert.ok(files.has("a -> b"));
+    assert.ok(files.has("c"));
+    assert.equal(files.size, 2);
+  });
+
+  it("never splits non-rename paths that contain arrows", () => {
+    const files = parsePorcelainStatus(" M odd -> name.txt\n");
+    assert.deepEqual([...files], ["odd -> name.txt"]);
+  });
+
+  it("keeps git quoting verbatim on rename halves", () => {
+    const files = parsePorcelainStatus('R  "old -> a" -> "new file"\n');
+    assert.ok(files.has('"old -> a"'));
+    assert.ok(files.has('"new file"'));
+  });
+
+  it("ignores blank lines", () => {
+    assert.equal(parsePorcelainStatus("\n   \n").size, 0);
+  });
+});
+
 describe("summarizeGitDiff", () => {
   it("reports untracked files", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-diff-"));
@@ -74,6 +128,26 @@ describe("summarizeGitDiff", () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-diff-"));
     await execAsync("git", ["init", "-q"], { cwd: tmp });
     assert.equal(await summarizeGitDiff(tmp), null);
+  });
+
+  it("attributes pre-existing unstaged modifications to the baseline, not agy", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-unstaged-"));
+    await execAsync("git", ["init", "-q"], { cwd: tmp });
+    await execAsync("git", ["config", "user.email", "t@t"], { cwd: tmp });
+    await execAsync("git", ["config", "user.name", "t"], { cwd: tmp });
+    await writeFile(path.join(tmp, "src.ts"), "one\n");
+    await execAsync("git", ["add", "src.ts"], { cwd: tmp });
+    await execAsync("git", ["commit", "-qm", "initial"], { cwd: tmp });
+    // Unstaged modification — porcelain prints ` M src.ts` with a leading
+    // space; trim-then-slice used to mangle it into `rc.ts`.
+    await writeFile(path.join(tmp, "src.ts"), "two\n");
+    const baseline = await captureGitBaseline(tmp);
+    assert.ok(baseline.dirtyFiles.has("src.ts"), "unstaged path recorded verbatim");
+
+    await writeFile(path.join(tmp, "agy-made.txt"), "agy\n");
+    const diff = await summarizeGitDiffSince(baseline, tmp);
+    assert.deepEqual(diff.newFiles, ["agy-made.txt"]);
+    assert.deepEqual(diff.preexistingFiles, ["src.ts"]);
   });
 
   it("attributes pre-existing staged renames to the baseline, not agy", async () => {

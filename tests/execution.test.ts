@@ -291,10 +291,10 @@ describe("shared executor", () => {
   });
 
   it("marks responses served from a truncated raw stdout capture", async () => {
-    // No result record and more than the 64 KB raw capture bound: the
-    // verbatim fallback must disclose the truncation instead of serving
-    // silently cut text.
-    const raw = "x".repeat(80_000) + "\n";
+    // No result record and more than the raw capture bound: the verbatim
+    // fallback must disclose the truncation instead of serving silently
+    // cut text.
+    const raw = "x".repeat(1_100_000) + "\n";
     await withFakeAgy(raw, async () => {
       resetPreflightCache();
       const result = await executeAgyTask(
@@ -308,7 +308,36 @@ describe("shared executor", () => {
         },
         undefined,
       );
-      assert.match(result.text, /\(raw stdout capture was truncated at the 64 KB fallback bound\)$/);
+      assert.match(result.text, /\(raw stdout capture was truncated at the 1024 KB fallback bound\)$/);
+    });
+  });
+
+  it("returns full json envelopes beyond the raw capture when stream is disabled", async () => {
+    // --output-format json emits one top-level envelope record; it must
+    // accumulate in-stream (uncapped by the raw fallback) no matter its size.
+    const bigResponse = "y".repeat(100_000);
+    const raw =
+      JSON.stringify({
+        response: bigResponse,
+        conversation_id: "json-conv",
+        duration_seconds: 3,
+      }) + "\n";
+    await withFakeAgy(raw, async () => {
+      resetPreflightCache();
+      const result = await executeAgyTask(
+        {
+          prompt: "emit one big json envelope",
+          mode: "plan",
+          dir: process.cwd(),
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: false,
+        },
+        undefined,
+      );
+      assert.equal(result.text, bigResponse);
+      assert.equal(result.details.conversation_id, "json-conv");
+      assert.equal(result.details.duration_seconds, 3);
     });
   });
 

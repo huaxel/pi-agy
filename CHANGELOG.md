@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.4
+
+- Fix pre-existing unstaged modifications being misattributed to agy: porcelain paths are now parsed by fixed column — `line.trim()` before `slice(3)` ate the path's first character for ` M` lines, so unstaged dirt never matched `diff --name-only` and always looked newly-dirty. Found by the agy plan-mode cross-review.
+- Honor top-level `--output-format json` envelope fields in-stream so non-streaming responses of any size accumulate fully instead of relying on the bounded raw capture.
+- Raise the raw stdout capture bound from 64 KB to 1 MB so plain-text fallbacks rarely truncate.
+- Split rename/copy porcelain paths at the last ` -> ` (paths may themselves contain arrows), preserving git quoting verbatim so entries match `diff --name-only`.
+- Extract `parsePorcelainStatus` as a testable unit; move fake-agy payloads from argv to a file so tests can exceed the ~128 KB argv cap.
+
 ## 0.5.3
 
 - Persist timed-out or cancelled conversations so they stay resumable: the failure-path session save passed the already-aborted signal to the session store, whose lock guards reject it, making conversation continuity on timeout/cancel silently dead code. Found by dogfooding a real agy run.

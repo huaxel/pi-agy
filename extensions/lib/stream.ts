@@ -24,6 +24,13 @@ export interface AgyStepUpdate {
 export interface AgyStreamLine {
   event?: string;
   conversation_id?: string;
+  /**
+   * Top-level `--output-format json` envelope fields — that mode emits one
+   * record without a result event, so the fields are honored directly.
+   */
+  response?: string;
+  duration_seconds?: number;
+  usage?: AgyUsage;
   init?: { model?: string; cwd?: string };
   step_update?: AgyStepUpdate;
   result?: {
@@ -146,10 +153,30 @@ export function appendStreamChunk(
   return { lines, lineBuffer: remainder };
 }
 
+function capResponse(response: string): string {
+  return response.length > MAX_RESPONSE_CHARS
+    ? response.slice(0, MAX_RESPONSE_CHARS) + "\n\n(response truncated)"
+    : response;
+}
+
 export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult): AgyRunResult {
   const next = { ...current };
 
   if (typeof parsed.conversation_id === "string") next.conversation_id = parsed.conversation_id;
+
+  // `--output-format json` produces one record with top-level envelope
+  // fields; honor them so non-streaming payloads of any size accumulate
+  // in-stream instead of falling back to the bounded raw capture.
+  if (typeof parsed.response === "string") {
+    next.response = capResponse(parsed.response);
+    next.response_complete = true;
+  }
+  if (typeof parsed.duration_seconds === "number" && Number.isFinite(parsed.duration_seconds)) {
+    next.duration_seconds = parsed.duration_seconds;
+  }
+  if (typeof parsed.usage === "object" && parsed.usage !== null) {
+    next.usage = parsed.usage;
+  }
 
   const step = parsed.step_update;
   if (typeof step?.conversation_id === "string") next.conversation_id = step.conversation_id;
@@ -159,10 +186,7 @@ export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult
       next.conversation_id = parsed.result.conversation_id;
     }
     if (typeof parsed.result.response === "string") {
-      next.response =
-        parsed.result.response.length > MAX_RESPONSE_CHARS
-          ? parsed.result.response.slice(0, MAX_RESPONSE_CHARS) + "\n\n(response truncated)"
-          : parsed.result.response;
+      next.response = capResponse(parsed.result.response);
       next.response_complete = true;
     }
     if (typeof parsed.result.usage === "object" && parsed.result.usage !== null) {

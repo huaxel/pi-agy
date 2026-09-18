@@ -83,9 +83,10 @@ export interface AgyOptions {
 }
 
 const PREFLIGHT_TIMEOUT_MS = 10_000;
-// Raw stdout capture bound; only used as the non-streaming fallback — the
-// stream-json path accumulates results incrementally and is not capped by it.
-const MAX_CAPTURE_BYTES = 64 * 1024;
+// Raw stdout capture bound; only the non-streaming/parse-failure fallback —
+// the stream-json path accumulates results incrementally and is not capped by
+// it. Large enough that plain-text fallbacks rarely truncate.
+const MAX_CAPTURE_BYTES = 1024 * 1024;
 // Preview/experimental model ids must never win catalog resolution implicitly.
 const UNSTABLE_MODEL_PATTERN =
   /(?:^|[-_.])(?:preview|experimental|beta|alpha|rc\d*|snapshot|next)(?:$|[-_.])/i;
