@@ -861,11 +861,17 @@ async function runPreflightCommand(
         } else {
           const msg = Buffer.concat(stderr).toString("utf8").trim();
           const status = `exit ${code}`;
+          // A failing --version probe usually means the CLI is present but
+          // not authenticated; every failure names the check that failed.
           const authHint =
             args[0] === "--version"
-              ? "Antigravity CLI is not authenticated or not working"
-              : "agy connectivity check failed";
-          reject(new Error(`${authHint} (${status}). ${msg || "Run 'agy' interactively to authenticate."}`));
+              ? " — Antigravity CLI is not authenticated or not working"
+              : "";
+          reject(
+            new Error(
+              `${label} failed${authHint} (${status}). ${msg || "Run 'agy' interactively to authenticate."}`,
+            ),
+          );
         }
       });
     });
@@ -935,6 +941,7 @@ function spawnAgyInternal(
     const stderr: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let stdoutTruncated = false;
     let lineBuffer = "";
     let runResult: AgyRunResult = { response: "" };
     const decoder = new StringDecoder("utf8");
@@ -949,7 +956,11 @@ function spawnAgyInternal(
     };
 
     child.stdout.on("data", (d: Buffer) => {
+      const before = stdoutBytes;
       stdoutBytes = appendBounded(stdout, stdoutBytes, d);
+      // The raw buffer is only a fallback; flag overflow so a verbatim
+      // response is never served as silently truncated text.
+      if (before + d.length > stdoutBytes) stdoutTruncated = true;
       processStdoutText(decoder.write(d));
     });
 
@@ -1015,7 +1026,13 @@ function spawnAgyInternal(
 
         // agy writes diagnostics to stderr even on successful runs. Keep it
         // out of the response so JSON/stream parsing remains deterministic.
-        resolve(finalizeRunResult(out, runResult));
+        const finalized = finalizeRunResult(out, runResult);
+        // Only responses served verbatim from the bounded raw capture can be
+        // incomplete; anything parsed from a record was delivered in full.
+        if (stdoutTruncated && !finalized.response_complete) {
+          finalized.response += `\n\n(raw stdout capture was truncated at the ${MAX_CAPTURE_BYTES / 1024} KB fallback bound)`;
+        }
+        resolve(finalized);
       });
     });
   });

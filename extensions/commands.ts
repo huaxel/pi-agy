@@ -137,7 +137,10 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
           ...MODEL_KEYS.map((k) => ({ value: k, label: k })),
           ...(tokens[0] === "usage" || tokens[0] === "quota"
             ? []
-            : [{ value: "continue", label: "continue" }]),
+            : [
+                { value: "continue", label: "continue" },
+                { value: "timeout=10m", label: "timeout=10m" },
+              ]),
         ];
       }
       if (
@@ -153,7 +156,9 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       if (tokens.length <= 1) {
         const modes = MODE_KEYS.filter((m) => m.startsWith(tokens[0] ?? ""));
         const models = MODEL_KEYS.filter((k) => k.startsWith(p));
-        const extras = ["continue", "sessions", "usage", "quota"].filter((k) => k.startsWith(p));
+        const extras = ["continue", "sessions", "usage", "quota", "timeout=10m"].filter((k) =>
+          k.startsWith(p),
+        );
         return [
           ...modes.map((m) => ({ value: m, label: m })),
           ...models.map((m) => ({ value: m, label: m })),
@@ -389,5 +394,5 @@ function describeWhen(iso: string): string {
 }
 
 function optionKey(option: string): string {
-  return option.split(" — ")[0] ?? option;
+  return option.split(" — ")[0];
 }

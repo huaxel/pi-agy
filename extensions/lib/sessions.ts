@@ -174,6 +174,9 @@ export function createSessionStore(
         try {
           const lockStat = await statFile(lockPath);
           if (Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
+            // Same irreducible stat→rm race as the dir lock in lock.ts; the
+            // critical section here is a single fast read-modify-write, so
+            // the 30 s staleness margin dwarfs the window. Accepted cost.
             await rm(lockPath, { recursive: true, force: true });
             continue;
           }

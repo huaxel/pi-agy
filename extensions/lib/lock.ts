@@ -67,6 +67,12 @@ async function withFileLock<T>(
       try {
         const lockStat = await statFile(lockPath);
         if (Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
+          // Stale recovery has an irreducible stat→rm race: another process
+          // can recover the same stale lock in between and install a fresh
+          // one that this rm then deletes, briefly admitting two holders.
+          // The heartbeat keeps live locks fresh, the owner check on release
+          // limits the damage, and the window is a single await wide — an
+          // accepted cost for a best-effort agent-serialization lock.
           await rm(lockPath, { recursive: true, force: true });
           continue;
         }

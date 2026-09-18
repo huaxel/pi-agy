@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.5.2
+
+- Deliver large streamed result records intact: the per-record bound now fits a maximum-size response (1M chars with worst-case JSON escaping) instead of discarding records over 256 KB mid-stream.
+- Mark responses served from the raw stdout fallback when the 64 KB capture bound truncated them.
+- Record both sides of pre-existing staged renames/copies in the git baseline so they are never attributed to agy as newly-dirty files.
+- Require Node.js >= 20.3.0 (`AbortSignal.any`).
+- Name the failing check in preflight exit-code errors (health, connectivity, version, usage) instead of a hardcoded connectivity hint.
+- Validate the `agy_usage` working directory before spawning so a bad `dir` is not misreported as a missing Antigravity CLI installation.
+- Document that `new_session: false` resumes the last recorded conversation in the tool schema the model sees.
+- Stop caching negative `just` binary probes mid-session; installing `just` is now picked up without a restart.
+- Offer `timeout=10m` in `/agy` argument completions.
+- Document the irreducible stale-lock recovery race in both lock implementations.
+
+## 0.5.1
 
 - Add an `agy_usage` tool and `/agy usage` command for model-specific quota and reset discovery.
 - Refresh read-only agy usage data before executions and include the snapshot in results when available; unsupported older CLIs remain best effort.

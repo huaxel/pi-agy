@@ -76,15 +76,17 @@ async function hasJustCi(cwd: string): Promise<boolean> {
 let justBinaryProbe: Promise<boolean> | undefined;
 
 async function justBinaryAvailable(): Promise<boolean> {
-  justBinaryProbe ??= (async () => {
-    try {
-      await execFileAsync("just", ["--version"], { timeout: 5_000 });
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  return justBinaryProbe;
+  // Cache only while positive: `just` may be installed mid-session, and a
+  // failed probe is cheap (ENOENT fails without actually spawning a process).
+  if (!justBinaryProbe) {
+    justBinaryProbe = execFileAsync("just", ["--version"], { timeout: 5_000 }).then(
+      () => true,
+      () => false,
+    );
+  }
+  const available = await justBinaryProbe;
+  if (!available) justBinaryProbe = undefined;
+  return available;
 }
 
 /** Python projects: `uv run pytest` when pyproject uses uv and references pytest. */

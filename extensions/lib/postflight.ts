@@ -25,9 +25,23 @@ export async function captureGitBaseline(cwd: string, signal?: AbortSignal): Pro
     for (const line of stdout.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      // Porcelain v1: XY <path>[ -> <orig>]. Keep the raw path token(s).
+      // Porcelain v1: XY <path>[ -> <orig>]. Rename/copy entries print
+      // `ORIG -> NEW` while `diff --name-only` reports only NEW, so record
+      // both sides — otherwise a pre-existing rename looks newly-dirty
+      // after the run and is misattributed to agy.
+      const status = trimmed.slice(0, 2);
       const file = trimmed.slice(3).trim();
-      if (file) dirtyFiles.add(file);
+      if (!file) continue;
+      const isRenameOrCopy = status.includes("R") || status.includes("C");
+      const arrow = file.indexOf(" -> ");
+      if (isRenameOrCopy && arrow !== -1) {
+        const orig = file.slice(0, arrow).trim();
+        const renamed = file.slice(arrow + " -> ".length).trim();
+        if (orig) dirtyFiles.add(orig);
+        if (renamed) dirtyFiles.add(renamed);
+      } else {
+        dirtyFiles.add(file);
+      }
     }
     return { dirtyFiles, unavailable: false };
   } catch {

@@ -94,10 +94,13 @@ export function formatStepProgress(parsed: AgyStreamLine): string | null {
 }
 
 export const MAX_RESPONSE_CHARS = 1_000_000;
-// A single JSONL record without a newline is almost certainly a runaway or
-// hostile producer. Discard it with a warning instead of growing memory
-// without bound.
-export const MAX_STREAM_LINE_BYTES = 256 * 1024;
+// One JSONL record is bounded at the largest legitimate result event:
+// MAX_RESPONSE_CHARS with worst-case JSON escaping (\uXXXX = 6 bytes per
+// char) plus envelope headroom. A record that grows past this is either
+// malfunctioning or hostile, so it is discarded with a warning — the bound
+// applies equally to terminated records and to an unterminated buffer,
+// because a legitimate large result is itself unterminated while it streams.
+export const MAX_STREAM_LINE_BYTES = 8 * 1024 * 1024;
 
 export interface StreamChunk {
   /** Complete newline-terminated records ready to parse. */

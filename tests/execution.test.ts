@@ -98,6 +98,45 @@ describe("extension registration", () => {
       assert.match(result.content[0].text, /selected model .*exhausted/);
     }, 0, 0, "", "", usage);
   });
+
+  it("validates the agy_usage working directory before spawning", async () => {
+    type UsageTool = {
+      execute: (...args: any[]) => Promise<unknown>;
+    };
+    let usageTool: UsageTool | undefined;
+    const fakePi = {
+      registerCommand: () => {},
+      registerTool: (tool: { name: string; execute?: (...args: any[]) => Promise<any> }) => {
+        if (tool.name === "agy_usage" && tool.execute) {
+          usageTool = tool as unknown as UsageTool;
+        }
+      },
+    };
+    piAgyExtension(fakePi as unknown as ExtensionAPI);
+    assert.ok(usageTool);
+
+    // A missing dir must not be misreported as a missing CLI installation.
+    await assert.rejects(
+      usageTool!.execute(
+        "usage-dir-1",
+        { dir: "/nonexistent/pi-agy-missing-dir" },
+        undefined,
+        undefined,
+        { cwd: process.cwd() },
+      ),
+      /Working directory does not exist: /,
+    );
+    await assert.rejects(
+      usageTool!.execute(
+        "usage-dir-2",
+        { dir: "package.json" },
+        undefined,
+        undefined,
+        { cwd: process.cwd() },
+      ),
+      /Working directory is not a directory: /,
+    );
+  });
 });
 
 
@@ -248,6 +287,28 @@ describe("shared executor", () => {
         undefined,
       );
       assert.equal(result.text, response);
+    });
+  });
+
+  it("marks responses served from a truncated raw stdout capture", async () => {
+    // No result record and more than the 64 KB raw capture bound: the
+    // verbatim fallback must disclose the truncation instead of serving
+    // silently cut text.
+    const raw = "x".repeat(80_000) + "\n";
+    await withFakeAgy(raw, async () => {
+      resetPreflightCache();
+      const result = await executeAgyTask(
+        {
+          prompt: "emit plain text",
+          mode: "plan",
+          dir: process.cwd(),
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: true,
+        },
+        undefined,
+      );
+      assert.match(result.text, /\(raw stdout capture was truncated at the 64 KB fallback bound\)$/);
     });
   });
 

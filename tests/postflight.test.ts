@@ -29,7 +29,7 @@ import { executeAgyTask } from "../extensions/lib/execute.js";
 import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withDirLock } from "../extensions/lib/lock.js";
 import { detectVerifyCommand } from "../extensions/lib/verify.js";
-import { summarizeGitDiff } from "../extensions/lib/postflight.js";
+import { summarizeGitDiff, captureGitBaseline, summarizeGitDiffSince } from "../extensions/lib/postflight.js";
 import { loadAgyConfig, resetDefaultModelCache, resolveDefaultModel } from "../extensions/lib/config.js";
 import {
   accumulateRunResult,
@@ -74,6 +74,33 @@ describe("summarizeGitDiff", () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-diff-"));
     await execAsync("git", ["init", "-q"], { cwd: tmp });
     assert.equal(await summarizeGitDiff(tmp), null);
+  });
+
+  it("attributes pre-existing staged renames to the baseline, not agy", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-rename-"));
+    await execAsync("git", ["init", "-q"], { cwd: tmp });
+    await execAsync("git", ["config", "user.email", "t@t"], { cwd: tmp });
+    await execAsync("git", ["config", "user.name", "t"], { cwd: tmp });
+    await writeFile(path.join(tmp, "old.txt"), "before\n");
+    await execAsync("git", ["add", "old.txt"], { cwd: tmp });
+    await execAsync("git", ["commit", "-qm", "initial"], { cwd: tmp });
+    await execAsync("git", ["mv", "old.txt", "new.txt"], { cwd: tmp });
+
+    // `git status --porcelain` prints `R  old.txt -> new.txt`, while
+    // `diff --name-only` lists only new.txt — both sides must be recorded.
+    const baseline = await captureGitBaseline(tmp);
+    assert.equal(baseline.unavailable, false);
+    assert.ok(baseline.dirtyFiles.has("old.txt"), "baseline keeps the original name");
+    assert.ok(baseline.dirtyFiles.has("new.txt"), "baseline keeps the new name");
+    assert.equal(baseline.dirtyFiles.has("old.txt -> new.txt"), false);
+
+    // agy then touches an unrelated file; the rename must not look new.
+    await writeFile(path.join(tmp, "agy-made.txt"), "agy\n");
+    const diff = await summarizeGitDiffSince(baseline, tmp);
+    assert.deepEqual(diff.newFiles, ["agy-made.txt"]);
+    assert.ok(diff.preexistingFiles.includes("new.txt"));
+    assert.ok(!diff.preexistingFiles.includes("agy-made.txt"));
+    assert.match(diff.summary!, /pre-existing dirty files/);
   });
 
   it("propagates cancellation while collecting the diff", async () => {

@@ -106,6 +106,46 @@ describe("appendStreamChunk", () => {
     assert.equal(state.lineBuffer, "");
     assert.equal(warnings.length, 1);
   });
+
+  it("delivers large terminated result records intact", () => {
+    // A response past the old 256 KB bound must survive the chunker and
+    // accumulate fully — MAX_RESPONSE_CHARS allows up to 1M chars.
+    const bigResponse = "x".repeat(300_000);
+    const record =
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "id-big", response: bigResponse, status: "SUCCESS" },
+      }) + "\n";
+    const warnings: string[] = [];
+    const state = appendStreamChunk("", record, (message) => warnings.push(message));
+    assert.equal(state.lines.length, 1);
+    assert.deepEqual(warnings, []);
+    const out = accumulateRunResult(parseStreamLine(state.lines[0]!)!, { response: "" });
+    assert.equal(out.response, bigResponse);
+    assert.equal(out.conversation_id, "id-big");
+  });
+
+  it("buffers a large record across chunks until its newline arrives", () => {
+    // While streaming, a legitimate record is unterminated for many chunks;
+    // the bound must not drop it mid-growth.
+    const record = JSON.stringify({ result: { response: "y".repeat(280_000) } });
+    const warnings: string[] = [];
+    const lines: string[] = [];
+    let buffer = "";
+    for (let index = 0; index < record.length; index += 65_536) {
+      const state = appendStreamChunk(buffer, record.slice(index, index + 65_536), (m) =>
+        warnings.push(m),
+      );
+      lines.push(...state.lines);
+      buffer = state.lineBuffer;
+    }
+    const final = appendStreamChunk(buffer, "\n", (m) => warnings.push(m));
+    lines.push(...final.lines);
+    assert.equal(lines.length, 1);
+    assert.deepEqual(warnings, []);
+    const out = accumulateRunResult(parseStreamLine(lines[0]!)!, { response: "" });
+    assert.equal(out.response.length, 280_000);
+  });
 });
 
 describe("stream parser", () => {

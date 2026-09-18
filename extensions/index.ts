@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { stat } from "node:fs/promises";
 import * as path from "node:path";
 
 import {
@@ -122,7 +123,8 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       ),
       new_session: Type.Optional(
         Type.Boolean({
-          description: "Force a fresh agy conversation (default when no conversation_id/continue).",
+          description:
+            "Force a fresh agy conversation (default when no conversation_id/continue). Explicit false resumes the last recorded conversation for the directory.",
         }),
       ),
       stream: Type.Optional(
@@ -224,6 +226,19 @@ export default function piAgyExtension(pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const cwd = params.dir ? path.resolve(ctx.cwd, params.dir) : ctx.cwd;
+      if (params.dir) {
+        // Validate the override before spawning so a bad dir is not
+        // misreported as a missing Antigravity CLI installation.
+        try {
+          const info = await stat(cwd);
+          if (!info.isDirectory()) throw new Error(`Working directory is not a directory: ${cwd}`);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            throw new Error(`Working directory does not exist: ${cwd}`);
+          }
+          throw error;
+        }
+      }
       const quota = await checkAgyUsage(cwd, signal);
       const selectedModel = params.model ? resolveAgyModelId(params.model) : undefined;
       const selectedEntries = selectedModel ? findAgyQuotaEntries(quota, selectedModel) : [];

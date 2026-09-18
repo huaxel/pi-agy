@@ -58,18 +58,20 @@ describe("/agy command", () => {
     assert.ok(getCompletions);
 
     const bare = getCompletions!("")!.map((c) => c.value);
-    for (const expected of ["plan", "flash", "sonnet", "continue", "sessions"]) {
+    for (const expected of ["plan", "flash", "sonnet", "continue", "sessions", "timeout=10m"]) {
       assert.ok(bare.includes(expected), `missing completion: ${expected}`);
     }
 
     const afterMode = getCompletions!("plan ")!.map((c) => c.value);
     assert.ok(afterMode.includes("flash-medium"));
     assert.ok(afterMode.includes("continue"));
+    assert.ok(afterMode.includes("timeout=10m"));
     assert.ok(!afterMode.includes("plan"));
 
     const afterUsage = getCompletions!("usage f")!.map((c) => c.value);
     assert.ok(afterUsage.includes("flash-medium"));
     assert.ok(!afterUsage.includes("sonnet"));
+    assert.ok(!afterUsage.includes("timeout=10m"));
 
     assert.equal(getCompletions!("plan flash review the diff"), null);
   });
