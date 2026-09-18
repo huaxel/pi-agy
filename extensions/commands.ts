@@ -1,6 +1,12 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import { isAgyModel, resolveAgyModelId, type AgyModel } from "./lib/cli.js";
+import {
+  checkAgyUsage,
+  formatAgyUsage,
+  isAgyModel,
+  resolveAgyModelId,
+  type AgyModel,
+} from "./lib/cli.js";
 import { executeAgyTask } from "./lib/execute.js";
 import { truncate } from "./lib/output.js";
 import { describePreRunDirt } from "./lib/postflight.js";
@@ -116,21 +122,38 @@ interface InteractiveRun {
 export function registerAgyCommand(pi: ExtensionAPI): void {
   pi.registerCommand("agy", {
     description:
-      "Run agy directly: /agy [mode] [model] [continue] [timeout=10m] <prompt>, or /agy sessions to resume a prior conversation.",
+      "Run agy directly: /agy [mode] [model] [continue] [timeout=10m] <prompt>; use /agy usage to inspect model quotas.",
     getArgumentCompletions: (prefix: string) => {
       const tokens = prefix.trim().split(/\s+/).filter(Boolean);
       const p = prefix.toLowerCase();
 
-      if (tokens.length === 1 && MODE_KEYS.includes(tokens[0] as (typeof MODE_KEYS)[number])) {
+      if (
+        tokens.length === 1 &&
+        (MODE_KEYS.includes(tokens[0] as (typeof MODE_KEYS)[number]) ||
+          tokens[0] === "usage" ||
+          tokens[0] === "quota")
+      ) {
         return [
           ...MODEL_KEYS.map((k) => ({ value: k, label: k })),
-          { value: "continue", label: "continue" },
+          ...(tokens[0] === "usage" || tokens[0] === "quota"
+            ? []
+            : [{ value: "continue", label: "continue" }]),
         ];
+      }
+      if (
+        tokens.length === 2 &&
+        (tokens[0] === "usage" || tokens[0] === "quota")
+      ) {
+        const partial = prefix.endsWith(" ") ? "" : tokens[1].toLowerCase();
+        return MODEL_KEYS.filter((key) => key.startsWith(partial)).map((key) => ({
+          value: key,
+          label: key,
+        }));
       }
       if (tokens.length <= 1) {
         const modes = MODE_KEYS.filter((m) => m.startsWith(tokens[0] ?? ""));
         const models = MODEL_KEYS.filter((k) => k.startsWith(p));
-        const extras = ["continue", "sessions"].filter((k) => k.startsWith(p));
+        const extras = ["continue", "sessions", "usage", "quota"].filter((k) => k.startsWith(p));
         return [
           ...modes.map((m) => ({ value: m, label: m })),
           ...models.map((m) => ({ value: m, label: m })),
@@ -145,8 +168,19 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
         return;
       }
 
-      if (args.trim().toLowerCase() === "sessions") {
+      const command = args.trim().toLowerCase();
+      if (command === "sessions") {
         await runSessionsPicker(ctx);
+        return;
+      }
+      const usageMatch = /^(?:usage|quota)(?:\s+(\S+))?$/.exec(command);
+      if (usageMatch) {
+        const requestedModel = usageMatch[1] ? MODEL_ALIASES[usageMatch[1]] : undefined;
+        if (usageMatch[1] && !requestedModel) {
+          ctx.ui.notify(`agy: unknown model alias '${usageMatch[1]}'`, "error");
+          return;
+        }
+        await showUsage(ctx, requestedModel);
         return;
       }
 
@@ -195,6 +229,22 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       });
     },
   });
+}
+
+/** `/agy usage` — show model quotas without starting an agent turn. */
+async function showUsage(
+  ctx: ExtensionCommandContext,
+  model?: AgyModel,
+): Promise<void> {
+  try {
+    await ctx.waitForIdle();
+    const snapshot = await checkAgyUsage(ctx.cwd, ctx.signal);
+    const report = formatAgyUsage(snapshot, model ? resolveAgyModelId(model) : undefined);
+    ctx.ui.notify(report ?? "agy quota information is unavailable in this CLI version", report ? "info" : "warning");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`agy usage check failed: ${message}`, "error");
+  }
 }
 
 /** `/agy sessions` — pick a recorded conversation and resume it with a follow-up. */

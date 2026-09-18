@@ -2,7 +2,15 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import * as path from "node:path";
 
-import { resolveAgyModelAlias, resolveAgyModelId, type AgyModel } from "./lib/cli.js";
+import {
+  checkAgyUsage,
+  findAgyQuotaEntries,
+  formatAgyUsage,
+  isAgyQuotaExhausted,
+  resolveAgyModelAlias,
+  resolveAgyModelId,
+  type AgyModel,
+} from "./lib/cli.js";
 import { describePreRunDirt } from "./lib/postflight.js";
 import { registerAgyCommand } from "./commands.js";
 import {
@@ -40,6 +48,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       "Use gpt-oss when an open-model alternative is specifically desired.",
       "For consequential work, use one family to produce and the opposite family to cross-review in mode=plan; do not spend both quota groups on trivial tasks.",
       "Reuse conversation_id or continue=true for multi-step plan→implement→review handoffs.",
+      "Use agy_usage before choosing a model when quota availability matters; agy_execute also refreshes and returns a quota snapshot.",
       "Batch related work, prefer digest output for non-write calls, and avoid parallel agy_execute calls within one shared-quota group or directory.",
       "Always review the git diff and run just ci (or the project gate) after agy_execute with mode=accept-edits.",
       "Never use agy for irreversible production changes.",
@@ -180,6 +189,65 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: truncate(result.text || "(empty response)") }],
         details: result.details,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "agy_usage",
+    label: "Antigravity Quota",
+    description:
+      "Read the current model-specific Antigravity quota and reset information without spending a model turn.",
+    promptSnippet: "Inspect Antigravity model quotas before choosing a model",
+    parameters: Type.Object({
+      model: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("flash-low"),
+            Type.Literal("flash-medium"),
+            Type.Literal("flash-high"),
+            Type.Literal("pro-low"),
+            Type.Literal("pro-high"),
+            Type.Literal("sonnet"),
+            Type.Literal("opus"),
+            Type.Literal("gpt-oss"),
+          ],
+          { description: "Optional model alias to place first in the report." },
+        ),
+      ),
+      dir: Type.Optional(
+        Type.String({
+          description: "Working directory used for the agy CLI check. Defaults to current project root.",
+        }),
+      ),
+    }),
+
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const cwd = params.dir ? path.resolve(ctx.cwd, params.dir) : ctx.cwd;
+      const quota = await checkAgyUsage(cwd, signal);
+      const selectedModel = params.model ? resolveAgyModelId(params.model) : undefined;
+      const selectedEntries = selectedModel ? findAgyQuotaEntries(quota, selectedModel) : [];
+      const quotaStatus = selectedModel
+        ? selectedEntries.length === 0
+          ? "unknown"
+          : selectedEntries.some((entry) => isAgyQuotaExhausted(entry))
+            ? "exhausted"
+            : "available"
+        : undefined;
+      const quotaReport =
+        formatAgyUsage(quota, selectedModel) ??
+        "agy quota information is unavailable in this CLI version or account configuration";
+      const report = quotaStatus
+        ? `selected model ${selectedModel}: ${quotaStatus}\n\n${quotaReport}`
+        : quotaReport;
+      return {
+        content: [{ type: "text", text: report }],
+        details: {
+          cwd,
+          selected_model: selectedModel,
+          quota_status: quotaStatus,
+          quota,
+        },
       };
     },
   });

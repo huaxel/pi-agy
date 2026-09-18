@@ -19,7 +19,8 @@ pi install npm:@juanbenjumea/pi-agy
 | Conversation resume | None | `conversation_id`, `continue`, session store, `/agy sessions` picker |
 | Verify injection | `npm test` only | `just ci` first, then `npm test`/`uv run pytest` |
 | Post-write summary | None | Appends `git diff --stat` for newly-dirty files only; pre-existing dirt is listed separately |
-| Preflight | Every call | Cached 5 min per process; also refreshes the model catalog |
+| Preflight | Every call | Health/model checks cached 5 min per process; model quotas refresh every minute |
+| Quota discovery | None | Read-only `/usage` probe exposes model-specific remaining quota and reset times to agents |
 | Concurrency | Unlocked | Per-directory lock (in-process + filesystem, symlink-aware), lock wait counts against the timeout |
 | Transient failures | Fatal | One retry when agy fails before doing any work |
 | Cancellation | Direct child only | Full process-tree kill on cancel/timeout via detached process groups |
@@ -37,6 +38,18 @@ Auth is unchanged: existing `agy` OAuth (`~/.gemini/oauth_creds.json`).
 | `stream` | Use `stream-json` (default `true`) |
 | `mode` | `accept-edits` by default; use `plan` for exploration/review |
 
+`agy_execute` refreshes quota information before each run (best effort) and
+returns it in `details.quota`/`details.quota_status` and the response when
+the CLI exposes structured model records. Use the separate `agy_usage` tool
+when choosing a model before execution. If the selected model is explicitly
+reported as exhausted, the run stops before spending another agent turn and
+reports the reset information.
+Use `agy_usage` with `model` (for example `model=sonnet`) for a targeted
+`available`/`exhausted`/`unknown` status. Older agy versions that do not support
+headless `/usage` continue without failing the task. The extension requires
+agy 1.1.11+ before invoking `/usage`; older versions are refused safely because
+that command could otherwise consume model quota as a prompt.
+
 ## Human-callable `/agy` command
 
 Run agy directly from the Pi TUI — fast path when fully specified, wizard otherwise:
@@ -49,6 +62,7 @@ Run agy directly from the Pi TUI — fast path when fully specified, wizard othe
 /agy continue fix the tests         # continue this directory's last conversation
 /agy timeout=10m sonnet big task    # raise the run cap (also 90s / 1500ms; bare = minutes)
 /agy sessions                       # pick a recorded conversation to resume
+/agy usage                          # inspect model quotas and reset times
 ```
 
 Leading option tokens (`plan`, a model alias, `continue`, `timeout=…`) are
@@ -65,7 +79,8 @@ Missing pieces open interactive dialogs (mode select, model select with
 descriptions, multi-line task editor). `accept-edits` asks for confirmation
 before writing. The command then runs agy directly with the selected parameters;
 progress is shown in the (throttled) status bar and the final response is
-notified — no second LLM turn or custom TUI surface.
+notified — no second LLM turn or custom TUI surface. `/agy usage` performs the
+same read-only quota check without starting a model turn.
 
 ## Config
 

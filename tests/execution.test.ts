@@ -58,14 +58,115 @@ describe("extension registration", () => {
     };
     piAgyExtension(fakePi as unknown as ExtensionAPI);
     assert.deepEqual(commands, ["agy"]);
-    assert.equal(tools.length, 1);
+    assert.equal(tools.length, 2);
     assert.equal(tools[0].name, "agy_execute");
+    assert.equal(tools[1].name, "agy_usage");
     assert.ok(tools[0].parameters);
+    assert.ok(tools[1].parameters);
+  });
+
+  it("reports targeted quota status through agy_usage", async () => {
+    type UsageTool = {
+      execute: (...args: any[]) => Promise<{
+        content: Array<{ text: string }>;
+        details: { quota_status?: string };
+      }>;
+    };
+    let usageTool: UsageTool | undefined;
+    const fakePi = {
+      registerCommand: () => {},
+      registerTool: (tool: { name: string; execute?: (...args: any[]) => Promise<any> }) => {
+        if (tool.name === "agy_usage" && tool.execute) {
+          usageTool = tool as unknown as UsageTool;
+        }
+      },
+    };
+    piAgyExtension(fakePi as unknown as ExtensionAPI);
+    const usage = JSON.stringify({
+      quotas: [{ model: "claude-sonnet-4-6", remainingPercent: 0 }],
+    });
+    await withFakeAgy("{}", async () => {
+      resetPreflightCache();
+      const result = await usageTool!.execute(
+        "usage-1",
+        { model: "sonnet" },
+        undefined,
+        undefined,
+        { cwd: process.cwd() },
+      );
+      assert.equal(result.details.quota_status, "exhausted");
+      assert.match(result.content[0].text, /selected model .*exhausted/);
+    }, 0, 0, "", "", usage);
   });
 });
 
 
 describe("shared executor", () => {
+  it("includes refreshed model quota in the result", async () => {
+    const raw =
+      JSON.stringify({ event: "result", result: { response: "quota-aware", status: "SUCCESS" } }) +
+      "\n";
+    const usage = JSON.stringify({
+      quotas: [
+        {
+          model: "gemini-3.8-flash-medium",
+          remainingFraction: 0.42,
+          resetTime: "2030-01-02T03:04:05Z",
+        },
+      ],
+    });
+    await withFakeAgy(raw, async () => {
+      resetPreflightCache();
+      const result = await executeAgyTask(
+        {
+          prompt: "inspect quota before working",
+          model: "flash-medium",
+          mode: "plan",
+          dir: process.cwd(),
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: true,
+        },
+        undefined,
+      );
+
+      assert.equal(result.details.quota?.models[0]?.remaining_fraction, 0.42);
+      assert.equal(result.details.quota_status, "available");
+      assert.match(result.text, /agy quota snapshot/);
+      assert.match(result.text, /42% remaining/);
+    }, 0, 0, "", "", usage);
+  });
+
+  it("fails clearly when the selected model quota is exhausted", async () => {
+    const usage = JSON.stringify({
+      quotas: [
+        { model: "gemini-3.8-flash-medium", window: "five-hour", remainingFraction: 0.5 },
+        { model: "gemini-3.8-flash-medium", window: "weekly", remainingFraction: 0, resetTime: 1_900_000_000 },
+        { model: "claude-sonnet-4-6", window: "five-hour", remainingFraction: 0.8 },
+      ],
+    });
+    await withFakeAgy("", async (bin) => {
+      resetPreflightCache();
+      await assert.rejects(
+        executeAgyTask(
+          {
+            prompt: "do not spend quota",
+            model: "flash-medium",
+            mode: "plan",
+            dir: process.cwd(),
+            timeout_ms: 60_000,
+            new_session: true,
+            stream: true,
+          },
+          undefined,
+        ),
+        /quota exhausted.*gemini-3\.8-flash-medium.*alternatives: claude-sonnet-4-6/s,
+      );
+      const args = await readFakeAgyArgs(bin);
+      assert.equal(args.filter((argv) => argv[0] === "-p").length, 0);
+    }, 0, 0, "", "", usage);
+  });
+
   it("runs agy directly and returns progress plus structured details", async () => {
     const raw =
       JSON.stringify({ event: "result", result: { response: "plan complete", status: "SUCCESS" } }) +

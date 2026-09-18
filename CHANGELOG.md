@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- Add an `agy_usage` tool and `/agy usage` command for model-specific quota and reset discovery.
+- Refresh read-only agy usage data before executions and include the snapshot in results when available; unsupported older CLIs remain best effort.
+- Refresh quota data every minute while retaining five-minute health/model preflight caching.
+- Fix release-candidate model ids such as `rc1` being treated as stable.
+- Honor the documented `quotaBalancing` config flag when loading `agy-config.json`.
+- Fail fast with reset details when usage explicitly reports the selected model is exhausted, including secondary windows such as weekly limits.
+- Accept JSONL quota output from noisy agy CLI versions that support native headless usage.
+- Ignore malformed streamed metadata instead of allowing subprocess JSON to corrupt results.
+- Make stream bounds UTF-8 byte-accurate and decode split multibyte stdout safely.
+- Include available model alternatives when failing fast on an exhausted quota.
+- Normalize explicit percentage quota fields correctly, including fractional percentages.
+- Match quota records across model aliases and human-readable thinking labels without conflating low/medium/high tiers.
+- Add structured `quota_status` metadata (`available`, `exhausted`, or `unknown`) to targeted quota checks, echoed in the readable tool text.
+- Preserve bounded quota-probe failure reasons for troubleshooting instead of reporting only generic unavailability.
+- Add `quota_status` to successful execution details for machine-readable model availability.
+- Match grouped Gemini and Claude/GPT quota pools to concrete model selections without crossing families, preserving nested window names.
+- Recognize grouped/family fields, snake-case exhaustion flags, and relative reset durations.
+- Retry failed quota probes after five seconds while caching successful snapshots for one minute.
+- Refuse to invoke `/usage` on agy versions older than 1.1.11, where it could be interpreted as a model prompt.
+- Group all quota windows for a targeted model at the top of its report.
+- Parse plain-text quota records when a version-gated native usage command returns text, extracting model percentages, requests, tokens, quota windows, and reset hints where possible.
+
 ## 0.5.0
 
 - Fold quota-aware default-model steering into the extension (`quotaBalancing` config + `AGY_DEFAULT_MODEL_*` env tuning); the external `agy-default-model.sh` wrapper is gone.

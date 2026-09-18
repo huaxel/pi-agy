@@ -58,6 +58,17 @@ describe("appendStreamChunk", () => {
     assert.deepEqual(warnings, []);
   });
 
+  it("bounds multibyte records by UTF-8 bytes", () => {
+    const warnings: string[] = [];
+    const state = appendStreamChunk(
+      "",
+      "é".repeat(Math.ceil(MAX_STREAM_LINE_BYTES / 2) + 1),
+      (message) => warnings.push(message),
+    );
+    assert.equal(state.lineBuffer, "");
+    assert.equal(warnings.length, 1);
+  });
+
   it("drops a newline-less runaway with a warning", () => {
     const warnings: string[] = [];
     let state = appendStreamChunk("", "x".repeat(MAX_STREAM_LINE_BYTES + 1), (message) =>
@@ -175,6 +186,25 @@ describe("stream parser", () => {
     const out = finalizeRunResult(raw, { response: "" });
     assert.equal(out.conversation_id, "id-empty");
     assert.equal(out.response, "");
+  });
+
+  it("ignores malformed result field types", () => {
+    const line = parseStreamLine(
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: 42,
+          response: { text: "not a response" },
+          duration_seconds: "slow",
+          usage: "not usage",
+        },
+      }),
+    );
+    const out = accumulateRunResult(line!, { response: "fallback" });
+    assert.equal(out.conversation_id, undefined);
+    assert.equal(out.response, "fallback");
+    assert.equal(out.duration_seconds, undefined);
+    assert.equal(out.usage, undefined);
   });
 });
 

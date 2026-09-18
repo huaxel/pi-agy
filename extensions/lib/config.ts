@@ -70,6 +70,9 @@ export async function loadAgyConfig(
       if (typeof record.defaultModelCommand === "string") {
         config.defaultModelCommand = record.defaultModelCommand;
       }
+      if (typeof record.quotaBalancing === "boolean") {
+        config.quotaBalancing = record.quotaBalancing;
+      }
       if (typeof record.skipPermissions === "boolean") {
         config.skipPermissions = record.skipPermissions;
       } else if ("skipPermissions" in record) {

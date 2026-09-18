@@ -10,9 +10,11 @@ export async function withFakeAgy<T>(
   delayMs = 0,
   failureOutput = "",
   failureConversationId = "",
+  usageOutput = "{}",
 ): Promise<T> {
   const delaySeconds = (delayMs / 1000).toFixed(3);
   const failureEncoded = Buffer.from(failureOutput).toString("base64");
+  const usageEncoded = Buffer.from(usageOutput).toString("base64");
   const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bin-"));
   const encoded = Buffer.from(output).toString("base64");
   await writeFile(
@@ -25,7 +27,11 @@ n=$(cat "$count_file" 2>/dev/null || echo 0)
 echo $((n + 1)) > "$count_file"
 printf '%s\\n' "$@" > "$dir/args-$n"
 case "$1" in
-  --version) echo "agy fake" ;;
+  --version) echo "agy 1.2.0" ;;
+  --output-format)
+    printf '%s' '${usageEncoded}' | base64 --decode
+    echo
+    ;;
   models)
     echo "fake-model"
     echo "gemini-9.9-flash-medium is deprecated, use the latest" >&2

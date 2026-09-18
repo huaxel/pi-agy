@@ -67,6 +67,10 @@ describe("/agy command", () => {
     assert.ok(afterMode.includes("continue"));
     assert.ok(!afterMode.includes("plan"));
 
+    const afterUsage = getCompletions!("usage f")!.map((c) => c.value);
+    assert.ok(afterUsage.includes("flash-medium"));
+    assert.ok(!afterUsage.includes("sonnet"));
+
     assert.equal(getCompletions!("plan flash review the diff"), null);
   });
 

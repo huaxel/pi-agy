@@ -120,7 +120,7 @@ export function appendStreamChunk(
     onProgress?.("agy: warning — discarded oversized stream record", "status");
   const combined = lineBuffer + chunk;
   if (!combined.includes("\n")) {
-    if (combined.length > MAX_STREAM_LINE_BYTES) {
+    if (Buffer.byteLength(combined, "utf8") > MAX_STREAM_LINE_BYTES) {
       warn();
       return { lines: [], lineBuffer: "" };
     }
@@ -128,13 +128,13 @@ export function appendStreamChunk(
   }
   const parts = combined.split("\n");
   let remainder = parts.pop() ?? "";
-  if (remainder.length > MAX_STREAM_LINE_BYTES) {
+  if (Buffer.byteLength(remainder, "utf8") > MAX_STREAM_LINE_BYTES) {
     warn();
     remainder = "";
   }
   const lines: string[] = [];
   for (const line of parts) {
-    if (line.length > MAX_STREAM_LINE_BYTES) {
+    if (Buffer.byteLength(line, "utf8") > MAX_STREAM_LINE_BYTES) {
       warn();
       continue;
     }
@@ -146,23 +146,29 @@ export function appendStreamChunk(
 export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult): AgyRunResult {
   const next = { ...current };
 
-  if (parsed.conversation_id) next.conversation_id = parsed.conversation_id;
-  if (parsed.init && parsed.conversation_id) next.conversation_id = parsed.conversation_id;
+  if (typeof parsed.conversation_id === "string") next.conversation_id = parsed.conversation_id;
 
   const step = parsed.step_update;
-  if (step?.conversation_id) next.conversation_id = step.conversation_id;
+  if (typeof step?.conversation_id === "string") next.conversation_id = step.conversation_id;
 
   if (parsed.result) {
-    if (parsed.result.conversation_id) next.conversation_id = parsed.result.conversation_id;
-    if (parsed.result.response != null) {
+    if (typeof parsed.result.conversation_id === "string") {
+      next.conversation_id = parsed.result.conversation_id;
+    }
+    if (typeof parsed.result.response === "string") {
       next.response =
         parsed.result.response.length > MAX_RESPONSE_CHARS
           ? parsed.result.response.slice(0, MAX_RESPONSE_CHARS) + "\n\n(response truncated)"
           : parsed.result.response;
       next.response_complete = true;
     }
-    if (parsed.result.usage) next.usage = parsed.result.usage;
-    if (parsed.result.duration_seconds != null) {
+    if (typeof parsed.result.usage === "object" && parsed.result.usage !== null) {
+      next.usage = parsed.result.usage;
+    }
+    if (
+      typeof parsed.result.duration_seconds === "number" &&
+      Number.isFinite(parsed.result.duration_seconds)
+    ) {
       next.duration_seconds = parsed.result.duration_seconds;
     }
   }

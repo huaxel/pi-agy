@@ -17,8 +17,12 @@ const execAsync = promisify(execFile);
 
 import {
   buildAgyArgs,
+  checkAgyUsage,
+  findAgyQuotaEntries,
+  formatAgyUsage,
   isStableModelId,
   killProcessTree,
+  parseAgyUsage,
   parseModelCatalog,
   resetModelCatalog,
 } from "../extensions/lib/cli.js";
@@ -172,6 +176,11 @@ echo '{"event":"result","result":{"status":"SUCCESS","response":"late"}}'
 });
 
 describe("model catalog stability", () => {
+  it("rejects release-candidate ids as unstable", () => {
+    assert.ok(!isStableModelId("claude-sonnet-4-6-rc1"));
+    assert.ok(!isStableModelId("gemini-3.8-flash-medium-next"));
+  });
+
   it("ignores preview ids unless explicitly allowed", () => {
     const output = [
       "gemini-3.8-flash-medium\tstable",
@@ -199,6 +208,137 @@ describe("model catalog stability", () => {
     });
     assert.ok(args.includes("--disable-slash-commands"));
     assert.ok(args.includes("/dangerous --mode evil"));
+  });
+});
+
+describe("model quota discovery", () => {
+  it("normalizes model-specific remaining quota and reset time", () => {
+    const snapshot = parseAgyUsage(
+      JSON.stringify({
+        quotas: [
+          {
+            model: "gemini-3.8-flash-medium",
+            window: "five-hour",
+            remainingFraction: 0.25,
+            resetTime: "2030-01-02T03:04:05Z",
+          },
+          {
+            model: "gemini-3.8-flash-medium",
+            window: "weekly",
+            remainingRequests: 12,
+            resetTime: 1_900_000_000,
+          },
+        ],
+      }),
+    );
+    assert.equal(snapshot?.models.length, 2);
+    assert.equal(snapshot?.models[0]?.remaining_fraction, 0.25);
+    assert.equal(snapshot?.models[0]?.reset_at, "2030-01-02T03:04:05Z");
+    assert.equal(snapshot?.models[1]?.remaining_requests, 12);
+    const percentSnapshot = parseAgyUsage(
+      JSON.stringify({ model: "claude-sonnet-4-6", remainingPercent: 0.5 }),
+    );
+    assert.equal(percentSnapshot?.models[0]?.remaining_fraction, 0.005);
+    assert.match(formatAgyUsage(snapshot, "gemini-3.8-flash-medium") ?? "", /25% remaining/);
+    assert.match(formatAgyUsage(snapshot) ?? "", /weekly window/);
+    assert.equal(
+      findAgyQuotaEntries(snapshot, "gemini-3.8-flash-medium").length,
+      2,
+    );
+    const tiered = parseAgyUsage(
+      JSON.stringify([
+        { model: "gemini-3.8-flash-low", remainingPercent: 20 },
+        { model: "gemini-3.8-flash-high", remainingPercent: 80 },
+      ]),
+    );
+    assert.equal(findAgyQuotaEntries(tiered, "gemini-3.8-flash-medium").length, 0);
+    const thinking = parseAgyUsage(
+      JSON.stringify({ model: "Claude Sonnet 4.6 (thinking)", remainingPercent: 25 }),
+    );
+    assert.equal(findAgyQuotaEntries(thinking, "claude-sonnet-4-6").length, 1);
+    const labeled = parseAgyUsage(
+      JSON.stringify({ label: "Gemini 3.8 Flash", remainingFraction: 0.75 }),
+    );
+    assert.equal(labeled?.models[0]?.remaining_fraction, 0.75);
+    const groupedField = parseAgyUsage(
+      JSON.stringify({ group: "GEMINI MODELS", is_exhausted: true, resetsInSeconds: 7_200 }),
+    );
+    assert.equal(groupedField?.models[0]?.remaining_fraction, 0);
+    assert.equal(groupedField?.models[0]?.reset_at, "in 2h");
+    const grouped = parseAgyUsage(
+      JSON.stringify({ groups: { "GEMINI MODELS": { weekly: { remainingFraction: 0 } } } }),
+    );
+    assert.equal(findAgyQuotaEntries(grouped, "gemini-3.8-flash-medium").length, 1);
+    assert.equal(findAgyQuotaEntries(grouped, "gemini-3.8-flash-medium")[0]?.window, "weekly");
+    assert.equal(findAgyQuotaEntries(grouped, "claude-sonnet-4-6").length, 0);
+  });
+
+  it("parses quota records from JSONL output", () => {
+    const snapshot = parseAgyUsage(
+      `diagnostic\n${JSON.stringify({ model: "claude-sonnet-4-6", remainingRequests: 3 })}`,
+    );
+    assert.equal(snapshot?.models[0]?.remaining_requests, 3);
+  });
+
+  it("parses model quotas from plain-text output", () => {
+    const snapshot = parseAgyUsage(
+      "Gemini 3.8 Flash-medium: 0% remaining (five-hour), resets in 2h\n" +
+        "Claude Sonnet 4.6: 12 requests remaining",
+    );
+    assert.equal(snapshot?.models.length, 2);
+    assert.equal(snapshot?.models[0]?.remaining_fraction, 0);
+    assert.equal(snapshot?.models[0]?.window, "five-hour");
+    assert.equal(snapshot?.models[1]?.remaining_requests, 12);
+    const embeddedWindow = parseAgyUsage(
+      "Gemini 3.8 Flash-medium (weekly): 10% remaining",
+    );
+    assert.equal(embeddedWindow?.models[0]?.model, "Gemini 3.8 Flash-medium");
+    assert.equal(embeddedWindow?.models[0]?.window, "weekly");
+    assert.match(formatAgyUsage(snapshot) ?? "", /resets 2h/);
+  });
+
+  it("preserves quota probe failures for diagnostics", () => {
+    assert.match(
+      formatAgyUsage({ fetched_at: new Date().toISOString(), models: [], error: "unsupported" }) ?? "",
+      /quota unavailable: unsupported/,
+    );
+  });
+
+  it("refuses unsafe usage prompts on older agy versions", async () => {
+    const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-usage-version-"));
+    const agy = path.join(bin, "agy");
+    await writeFile(
+      agy,
+      `#!/usr/bin/env bash
+set -eu
+if [ "$1" = "--version" ]; then
+  echo "agy 1.1.10"
+  exit 0
+fi
+if [ "$2" = "/usage" ]; then
+  echo "unsafe usage prompt invoked" >&2
+  exit 99
+fi
+exit 1
+`,
+    );
+    await chmod(agy, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+    try {
+      const snapshot = await checkAgyUsage(bin);
+      assert.match(snapshot?.error ?? "", /requires agy >= 1\.1\.11/);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it("ignores ordinary run envelopes", () => {
+    assert.equal(
+      parseAgyUsage(JSON.stringify({ event: "result", result: { response: "done" } })),
+      undefined,
+    );
   });
 });
 

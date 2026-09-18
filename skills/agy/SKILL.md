@@ -9,8 +9,9 @@ license: MIT
 
 # agy-delegate
 
-Use the `agy_execute` tool to offload large scaffolding, repetitive refactors,
-or exhaustive test generation via the Antigravity CLI.
+Use the `agy_usage` tool to inspect model-specific quota and reset times when
+availability matters, then use `agy_execute` to offload large scaffolding,
+repetitive refactors, or exhaustive test generation via the Antigravity CLI.
 
 ## Prerequisites
 
@@ -41,6 +42,7 @@ agy_execute prompt="Generate exhaustive unit tests for src/auth/" model=flash-lo
 agy_execute prompt="Plan the migration to ESM" model=sonnet mode=plan digest=true
 agy_execute prompt="Implement the approved plan" conversation_id=<id> mode=accept-edits
 agy_execute prompt="Adversarial review the diff" model=opus effort=high mode=plan
+agy_usage
 ```
 
 ## Modes
@@ -68,6 +70,7 @@ agy_execute prompt="Adversarial review the diff" model=opus effort=high mode=pla
 
 ## Enhancements over upstream pi-agy
 
+- **Quota discovery** — `agy_usage` and `/agy usage` report model-specific remaining quota and reset times; executions refresh quota snapshots and return machine-readable `quota_status` as well.
 - **Streaming progress** — live tool steps via `stream-json` and Pi `onUpdate`.
 - **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default).
 - **Repo-aware verify** — prefers `just ci` when a justfile defines `ci:`.

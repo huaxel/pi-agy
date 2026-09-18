@@ -44,10 +44,14 @@ describe("agy config", () => {
   it("reads optional overrides from the agent config", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
     const file = path.join(tmp, "agy-config.json");
-    await writeFile(file, JSON.stringify({ skipPermissions: false, defaultModel: "sonnet" }));
+    await writeFile(
+      file,
+      JSON.stringify({ skipPermissions: false, defaultModel: "sonnet", quotaBalancing: true }),
+    );
     const config = await loadAgyConfig(file);
     assert.equal(config.skipPermissions, false);
     assert.equal(config.defaultModel, "sonnet");
+    assert.equal(config.quotaBalancing, true);
   });
 
   it("returns defaults for missing or malformed config", async () => {

@@ -3,12 +3,17 @@ import { stat } from "node:fs/promises";
 import {
   buildAgyPrompt,
   detectVerifyCommand,
+  findAgyQuotaEntries,
+  formatAgyUsage,
   getAgyConversationId,
+  isAgyQuotaExhausted,
   isTransientAgyFailure,
   resolveAgyModelAlias,
+  resolveAgyModelId,
   spawnAgyStream,
   type AgyEffort,
   type AgyModel,
+  type AgyUsageSnapshot,
 } from "./cli.js";
 import { loadAgyConfig, resolveDefaultModel } from "./config.js";
 import type { AgyUsage } from "./stream.js";
@@ -50,6 +55,9 @@ export interface AgyExecutionDetails {
   duration_seconds?: number;
   changed_files?: string[];
   preexisting_files?: string[];
+  /** Model-specific quota information refreshed before the run, when supported. */
+  quota?: AgyUsageSnapshot;
+  quota_status?: "available" | "unknown";
 }
 
 export interface AgyExecutionResult {
@@ -120,9 +128,36 @@ export async function executeAgyTask(
           verifyCmd,
         );
 
+        let quota: AgyUsageSnapshot | undefined;
+        let quotaStatus: "available" | "unknown" | undefined;
         const run = await runWithTransientRetry(async (trackProgress) => {
           const remainingMs = remainingBudget(startedAt, options.timeout_ms);
-          await runPreflight(options.dir, abortSignal, remainingMs);
+          quota = await runPreflight(options.dir, abortSignal, remainingMs);
+          const selectedModelId = resolveAgyModelId(model, options.tier);
+          const selectedQuotas = findAgyQuotaEntries(quota, selectedModelId);
+          quotaStatus = quota
+            ? selectedQuotas.length === 0
+              ? "unknown"
+              : "available"
+            : undefined;
+          const quotaSummary = quota ? formatAgyUsage(quota, selectedModelId) : undefined;
+          if (quotaSummary) onProgress?.(quotaSummary);
+          if (selectedQuotas.some((entry) => isAgyQuotaExhausted(entry))) {
+            const quotaEntries = quota?.models ?? [];
+            const alternatives = [...new Set(quotaEntries.map((entry) => entry.model))]
+              .filter((candidate) => candidate.toLowerCase() !== selectedModelId.toLowerCase())
+              .filter((candidate) =>
+                quotaEntries
+                  .filter((entry) => entry.model === candidate)
+                  .every((entry) => !isAgyQuotaExhausted(entry)),
+              );
+            const alternativeText = alternatives.length
+              ? ` Available reported alternatives: ${alternatives.join(", ")}.`
+              : " No available alternative was reported.";
+            throw new Error(
+              `agy quota exhausted for ${selectedModelId}; choose another model or run agy_usage first.${alternativeText}\n${quotaSummary ?? ""}`,
+            );
+          }
           const runTimeoutMs = remainingBudget(startedAt, options.timeout_ms);
           // Emitted via onProgress directly: progress tracking (and therefore
           // retry eligibility) must only reflect activity from agy itself.
@@ -159,6 +194,10 @@ export async function executeAgyTask(
         remainingBudget(startedAt, options.timeout_ms);
 
         let text = run.response;
+        const quotaSummary = quota?.models.length
+          ? formatAgyUsage(quota, resolveAgyModelId(model, options.tier))
+          : undefined;
+        if (quotaSummary) text = `${text}\n\n## agy quota snapshot\n${quotaSummary}`;
         let changedFiles: string[] | undefined;
         let preexistingFiles: string[] | undefined;
         if (options.mode === "accept-edits") {
@@ -186,6 +225,8 @@ export async function executeAgyTask(
             duration_seconds: run.duration_seconds,
             changed_files: changedFiles,
             preexisting_files: preexistingFiles,
+            quota,
+            quota_status: quotaStatus,
           },
         };
       },
