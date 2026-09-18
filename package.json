@@ -1,6 +1,6 @@
 {
   "name": "@juanbenjumea/pi-agy",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "Enhanced Antigravity CLI (agy) bridge for Pi — streaming progress, conversation continuity, repo-aware verify, and diff summaries.",
   "type": "module",
   "license": "MIT",
