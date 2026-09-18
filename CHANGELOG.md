@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.7
+
+- Documentation: add a "Timeouts & cancellation" section to the README covering deadline-preserving semantics (delivered results survive, post-run steps skip with notes, conversations stay resumable after timeout/cancel); note the Node >= 20.3 requirement; refresh the upstream-comparison table and skill bullets.
+- Fix the 0.5.0 changelog's test-suite list (there is no `balance` suite; those cases live in `config`).
+
 ## 0.5.6
 
 - Report user cancellations accurately when postflight is cut short: the diff-skip note no longer claims deadline expiry for user-initiated cancels (found in the final adversarial pass).
@@ -71,7 +76,7 @@
 - Ignore preview/experimental model ids in live catalog resolution unless `PI_AGY_ALLOW_PREVIEW=1`.
 - Ship a publishable `LICENSE`, add `typecheck`/`pack:check` scripts, and verify the packed tarball contents.
 - Add `tests/regression.test.ts`: fake-agy cancel/timeout/malformed-JSONL integration, a grandchild file-write proof that tree-kill stops nested writers, preview filtering, stream bounds, baseline diff attribution, symlink lock sharing, and artifact checks.
-- Split the monolithic `tests/cli.test.ts` into focused suites (`cli-args`, `verify`, `stream`, `postflight`, `execution`, `command`, `config`, `sessions`, `balance`, `lock`) sharing a `tests/helpers.ts` fake-agy harness.
+- Split the monolithic `tests/cli.test.ts` into focused suites (`cli-args`, `verify`, `stream`, `postflight`, `execution`, `command`, `config` — including quota-balancing cases, `sessions`, `lock`) plus `tests/regression.test.ts`, sharing a `tests/helpers.ts` fake-agy harness.
 - Document `PI_AGY_ALLOW_PREVIEW=1` as the explicit opt-in for preview/experimental model ids.
 - Normalize equivalent working-directory paths before locking so concurrent calls cannot bypass serialization.
 

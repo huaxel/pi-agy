@@ -10,22 +10,41 @@ Delegates bulk work to the Antigravity CLI (`agy`) while Pi stays the conductor.
 pi install npm:@juanbenjumea/pi-agy
 ```
 
+Requires Node.js >= 20.3.
+
 ## What's different from upstream 0.3.1
 
 | Feature | Upstream | This fork |
 |---------|----------|-----------|
 | Live progress | Final text only | `stream-json` → Pi `onUpdate` cards |
 | Model aliases | Hardcoded ids | Live `agy models` catalog (newest stable generation wins; preview/experimental ignored), static map fallback |
-| Conversation resume | None | `conversation_id`, `continue`, session store, `/agy sessions` picker |
+| Conversation resume | None | `conversation_id`, `continue`, session store, `/agy sessions` picker — runs that time out or are cancelled are recorded too |
 | Verify injection | `npm test` only | `just ci` first, then `npm test`/`uv run pytest` |
-| Post-write summary | None | Appends `git diff --stat` for newly-dirty files only; pre-existing dirt is listed separately |
+| Post-write summary | None | Appends `git diff --stat` for newly-dirty files only; pre-existing dirt (including renames and unstaged edits) is listed separately and never misattributed |
 | Preflight | Every call | Health/model checks cached 5 min per process; model quotas refresh every minute |
 | Quota discovery | None | Read-only `/usage` probe exposes model-specific remaining quota and reset times to agents |
 | Concurrency | Unlocked | Per-directory lock (in-process + filesystem, symlink-aware), lock wait counts against the timeout |
 | Transient failures | Fatal | One retry when agy fails before doing any work |
-| Cancellation | Direct child only | Full process-tree kill on cancel/timeout via detached process groups |
+| Cancellation | Direct child only | Full process-tree kill on cancel/timeout via detached process groups; a fully delivered result is preserved |
 
 Auth is unchanged: existing `agy` OAuth (`~/.gemini/oauth_creds.json`).
+
+## Timeouts & cancellation
+
+`timeout_ms` (default 5m, max 10m) is a hard parent-side deadline — lock
+waits, preflight probes, and post-run summaries all count against it. When
+it fires, the full agy process group is killed so nested tools cannot
+outlive the run.
+
+The deadline never discards finished work:
+
+- A response that fully arrived before the kill is returned with an
+  explanatory note instead of being thrown away — even if cancellation or
+  the deadline landed between delivery and process exit.
+- Post-run steps cut short by the deadline (the accept-edits diff summary)
+  are skipped with a note rather than failing the run.
+- The conversation id is recorded on timeout and cancellation, so the run
+  stays resumable via `conversation_id`, `/agy continue`, or `/agy sessions`.
 
 ## Tool params (new)
 

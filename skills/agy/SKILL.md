@@ -72,8 +72,8 @@ agy_usage
 
 - **Quota discovery** — `agy_usage` and `/agy usage` report model-specific remaining quota and reset times; executions refresh quota snapshots and return machine-readable `quota_status` as well.
 - **Streaming progress** — live tool steps via `stream-json` and Pi `onUpdate`.
-- **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default).
+- **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default); runs that time out or are cancelled are recorded too and stay resumable.
 - **Repo-aware verify** — prefers `just ci` when a justfile defines `ci:`.
 - **Diff summary** — accept-edits results append newly-dirty files only; pre-existing dirt is listed separately, never misattributed.
 - **Per-directory lock** — serializes concurrent agy calls on the same tree across Pi processes (symlink-aware).
-- **Cancellation** — abort/timeout kills the full agy process tree, and streamed records plus responses are size-bounded.
+- **Cancellation** — abort/timeout kills the full agy process tree, and streamed records plus responses are size-bounded; a fully delivered result survives cancellation or timeout, and the conversation stays resumable.
