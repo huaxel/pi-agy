@@ -514,7 +514,7 @@ describe("shared executor", () => {
                 prompt: "hang after starting",
                 mode: "plan",
                 dir: process.cwd(),
-                timeout_ms: 1_500,
+                timeout_ms: 3_000,
                 new_session: true,
                 stream: true,
               },
@@ -557,7 +557,13 @@ describe("shared executor", () => {
         async () => {
           resetPreflightCache();
           const controller = new AbortController();
-          setTimeout(() => controller.abort(), 300);
+          // Abort only once the result record has actually been delivered —
+          // a fixed wall-clock delay races preflight on slow CI runners.
+          const onProgress = (message: string) => {
+            if (!controller.signal.aborted && message.includes("SUCCESS")) {
+              controller.abort();
+            }
+          };
           const result = await executeAgyTask(
             {
               prompt: "finish then hang",
@@ -568,6 +574,7 @@ describe("shared executor", () => {
               stream: true,
             },
             controller.signal,
+            onProgress,
           );
           assert.match(result.text, /late but complete/);
           assert.match(result.text, /was cancelled; the completed result is preserved/);
@@ -609,7 +616,7 @@ describe("shared executor", () => {
               prompt: "finish then hang",
               mode: "plan",
               dir: process.cwd(),
-              timeout_ms: 1_000,
+              timeout_ms: 3_000,
               new_session: true,
               stream: true,
             },
@@ -642,7 +649,13 @@ describe("shared executor", () => {
         async () => {
           resetPreflightCache();
           const controller = new AbortController();
-          setTimeout(() => controller.abort(), 300);
+          // Event-driven abort (see the plan-mode variant above): the fixed
+          // delay raced preflight on slow CI runners.
+          const onProgress = (message: string) => {
+            if (!controller.signal.aborted && message.includes("SUCCESS")) {
+              controller.abort();
+            }
+          };
           const result = await executeAgyTask(
             {
               prompt: "finish then hang",
@@ -653,6 +666,7 @@ describe("shared executor", () => {
               stream: true,
             },
             controller.signal,
+            onProgress,
           );
           assert.match(result.text, /edits complete/);
           assert.match(result.text, /diff summary skipped: the run was cancelled as agy finished/);

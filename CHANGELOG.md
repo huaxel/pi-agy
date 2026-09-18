@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1
+
+- Supersede 0.6.0, whose publish run failed: a fixed 300 ms abort in two delivery-vs-cancellation tests raced preflight on slow CI runners (the abort must land after the result arrives). The cancels are now event-driven (fired when the SUCCESS progress arrives, i.e. strictly after delivery) and tight budget margins widened 6×.
+
 ## 0.6.0
 
 - New `agy_history` tool: list recorded agy conversations for a working directory (ids, models, ages, task summaries) so agents can discover and resume past work without remembering ids; read-only, no model turn spent.
