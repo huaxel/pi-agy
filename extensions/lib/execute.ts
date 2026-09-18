@@ -237,7 +237,16 @@ export async function executeAgyTask(
     const conversationId = getAgyConversationId(error);
     if (conversationId) {
       try {
-        await saveSession(options.dir, conversationId, effectiveModel, abortSignal);
+        // The composed signal is aborted in exactly the cases this save
+        // exists for (timeout, cancellation), and every store guard refuses
+        // an aborted signal — so persist under a fresh bounded deadline to
+        // keep the conversation resumable after the failure.
+        await saveSession(
+          options.dir,
+          conversationId,
+          effectiveModel,
+          AbortSignal.timeout(10_000),
+        );
       } catch {
         // Preserve the original agy failure; session persistence is best effort.
       }

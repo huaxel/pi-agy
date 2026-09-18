@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3
+
+- Persist timed-out or cancelled conversations so they stay resumable: the failure-path session save passed the already-aborted signal to the session store, whose lock guards reject it, making conversation continuity on timeout/cancel silently dead code. Found by dogfooding a real agy run.
+- Extend the fake-agy test harness with a hang-after-output mode to reproduce hangs that start after a conversation id was emitted.
+
 ## 0.5.2
 
 - Deliver large streamed result records intact: the per-record bound now fits a maximum-size response (1M chars with worst-case JSON escaping) instead of discarding records over 256 KB mid-stream.

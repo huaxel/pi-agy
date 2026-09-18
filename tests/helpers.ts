@@ -11,8 +11,10 @@ export async function withFakeAgy<T>(
   failureOutput = "",
   failureConversationId = "",
   usageOutput = "{}",
+  hangAfterOutputMs = 0,
 ): Promise<T> {
   const delaySeconds = (delayMs / 1000).toFixed(3);
+  const hangSeconds = (hangAfterOutputMs / 1000).toFixed(3);
   const failureEncoded = Buffer.from(failureOutput).toString("base64");
   const usageEncoded = Buffer.from(usageOutput).toString("base64");
   const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bin-"));
@@ -51,6 +53,7 @@ case "$1" in
     fi
     printf '%s\\n' '{"event":"init","init":{"model":"fake"}}'
     printf '%s' '${encoded}' | base64 --decode
+    if [ "${hangAfterOutputMs}" -gt 0 ]; then sleep "${hangSeconds}"; fi
     ;;
 esac
 `,

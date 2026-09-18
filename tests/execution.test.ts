@@ -339,6 +339,56 @@ describe("shared executor", () => {
     });
   });
 
+  it("persists the conversation when a run times out, keeping it resumable", async () => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    // Emit the init record (with a conversation id), then hang past the
+    // deadline — the failure-path save must survive the aborted signal.
+    const raw = JSON.stringify({
+      event: "init",
+      conversation_id: "timeout-conv",
+      init: { model: "fake" },
+    });
+    try {
+      await withFakeAgy(
+        raw,
+        async () => {
+          resetPreflightCache();
+          await assert.rejects(
+            executeAgyTask(
+              {
+                prompt: "hang after starting",
+                mode: "plan",
+                dir: process.cwd(),
+                timeout_ms: 1_500,
+                new_session: true,
+                stream: true,
+              },
+              undefined,
+            ),
+            /timed out/,
+          );
+          const store = JSON.parse(
+            await readFile(path.join(agentDir, "agy-sessions.json"), "utf8"),
+          );
+          const record = store[path.resolve(process.cwd())];
+          assert.ok(record, "session store has a record for the directory");
+          assert.equal(record.last_conversation_id, "timeout-conv");
+        },
+        0, // failures
+        0, // delayMs
+        "", // failureOutput
+        "", // failureConversationId
+        "{}", // usageOutput
+        60_000, // hangAfterOutputMs — far past the 1.5s budget
+      );
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+  });
+
   it("rejects invalid session and timeout inputs before spawning agy", async () => {
     await assert.rejects(
       executeAgyTask(
