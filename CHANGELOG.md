@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.6
+
+- Report user cancellations accurately when postflight is cut short: the diff-skip note no longer claims deadline expiry for user-initiated cancels (found in the final adversarial pass).
+
 ## 0.5.5
 
 - Preserve completed responses past the deadline: a result that fully arrived before cancellation or timeout is returned with an explanatory note instead of being discarded — previously a kill landing between delivery and process exit threw the finished response away.

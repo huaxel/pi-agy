@@ -217,7 +217,8 @@ export async function executeAgyTask(
             preexistingFiles = diff.preexistingFiles;
           } catch (error) {
             if (!abortSignal.aborted) throw error;
-            text += "\n\n(diff summary skipped: the run reached its deadline as agy finished)";
+            const reason = signal?.aborted ? "cancelled" : "reaching its deadline";
+            text += `\n\n(diff summary skipped: the run was ${reason} as agy finished)`;
           }
         }
         if (abortSignal.aborted) {

@@ -503,6 +503,47 @@ describe("shared executor", () => {
     }
   });
 
+  it("reports user cancellation, not deadline expiry, when postflight is cut short", async () => {
+    const raw =
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "postflight-conv", response: "edits complete", status: "SUCCESS" },
+      }) + "\n";
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      await withFakeAgy(
+        raw,
+        async () => {
+          resetPreflightCache();
+          const controller = new AbortController();
+          setTimeout(() => controller.abort(), 300);
+          const result = await executeAgyTask(
+            {
+              prompt: "finish then hang",
+              mode: "accept-edits",
+              dir: process.cwd(),
+              timeout_ms: 60_000,
+              new_session: true,
+              stream: true,
+            },
+            controller.signal,
+          );
+          assert.match(result.text, /edits complete/);
+          assert.match(result.text, /diff summary skipped: the run was cancelled as agy finished/);
+          assert.doesNotMatch(result.text, /reaching its deadline/);
+          assert.match(result.text, /was cancelled; the completed result is preserved/);
+          assert.equal(result.details.changed_files, undefined);
+        },
+        0, 0, "", "", "{}", 60_000,
+      );
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+  });
+
   it("rejects invalid session and timeout inputs before spawning agy", async () => {
     await assert.rejects(
       executeAgyTask(
