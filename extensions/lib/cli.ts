@@ -21,7 +21,12 @@ import {
 export { detectVerifyCommand } from "./verify.js";
 export { parseJsonResponse } from "./parse.js";
 
-const INSTALL_HINT = "Install agy: curl -fsSL https://antigravity.google/cli/install.sh | bash";
+// Ported from upstream pi-agy 0.3.4: Windows ENOENT errors must not suggest
+// a bash one-liner.
+const INSTALL_HINT =
+  process.platform === "win32"
+    ? "Install agy: irm https://antigravity.google/cli/install.ps1 | iex"
+    : "Install agy: curl -fsSL https://antigravity.google/cli/install.sh | bash";
 
 export type AgyModel =
   | "flash-low"

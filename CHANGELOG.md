@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.8
+
+- Port the platform-aware install hint from upstream 0.3.4: Windows `ENOENT` errors now point at the PowerShell installer instead of a bash one-liner. (Upstream's other recent changes are already covered here independently: the non-string `response` guard in `parseJsonResponse`, and the live `agy models` catalog supersedes static model-map bumps.)
+
 ## 0.5.7
 
 - Documentation: add a "Timeouts & cancellation" section to the README covering deadline-preserving semantics (delivered results survive, post-run steps skip with notes, conversations stay resumable after timeout/cancel); note the Node >= 20.3 requirement; refresh the upstream-comparison table and skill bullets.
