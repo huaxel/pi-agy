@@ -257,6 +257,12 @@ describe("truncate", () => {
     assert.match(result, /FINAL SUMMARY/);
     assert.match(result, /truncated/);
   });
+
+  it("returns empty text for a zero cap and degrades when the marker cannot fit", () => {
+    assert.equal(truncate("anything", 0), "");
+    const cramped = truncate("y".repeat(500), 30);
+    assert.ok(cramped.length <= 30);
+  });
 });
 
 

@@ -99,6 +99,48 @@ describe("extension registration", () => {
     }, 0, 0, "", "", usage);
   });
 
+  it("gates accept-edits behind the TUI confirmation dialog", async () => {
+    type ExecuteTool = {
+      execute: (...args: any[]) => Promise<any>;
+    };
+    let executeTool: ExecuteTool | undefined;
+    const fakePi = {
+      registerCommand: () => {},
+      registerTool: (tool: { name: string; execute?: (...args: any[]) => Promise<any> }) => {
+        if (tool.name === "agy_execute" && tool.execute) {
+          executeTool = tool as unknown as ExecuteTool;
+        }
+      },
+    };
+    piAgyExtension(fakePi as unknown as ExtensionAPI);
+    assert.ok(executeTool);
+
+    const params = {
+      prompt: "write things",
+      mode: "accept-edits",
+      timeout_ms: 60_000,
+    };
+
+    // Headless runs must never reach agy with write permissions.
+    await assert.rejects(
+      executeTool!.execute("gate-1", params, undefined, undefined, {
+        cwd: process.cwd(),
+        hasUI: false,
+      }),
+      /accept-edits requires interactive confirmation/,
+    );
+
+    // A declined confirmation stops the run before spawning.
+    await assert.rejects(
+      executeTool!.execute("gate-2", params, undefined, undefined, {
+        cwd: process.cwd(),
+        hasUI: true,
+        ui: { confirm: async () => false },
+      }),
+      /cancelled by user/,
+    );
+  });
+
   it("validates the agy_usage working directory before spawning", async () => {
     type UsageTool = {
       execute: (...args: any[]) => Promise<unknown>;
@@ -541,6 +583,39 @@ describe("shared executor", () => {
     } finally {
       if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+  });
+
+  it("reports the install hint when agy is missing from PATH", async () => {
+    const emptyPath = await mkdtemp(path.join(os.tmpdir(), "pi-agy-nopath-"));
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
+    const previousPath = process.env.PATH;
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PATH = emptyPath;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      await assert.rejects(
+        executeAgyTask(
+          {
+            prompt: "needs agy",
+            mode: "plan",
+            dir: process.cwd(),
+            timeout_ms: 30_000,
+            new_session: true,
+          },
+          undefined,
+        ),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          return /not installed/.test(message) && /Install agy:/.test(message);
+        },
+      );
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+      resetPreflightCache();
     }
   });
 
