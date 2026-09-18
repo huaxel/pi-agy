@@ -20,6 +20,7 @@ import {
   checkAgyUsage,
   findAgyQuotaEntries,
   formatAgyUsage,
+  isAgyQuotaExhausted,
   isStableModelId,
   killProcessTree,
   parseAgyUsage,
@@ -271,6 +272,94 @@ describe("model quota discovery", () => {
     assert.equal(findAgyQuotaEntries(grouped, "gemini-3.8-flash-medium").length, 1);
     assert.equal(findAgyQuotaEntries(grouped, "gemini-3.8-flash-medium")[0]?.window, "weekly");
     assert.equal(findAgyQuotaEntries(grouped, "claude-sonnet-4-6").length, 0);
+  });
+
+  it("parses the real agy 1.2.6 usage schema (command.data.groups[].buckets)", () => {
+    // Verbatim structure from a live agy 1.2.6 `--output-format json -p /usage`
+    // run: quota records live under groups whose family name is in `name`.
+    const snapshot = parseAgyUsage(
+      JSON.stringify({
+        conversation_id: "",
+        status: "SUCCESS",
+        response: "Gemini Models\tWeekly Limit Remaining\t75%\t2026-09-23T04:33:47Z",
+        duration_seconds: 0,
+        num_turns: 0,
+        usage: { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 0 },
+        command: {
+          name: "usage",
+          data: {
+            description: "Within each group, models share a weekly limit and a 5-hour limit.",
+            groups: [
+              {
+                name: "Gemini Models",
+                description: "Models within this group: Gemini Flash, Gemini Pro",
+                buckets: [
+                  {
+                    id: "gemini-weekly",
+                    name: "Weekly Limit Remaining",
+                    description: "You have used some of your weekly limit.",
+                    window: "weekly",
+                    remaining_fraction: 0.7515648603439331,
+                    reset_time: "2026-09-23T04:33:47Z",
+                  },
+                  {
+                    id: "gemini-5h",
+                    name: "Five Hour Limit Remaining",
+                    description: "You have used some of your 5-hour limit.",
+                    window: "5h",
+                    remaining_fraction: 0.5208387970924377,
+                    reset_time: "2026-09-18T17:15:07Z",
+                  },
+                ],
+              },
+              {
+                name: "Claude and GPT models",
+                description: "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                buckets: [
+                  {
+                    id: "3p-weekly",
+                    name: "Weekly Limit Remaining",
+                    description: "You have hit your weekly limit.",
+                    window: "weekly",
+                    remaining_fraction: 0,
+                    reset_time: "2026-09-22T15:41:44Z",
+                  },
+                  {
+                    id: "3p-5h",
+                    name: "Five Hour Limit Remaining",
+                    description: "The 5-hour limit does not currently apply.",
+                    window: "5h",
+                    disabled: true,
+                    remaining_fraction: 1,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    // Disabled buckets carry no availability signal and are skipped.
+    assert.equal(snapshot?.models.length, 3);
+    const gemini = snapshot?.models.filter((entry) => entry.model === "Gemini Models") ?? [];
+    assert.equal(gemini.length, 2);
+    assert.equal(gemini[0]?.window, "weekly");
+    assert.ok(Math.abs((gemini[0]?.remaining_fraction ?? 0) - 0.7516) < 0.0001);
+    assert.equal(gemini[0]?.reset_at, "2026-09-23T04:33:47Z");
+    assert.equal(gemini[1]?.window, "five-hour");
+
+    const forFlash = findAgyQuotaEntries(snapshot, "gemini-3.8-flash-low");
+    assert.equal(forFlash.length, 2);
+    assert.ok(!forFlash.some((entry) => isAgyQuotaExhausted(entry)), "flash group is available");
+    const forSonnet = findAgyQuotaEntries(snapshot, "claude-sonnet-4-6");
+    assert.equal(forSonnet.length, 1);
+    assert.ok(forSonnet.some((entry) => isAgyQuotaExhausted(entry)), "claude weekly limit is exhausted");
+
+    const report = formatAgyUsage(snapshot) ?? "";
+    assert.match(report, /Gemini Models: weekly window, 75\.2% remaining/);
+    assert.match(report, /resets 2026-09-22T15:41:44Z/);
+    assert.doesNotMatch(report, /Five Hour Limit Remaining/);
   });
 
   it("parses quota records from JSONL output", () => {

@@ -410,6 +410,10 @@ const MODEL_FIELD_KEYS = [
   "group",
   "family",
   "pool",
+  // agy 1.2.6 usage groups carry the family in `name` ("Gemini Models",
+  // "Claude and GPT models"); the looksLikeModelName gate rejects the
+  // non-model names ("Weekly Limit Remaining", "usage", …) that also use it.
+  "name",
 ];
 const REMAINING_FRACTION_KEYS = [
   "remainingFraction",
@@ -654,7 +658,10 @@ function readQuotaEntry(
   value: Record<string, unknown>,
   hintedWindow?: string,
 ): AgyQuotaEntry | undefined {
-  const window = readString(value, WINDOW_KEYS) ?? hintedWindow;
+  // Normalize window spellings ("5h" → "five-hour") so reports and merge
+  // keys stay consistent across CLI versions.
+  const rawWindow = readString(value, WINDOW_KEYS);
+  const window = (rawWindow ? quotaWindowName(rawWindow) ?? rawWindow : undefined) ?? hintedWindow;
   const fraction = readNumber(value, REMAINING_FRACTION_KEYS);
   const percent = readNumber(value, REMAINING_PERCENT_KEYS);
   const normalizedFraction = fraction ?? (percent !== undefined ? percent / 100 : undefined);
@@ -664,11 +671,14 @@ function readQuotaEntry(
   const exhausted =
     value.exhausted === true || value.isExhausted === true || value.is_exhausted === true;
   if (
-    normalizedFraction === undefined &&
-    requests === undefined &&
-    tokens === undefined &&
-    !reset &&
-    !exhausted
+    // A disabled limit is not in effect and carries no availability signal —
+    // recording its remaining fraction would mislead model selection.
+    value.disabled === true ||
+    (normalizedFraction === undefined &&
+      requests === undefined &&
+      tokens === undefined &&
+      !reset &&
+      !exhausted)
   ) {
     return undefined;
   }

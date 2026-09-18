@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.9
+
+- Parse the real agy 1.2.6 `/usage` schema (`command.data.groups[].buckets[]`): usage groups carry the model family in `name`, which the quota reader now honors — live runs previously fell back to dumping the raw JSON envelope and reported `quota_status: unknown`. Found by an end-to-end run against the real CLI.
+- Skip disabled quota buckets (a limit not in effect carries no availability signal) and normalize window spellings (`5h` → `five-hour`) across CLI versions.
+
 ## 0.5.8
 
 - Port the platform-aware install hint from upstream 0.3.4: Windows `ENOENT` errors now point at the PowerShell installer instead of a bash one-liner. (Upstream's other recent changes are already covered here independently: the non-string `response` guard in `parseJsonResponse`, and the live `agy models` catalog supersedes static model-map bumps.)
