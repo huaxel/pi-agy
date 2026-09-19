@@ -20,6 +20,7 @@ import {
   parseModelCatalog,
   resetModelCatalog,
   resolveAgyModelId,
+  supportsAgyEffort,
   updateModelCatalog,
 } from "../extensions/lib/cli.js";
 import { resolveAgyMode, truncate } from "../extensions/index.js";
@@ -120,9 +121,10 @@ describe("buildAgyArgs", () => {
     assert.ok(hasFlagPair(args, "--model", "gemini-3.1-pro-high"));
   });
 
-  it("passes reasoning effort", () => {
+  it("passes reasoning effort to models that expose it", () => {
     const args = buildAgyArgs({
       prompt: "t",
+      model: "gpt-oss",
       mode: "plan",
       dir: "/tmp",
       timeout_ms: 60_000,
@@ -130,6 +132,22 @@ describe("buildAgyArgs", () => {
     });
     const idx = args.indexOf("--effort");
     assert.equal(args[idx + 1], "high");
+    assert.equal(supportsAgyEffort("gpt-oss"), true);
+  });
+
+  it("omits unsupported effort for Claude and Gemini aliases", () => {
+    for (const model of ["sonnet", "opus", "flash-medium"] as const) {
+      const args = buildAgyArgs({
+        prompt: "t",
+        model,
+        mode: "plan",
+        dir: "/tmp",
+        timeout_ms: 60_000,
+        effort: "high",
+      });
+      assert.equal(args.includes("--effort"), false, model);
+      assert.equal(supportsAgyEffort(model), false);
+    }
   });
 
   it("can run accept-edits without bypassing permissions", () => {
@@ -194,6 +212,7 @@ describe("model catalog", () => {
 describe("isTransientAgyFailure", () => {
   it("classifies rate limits and network blips as transient", () => {
     assert.ok(isTransientAgyFailure("agy exited with code 1:\nrate limit exceeded"));
+    assert.ok(isTransientAgyFailure("RESOURCE_EXHAUSTED (code 429): quota exceeded"));
     assert.ok(isTransientAgyFailure("503 overloaded, try again"));
     assert.ok(isTransientAgyFailure("fetch failed: socket hang up"));
   });

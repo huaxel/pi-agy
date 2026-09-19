@@ -53,7 +53,7 @@ The deadline never discards finished work:
 | `conversation_id` | Resume agy conversation by ID |
 | `continue` | `--continue` most recent conversation |
 | `new_session` | Force fresh session; set `false` to reuse last ID for dir |
-| `effort` | Reasoning effort via `--effort` (low/medium/high); mostly useful for `sonnet`/`opus`/`gpt-oss` since Gemini aliases encode effort in the model id |
+| `effort` | Reasoning effort via `--effort` where supported; `gpt-oss` accepts it, while Claude thinking models reject it and Gemini aliases already encode it |
 | `stream` | Use `stream-json` (default `true`) |
 | `mode` | `accept-edits` by default; use `plan` for exploration/review |
 
@@ -62,7 +62,10 @@ returns it in `details.quota`/`details.quota_status` and the response when
 the CLI exposes structured model records. Use the separate `agy_usage` tool
 when choosing a model before execution. If the selected model is explicitly
 reported as exhausted, the run stops before spending another agent turn and
-reports the reset information.
+reports the reset information. When no model is explicitly requested, an exhausted
+quota-balanced default automatically falls back to the first reported available
+model family. Explicit model selections fail clearly instead of silently
+switching models.
 Use `agy_usage` with `model` (for example `model=sonnet`) for a targeted
 `available`/`exhausted`/`unknown` status. Older agy versions that do not support
 headless `/usage` continue without failing the task. The extension requires

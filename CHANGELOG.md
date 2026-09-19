@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+
+- Omit unsupported `--effort` flags for Claude thinking and Gemini variant aliases; retain effort selection for GPT-OSS.
+- Refresh quota state after `RESOURCE_EXHAUSTED` responses and back off before retrying.
+- Automatically fall back from an exhausted implicit quota-balanced default while preserving explicit model selections.
+- Add regression coverage for the agy 1.2.7 model and quota behavior.
+
 ## 0.6.1
 
 - Supersede 0.6.0, whose publish run failed: a fixed 300 ms abort in two delivery-vs-cancellation tests raced preflight on slow CI runners (the abort must land after the result arrives). The cancels are now event-driven (fired when the SUCCESS progress arrives, i.e. strictly after delivery) and tight budget margins widened 6×.

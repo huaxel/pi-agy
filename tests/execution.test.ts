@@ -326,6 +326,68 @@ describe("shared executor", () => {
     }, 0, 0, "", "", usage);
   });
 
+  it("falls back from an exhausted quota-balanced default", async () => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
+    const workDir = path.resolve(process.cwd());
+    const now = new Date().toISOString();
+    await writeFile(path.join(agentDir, "agy-config.json"), JSON.stringify({ quotaBalancing: true }));
+    await writeFile(
+      path.join(agentDir, "agy-sessions.json"),
+      JSON.stringify({
+        [workDir]: {
+          history: [
+            { conversation_id: "g-1", model: "flash-medium", updated_at: now },
+            { conversation_id: "g-2", model: "flash-medium", updated_at: now },
+            { conversation_id: "g-3", model: "flash-medium", updated_at: now },
+          ],
+        },
+      }),
+    );
+    const usage = JSON.stringify({
+      command: {
+        data: {
+          groups: [
+            {
+              name: "Claude and GPT models",
+              buckets: [{ window: "weekly", remaining_fraction: 0, reset_time: "later" }],
+            },
+            {
+              name: "Gemini Models",
+              buckets: [{ window: "weekly", remaining_fraction: 0.5, reset_time: "later" }],
+            },
+          ],
+        },
+      },
+    });
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      await withFakeAgy("{}", async (bin) => {
+        resetPreflightCache();
+        const progress: string[] = [];
+        const result = await executeAgyTask(
+          {
+            prompt: "use the available model",
+            mode: "plan",
+            dir: workDir,
+            timeout_ms: 60_000,
+            new_session: true,
+            stream: true,
+          },
+          undefined,
+          (message) => progress.push(message),
+        );
+        assert.equal(result.details.model, "flash-medium");
+        assert.ok(progress.some((message) => message.includes("falling back")));
+        const args = await readFakeAgyArgs(bin);
+        assert.ok(args.some((argv) => hasFlagPair(argv, "--model", "gemini-3.8-flash-medium")));
+      }, 0, 0, "", "", usage);
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+  });
+
   it("runs agy directly and returns progress plus structured details", async () => {
     const raw =
       JSON.stringify({ event: "result", result: { response: "plan complete", status: "SUCCESS" } }) +
@@ -975,7 +1037,7 @@ describe("shared executor", () => {
       await executeAgyTask(
         {
           prompt: "/review then implement",
-          model: "sonnet",
+          model: "gpt-oss",
           effort: "high",
           mode: "plan",
           dir: process.cwd(),
@@ -988,7 +1050,33 @@ describe("shared executor", () => {
 
       const args = await readFakeAgyArgs(bin);
       assert.ok(args.some((argv) => hasFlagPair(argv, "--effort", "high")));
+      assert.ok(args.some((argv) => hasFlagPair(argv, "--model", "gpt-oss-120b-medium")));
       assert.ok(args.some((argv) => argv.includes("--disable-slash-commands")));
+    });
+  });
+
+  it("omits effort for Claude thinking models", async () => {
+    const raw =
+      JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
+    await withFakeAgy(raw, async (bin) => {
+      resetPreflightCache();
+      await executeAgyTask(
+        {
+          prompt: "review the diff",
+          model: "sonnet",
+          effort: "high",
+          mode: "plan",
+          dir: process.cwd(),
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: true,
+        },
+        undefined,
+      );
+
+      const args = await readFakeAgyArgs(bin);
+      assert.ok(args.some((argv) => hasFlagPair(argv, "--model", "claude-sonnet-4-6")));
+      assert.ok(!args.some((argv) => hasFlagPair(argv, "--effort", "high")));
     });
   });
 });

@@ -222,8 +222,17 @@ export function resolveAgyModelId(model?: AgyModel, tier?: AgyOptions["tier"]): 
   return modelCatalog[alias] ?? MODEL_MAP[alias];
 }
 
+/**
+ * Gemini aliases already select a low/medium/high model variant. Claude's
+ * thinking models also reject --effort; keep the flag for model families that
+ * expose it without turning a valid tool call into an argument error.
+ */
+export function supportsAgyEffort(model?: AgyModel, tier?: AgyOptions["tier"]): boolean {
+  return resolveAgyModelId(model, tier).startsWith("gpt-oss-");
+}
+
 const TRANSIENT_FAILURE_PATTERN =
-  /rate.?limit|429|overloaded|temporarily unavailable|network|connection (reset|refused)|econnreset|etimedout|socket hang up|\b50[023]\b/i;
+  /rate.?limit|resource[_ -]?exhausted|429|overloaded|temporarily unavailable|network|connection (reset|refused)|econnreset|etimedout|socket hang up|\b50[023]\b/i;
 
 /** Heuristic for transient agy failures that are safe to retry once. */
 export function isTransientAgyFailure(message: string): boolean {
@@ -254,7 +263,9 @@ export function buildAgyArgs(options: AgyOptions): string[] {
     "--disable-slash-commands",
     ...(mode === "sandbox" ? ["--sandbox"] : ["--mode", mode]),
     ...(writes && skipPermissions ? ["--dangerously-skip-permissions"] : []),
-    ...(options.effort ? ["--effort", options.effort] : []),
+    ...(options.effort && supportsAgyEffort(options.model, options.tier)
+      ? ["--effort", options.effort]
+      : []),
   ];
 
   if (options.continue) {

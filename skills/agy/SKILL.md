@@ -65,13 +65,13 @@ agy_usage
 - Escalate within the Gemini quota group to `pro-low` or `pro-high` only when needed.
 - Use `sonnet` for normal Claude-group coding/review; reserve `opus` for the hardest architecture or root-cause work.
 - Use `gpt-oss` when an open-model alternative is specifically desired.
-- Set `effort` (low/medium/high) for finer reasoning control on `sonnet`/`opus`/`gpt-oss` runs; Gemini aliases encode effort in the model id.
+- Set `effort` only for `gpt-oss`; Claude thinking models reject `--effort`, and Gemini aliases encode effort in the model id.
 - For consequential work, have one family produce and the opposite family review with `mode=plan`; do not spend both groups on trivial tasks.
 - Batch related work, avoid parallel calls within one shared-quota group or directory, and use `digest=true` (default) for non-write tasks.
 
 ## Enhancements over upstream pi-agy
 
-- **Quota discovery** — `agy_usage` and `/agy usage` report model-specific remaining quota and reset times; executions refresh quota snapshots and return machine-readable `quota_status` as well.
+- **Quota discovery** — `agy_usage` and `/agy usage` report model-specific remaining quota and reset times; executions refresh quota snapshots, automatically fall back when an implicit default is exhausted, and return machine-readable `quota_status` as well.
 - **Streaming progress** — live tool steps via `stream-json` and Pi `onUpdate`.
 - **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default) with one-line task summaries; runs that time out or are cancelled are recorded too and stay resumable, and the `agy_history` tool lets agents list past conversations.
 - **Repo-aware verify** — prefers `just ci` when a justfile defines `ci:`.

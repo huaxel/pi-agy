@@ -23,7 +23,7 @@ import {
   summarizeGitDiffSince,
   type GitBaseline,
 } from "./postflight.js";
-import { runPreflight } from "./preflight.js";
+import { resetPreflightCache, runPreflight } from "./preflight.js";
 import { getSession, saveSession, conversationSummary } from "./sessions.js";
 
 export type AgyMode = "plan" | "accept-edits" | "sandbox";
@@ -86,9 +86,11 @@ export async function executeAgyTask(
     const config = await loadAgyConfig(undefined, abortSignal);
     // Explicit model → legacy tier → configured default → flash-medium.
     const selectedModel = resolveAgyModelAlias(options.model, options.tier);
-    const model =
-      selectedModel ?? (await resolveDefaultModel(config, abortSignal));
-    effectiveModel = model ?? "flash-medium";
+    const resolvedModel = selectedModel ?? (await resolveDefaultModel(config, abortSignal));
+    let model: AgyModel = resolvedModel ?? "flash-medium";
+    effectiveModel = model;
+    const autoModelSelection =
+      !selectedModel && !config.defaultModel && !config.defaultModelCommand;
     const skipPermissions = config.skipPermissions !== false;
 
     return await withDirLock(
@@ -143,20 +145,31 @@ export async function executeAgyTask(
           const quotaSummary = quota ? formatAgyUsage(quota, selectedModelId) : undefined;
           if (quotaSummary) onProgress?.(quotaSummary);
           if (selectedQuotas.some((entry) => isAgyQuotaExhausted(entry))) {
-            const quotaEntries = quota?.models ?? [];
-            const alternatives = [...new Set(quotaEntries.map((entry) => entry.model))]
-              .filter((candidate) => candidate.toLowerCase() !== selectedModelId.toLowerCase())
-              .filter((candidate) =>
-                quotaEntries
-                  .filter((entry) => entry.model === candidate)
-                  .every((entry) => !isAgyQuotaExhausted(entry)),
+            const fallback = autoModelSelection
+              ? findAvailableFallbackModel(quota, model)
+              : undefined;
+            if (fallback) {
+              onProgress?.(
+                `agy: ${selectedModelId} quota exhausted; falling back to ${resolveAgyModelId(fallback)}…`,
               );
-            const alternativeText = alternatives.length
-              ? ` Available reported alternatives: ${alternatives.join(", ")}.`
-              : " No available alternative was reported.";
-            throw new Error(
-              `agy quota exhausted for ${selectedModelId}; choose another model or run agy_usage first.${alternativeText}\n${quotaSummary ?? ""}`,
-            );
+              model = fallback;
+              effectiveModel = fallback;
+            } else {
+              const quotaEntries = quota?.models ?? [];
+              const alternatives = [...new Set(quotaEntries.map((entry) => entry.model))]
+                .filter((candidate) => candidate.toLowerCase() !== selectedModelId.toLowerCase())
+                .filter((candidate) =>
+                  quotaEntries
+                    .filter((entry) => entry.model === candidate)
+                    .every((entry) => !isAgyQuotaExhausted(entry)),
+                );
+              const alternativeText = alternatives.length
+                ? ` Available reported alternatives: ${alternatives.join(", ")}.`
+                : " No available alternative was reported.";
+              throw new Error(
+                `agy quota exhausted for ${selectedModelId}; choose another model or run agy_usage first.${alternativeText}\n${quotaSummary ?? ""}`,
+              );
+            }
           }
           const runTimeoutMs = remainingBudget(startedAt, options.timeout_ms);
           // Emitted via onProgress directly: progress tracking (and therefore
@@ -181,7 +194,7 @@ export async function executeAgyTask(
             abortSignal,
             trackProgress,
           );
-        }, onProgress);
+        }, onProgress, abortSignal);
 
         if (run.conversation_id) {
           try {
@@ -295,6 +308,29 @@ function remainingBudget(startedAt: number, timeoutMs: number): number {
   return remaining;
 }
 
+const FALLBACK_MODELS: readonly AgyModel[] = [
+  "flash-medium",
+  "flash-low",
+  "flash-high",
+  "pro-low",
+  "pro-high",
+  "gpt-oss",
+  "sonnet",
+  "opus",
+];
+
+function findAvailableFallbackModel(
+  snapshot: AgyUsageSnapshot | undefined,
+  current: AgyModel,
+): AgyModel | undefined {
+  if (!snapshot) return undefined;
+  return FALLBACK_MODELS.find((candidate) => {
+    if (candidate === current) return false;
+    const entries = findAgyQuotaEntries(snapshot, resolveAgyModelId(candidate));
+    return entries.length > 0 && entries.every((entry) => !isAgyQuotaExhausted(entry));
+  });
+}
+
 /**
  * Retry once when agy fails before emitting any activity (tool step or model
  * response) with a transient error (rate limit, network blip). Zero activity
@@ -303,6 +339,7 @@ function remainingBudget(startedAt: number, timeoutMs: number): number {
 async function runWithTransientRetry<T>(
   attempt: (trackProgress: (message: string) => void) => Promise<T>,
   onProgress?: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<T> {
   for (let tries = 0; ; tries++) {
     let sawActivity = false;
@@ -320,10 +357,37 @@ async function runWithTransientRetry<T>(
         isTransientAgyFailure(message) &&
         !/\b(?:ETIMEDOUT|timed out)\b/i.test(message)
       ) {
-        onProgress?.("agy: transient failure before any work — retrying once…");
+        const quotaMayHaveChanged = /resource[_ -]?exhausted|429/i.test(message);
+        if (quotaMayHaveChanged) resetPreflightCache();
+        onProgress?.(
+          quotaMayHaveChanged
+            ? "agy: quota request was rejected before any work — refreshing quota and retrying once…"
+            : "agy: transient failure before any work — retrying once…",
+        );
+        await delayBeforeRetry(signal);
         continue;
       }
       throw error;
     }
   }
+}
+
+function delayBeforeRetry(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, 1_000);
+    if (!signal) return;
+    if (signal.aborted) {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("agy retry cancelled"));
+      return;
+    }
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error("agy retry cancelled"));
+      },
+      { once: true },
+    );
+  });
 }
