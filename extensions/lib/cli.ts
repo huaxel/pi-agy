@@ -1164,20 +1164,24 @@ function spawnAgyInternal(
           runResult = processStreamLine(lineBuffer, runResult, onProgress);
         }
 
+        // Finalization also parses whole top-level JSON envelopes, including
+        // pretty-printed output that cannot be consumed one line at a time.
+        const finalized = finalizeRunResult(out, runResult);
+
         // Terminal status is authoritative when present. agy can emit an
         // ERROR envelope with response: "" and even exit 0; response
         // completeness must never turn that failed turn into success.
-        const terminalFailure = terminalFailureMessage(runResult, err);
+        const terminalFailure = terminalFailureMessage(finalized, err);
         if (terminalFailure) {
-          reject(withConversationId(terminalFailure, runResult));
+          reject(withConversationId(terminalFailure, finalized));
           return;
         }
 
         // A fully delivered successful result outranks the kill: when
         // cancellation or timeout lands after the response arrived, the work
         // is done and the response must not be discarded.
-        if (runResult.response_complete) {
-          resolve(finalizeRunResult(out, runResult));
+        if (finalized.response_complete) {
+          resolve(finalized);
           return;
         }
 
@@ -1185,7 +1189,7 @@ function spawnAgyInternal(
           reject(
             withConversationId(
               signal.aborted && !timedOut ? "agy was cancelled" : "agy timed out",
-              runResult,
+              finalized,
             ),
           );
           return;
@@ -1193,13 +1197,12 @@ function spawnAgyInternal(
 
         if (code !== 0) {
           const detail = (err || out).slice(0, 2000).trim();
-          reject(withConversationId(`agy exited with code ${code}:\n${detail || "(no output)"}`, runResult));
+          reject(withConversationId(`agy exited with code ${code}:\n${detail || "(no output)"}`, finalized));
           return;
         }
 
         // agy writes diagnostics to stderr even on successful runs. Keep it
         // out of the response so JSON/stream parsing remains deterministic.
-        const finalized = finalizeRunResult(out, runResult);
         // Only responses served verbatim from the bounded raw capture can be
         // incomplete; anything parsed from a record was delivered in full.
         if (stdoutTruncated && !finalized.response_complete) {

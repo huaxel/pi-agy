@@ -289,15 +289,22 @@ export function finalizeRunResult(rawStdout: string, current: AgyRunResult): Agy
     }
   }
 
-  try {
-    const parsed: unknown = JSON.parse(rawStdout);
-    const next = mergeJsonEnvelope(parsed, current);
-    if (next) return next;
-  } catch {
-    // not json
+  const trimmed = rawStdout.trim();
+  const trailingRoot = trimmed.lastIndexOf("\n{");
+  const candidates = trailingRoot >= 0
+    ? [trimmed, trimmed.slice(trailingRoot + 1)]
+    : [trimmed];
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      const next = mergeJsonEnvelope(parsed, current);
+      if (next) return next;
+    } catch {
+      // Try the bounded trailing root object after earlier stream records.
+    }
   }
 
-  return { ...current, response: rawStdout.trim() || "(empty response)" };
+  return { ...current, response: trimmed || "(empty response)" };
 }
 
 /** Preserve metadata from agy's non-stream JSON envelope when available. */

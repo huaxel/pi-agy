@@ -827,30 +827,36 @@ describe("shared executor", () => {
     }
   });
 
-  it("fails closed on a top-level JSON error envelope", async () => {
-    const raw = JSON.stringify({
-      conversation_id: "top-level-error",
-      status: "ERROR",
-      response: "",
-      error: "model failed",
-    });
-    await withFakeAgy(raw, async () => {
-      resetPreflightCache();
-      await assert.rejects(
-        executeAgyTask(
-          {
-            prompt: "reject top-level error",
-            mode: "plan",
-            dir: process.cwd(),
-            timeout_ms: 60_000,
-            new_session: true,
-            stream: false,
-          },
-          undefined,
-        ),
-        /terminal status ERROR: model failed/,
+  it("fails closed on compact and multiline top-level JSON error envelopes", async () => {
+    for (const spacing of [undefined, 2]) {
+      const raw = JSON.stringify(
+        {
+          conversation_id: "top-level-error",
+          status: "ERROR",
+          response: "",
+          error: "model failed",
+        },
+        null,
+        spacing,
       );
-    });
+      await withFakeAgy(raw, async () => {
+        resetPreflightCache();
+        await assert.rejects(
+          executeAgyTask(
+            {
+              prompt: "reject top-level error",
+              mode: "plan",
+              dir: process.cwd(),
+              timeout_ms: 60_000,
+              new_session: true,
+              stream: false,
+            },
+            undefined,
+          ),
+          /terminal status ERROR: model failed/,
+        );
+      });
+    }
   });
 
   it("persists the conversation when a run times out, keeping it resumable", async () => {

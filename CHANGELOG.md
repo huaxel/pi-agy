@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.10
+
+- Validate terminal status only after finalizing the complete captured result, so pretty-printed top-level JSON errors cannot bypass 0.6.9's fail-closed status handling.
+- Recover one bounded trailing root JSON envelope after earlier lifecycle or diagnostic records, preserving terminal status, error, and conversation identity before cancellation, exit-code, or completed-response precedence is decided.
+- Add compact and multiline top-level error regression coverage; independent review found zero blockers and the full 201-test gate passes.
+
 ## 0.6.9
 
 - Fail closed on agy terminal result statuses: only `SUCCESS` and `OK` are accepted when a status is present. `ERROR`, `FAILURE`, `CANCELLED`, `TIMEOUT`, empty, malformed, and unknown statuses now reject even when agy includes `response: ""` and exits with code 0.
