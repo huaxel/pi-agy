@@ -165,6 +165,46 @@ describe("stream parser", () => {
     assert.equal(formatStepProgress(parsed!), "▸ write_to_file → /tmp/a.ts");
   });
 
+  it("surfaces native subagent progress and bounded result observations", () => {
+    const active = parseStreamLine(JSON.stringify({
+      event: "step_update",
+      step_update: {
+        step_index: 2,
+        step_type: "subagent",
+        state: "ACTIVE",
+        tool_name: "invoke_subagent",
+        subagent_info: {
+          subagents: [{
+            type_name: "research",
+            role: "File Counter",
+            initial_prompt: "Count files in the current directory.",
+          }],
+        },
+      },
+    }))!;
+    assert.equal(
+      formatStepProgress(active),
+      "▸ subagent File Counter — Count files in the current directory.",
+    );
+    let result = accumulateRunResult(active, { response: "" });
+    assert.equal(result.subagents?.[0]?.status, "active");
+
+    const done = parseStreamLine(JSON.stringify({
+      event: "step_update",
+      step_update: {
+        step_index: 2,
+        step_type: "subagent",
+        state: "DONE",
+        tool_name: "invoke_subagent",
+        duration_seconds: 1.5,
+        subagent_info: { subagents: [] },
+      },
+    }))!;
+    result = accumulateRunResult(done, result);
+    assert.equal(result.subagents?.[0]?.status, "done");
+    assert.equal(result.subagents?.[0]?.duration_seconds, 1.5);
+  });
+
   it("shows active-tool intent and async thresholds without exposing command text", () => {
     const command = parseStreamLine(
       JSON.stringify({

@@ -123,6 +123,10 @@ describe("agy_execute rendering", () => {
         quota_status: "available",
         context_mode: "recent",
         context_chars: 1234,
+        subagents: [
+          { slot: 0, name: "Reviewer", status: "done", task: "Review auth" },
+          { slot: 1, name: "Researcher", status: "active", task: "Map callers" },
+        ],
         changed_files: ["src/new.ts"],
         preexisting_files: ["README.md"],
       },
@@ -133,6 +137,7 @@ describe("agy_execute rendering", () => {
     );
     assert.match(collapsed, /✓ agy · flash-medium · accept-edits · 12\.3s/);
     assert.match(collapsed, /quota available · verify requested: just ci · context recent \(1234 chars\)/);
+    assert.match(collapsed, /2 subagents observed · 1 done/);
     assert.match(collapsed, /1 changed by agy · 1 pre-existing/);
     assert.match(collapsed, /… 2 more lines/);
     assert.ok(!collapsed.includes("src/new.ts"));
@@ -140,6 +145,8 @@ describe("agy_execute rendering", () => {
     const expanded = rendered(
       tool.renderResult(result, { expanded: true, isPartial: false }, theme, { isError: false }),
     );
+    assert.match(expanded, /↳ Reviewer · done · Review auth/);
+    assert.match(expanded, /↳ Researcher · active at last event · Map callers/);
     assert.match(expanded, /\+ src\/new\.ts/);
     assert.match(expanded, /~ README\.md \(pre-existing\)/);
     assert.match(expanded, /line 6/);

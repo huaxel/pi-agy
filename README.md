@@ -30,6 +30,7 @@ Requires Node.js >= 20.3.
 | Preflight | Every call | Health/model checks cached 5 min per process; model quotas refresh every minute |
 | Quota discovery | None | Read-only `/usage` probe exposes model-specific remaining quota and reset times to agents |
 | Custom agents | None | Read-only `agy_agents` / `/agy agents` discovery plus validated `agent` / `agent=name` selection via `--agent` |
+| Subagent visibility | None | Native stream progress plus a capped per-run roster in result details/receipts; observations never claim live lifecycle control |
 | Concurrency | Unlocked | Per-directory lock (in-process + filesystem, symlink-aware), lock wait counts against the timeout |
 | Transient failures | Fatal | One retry when agy fails before doing any work |
 | Cancellation | Direct child only | Full process-tree kill on cancel/timeout via detached process groups; a fully delivered result is preserved |
@@ -45,6 +46,9 @@ outlive the run.
 
 Active tool updates show bounded intent (for example a tool action or async
 threshold) but never echo full command lines, which may contain secrets.
+Subagent spawn steps likewise produce bounded progress and a final per-run
+observation roster (maximum 32). An `active at last event` entry describes the
+last stream record only; it does not claim that a controllable process remains live.
 Background commands are intentionally not detached or managed out-of-band:
 agy exposes no reliable headless task lifecycle or task-to-process ownership,
 so timeout/cancellation still kills the full process tree and prevents work from
@@ -90,6 +94,12 @@ Use `agy_usage` with `model` (for example `model=sonnet`) for a targeted
 headless `/usage` continue without failing the task. The extension requires
 agy 1.1.11+ before invoking `/usage`; older versions are refused safely because
 that command could otherwise consume model quota as a prompt.
+
+When agy emits `subagent` stream steps, `agy_execute` returns a capped,
+control-safe `details.subagents` list and appends the same observed summary to
+tool content. Native rendering deduplicates that synthetic appendix and shows
+compact/expanded roster metadata. Conversation ids and log URIs from nested
+subagents are deliberately not exposed as lifecycle handles.
 
 Context handoff is opt-in and text-only. `summary` sends up to 12,000
 characters from the latest durable summaries and four conversational messages;

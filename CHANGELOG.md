@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.6
+
+- Surface agy's native and legacy subagent spawn steps as bounded live progress and structured per-run observations (`details.subagents`) with ACTIVE/DONE/ERROR correlation, multi-spawn support, and retry-safe activity tracking.
+- Append a compact observed-subagent summary to tool content and render the structured roster in native results and durable `/agy` receipts without duplicating the synthetic appendix.
+- Keep diagnostics truthful and bounded: retain at most 32 sanitized observations, print at most 12, label unfinished entries `active at last event`, ignore send/manage events, and deliberately withhold nested conversation ids/log URIs as lifecycle handles.
+- Add captured native-stream, legacy fallback, missing-step-index, control-safety, roster-bound, execution, and rendering coverage.
+
 ## 0.6.5
 
 - Add `agy_agents` and `/agy agents` to list configured custom agy agents through the CLI's read-only `agy agents` subcommand without spending a model turn; parsing is control-safe and capped at 200 names.

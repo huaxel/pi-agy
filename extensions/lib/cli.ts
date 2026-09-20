@@ -1023,7 +1023,11 @@ export function spawnAgy(options: AgyOptions, signal: AbortSignal): Promise<stri
 /** Real agy work (tool steps / model responses), as opposed to lifecycle chatter. */
 function isActivityProgress(parsed: AgyStreamLine): boolean {
   const step = parsed.step_update;
-  return step?.step_type === "tool" || step?.step_type === "agent_response";
+  return (
+    step?.step_type === "tool" ||
+    step?.step_type === "subagent" ||
+    step?.step_type === "agent_response"
+  );
 }
 
 export function spawnAgyStream(

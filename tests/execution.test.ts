@@ -563,6 +563,58 @@ describe("shared executor", () => {
     });
   });
 
+  it("returns bounded observed subagent diagnostics without live-state claims", async () => {
+    const raw = [
+      {
+        event: "step_update",
+        step_update: {
+          step_index: 2,
+          step_type: "subagent",
+          state: "ACTIVE",
+          tool_name: "invoke_subagent",
+          subagent_info: {
+            subagents: [{ role: "Reviewer", type_name: "code", initial_prompt: "Review auth" }],
+          },
+        },
+      },
+      {
+        event: "step_update",
+        step_update: {
+          step_index: 2,
+          step_type: "subagent",
+          state: "DONE",
+          tool_name: "invoke_subagent",
+          duration_seconds: 2.5,
+          subagent_info: { subagents: [] },
+        },
+      },
+      { event: "result", result: { response: "review complete", status: "SUCCESS" } },
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n";
+
+    await withFakeAgy(raw, async () => {
+      resetPreflightCache();
+      const progress: string[] = [];
+      const result = await executeAgyTask(
+        {
+          prompt: "delegate review",
+          model: "flash-medium",
+          mode: "plan",
+          dir: process.cwd(),
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: true,
+        },
+        undefined,
+        (message) => progress.push(message),
+      );
+      assert.match(result.text, /## agy subagents observed: 1/);
+      assert.match(result.text, /Reviewer · done · 2\.5s/);
+      assert.equal(result.details.subagents?.[0]?.status, "done");
+      assert.ok(progress.some((message) => message.includes("subagent Reviewer")));
+      assert.ok(!result.text.includes("running"));
+    });
+  });
+
   it("persists the effective fallback model for resumed sessions", async () => {
     const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
     const previousDir = process.env.PI_CODING_AGENT_DIR;

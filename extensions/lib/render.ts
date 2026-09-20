@@ -48,6 +48,7 @@ function firstText(content: unknown): string {
 function stripSyntheticResultSections(value: string): string {
   const markers = [
     "\n\n## agy quota snapshot",
+    "\n\n## agy subagents observed",
     "\n\n## git diff --stat",
     "\n\n## git diff --cached --stat",
     "\n\nagy made no newly-dirty files",
@@ -138,6 +139,27 @@ function formatAgyResult(
     metadata.push(`context ${details.context_mode} (${details.context_chars ?? 0} chars)`);
   }
   if (metadata.length) lines.push(theme.fg("dim", metadata.join(" · ")));
+
+  const subagents = Array.isArray(details.subagents) ? details.subagents.slice(0, 32) : [];
+  if (subagents.length) {
+    const done = subagents.filter((entry) => entry?.status === "done").length;
+    const errors = subagents.filter((entry) => entry?.status === "error").length;
+    lines.push(
+      theme.fg(
+        "muted",
+        `${subagents.length} subagent${subagents.length === 1 ? "" : "s"} observed${done ? ` · ${done} done` : ""}${errors ? ` · ${errors} error${errors === 1 ? "" : "s"}` : ""}`,
+      ),
+    );
+    if (expanded) {
+      for (const entry of subagents) {
+        if (!entry || typeof entry !== "object") continue;
+        const name = oneLine(entry.name ?? "subagent", 80);
+        const status = entry.status === "active" ? "active at last event" : oneLine(entry.status, 30);
+        const task = entry.task ? ` · ${oneLine(entry.task, 120)}` : "";
+        lines.push(theme.fg("toolOutput", `↳ ${name} · ${status}${task}`));
+      }
+    }
+  }
 
   const changed = details.changed_files ?? [];
   const preexisting = details.preexisting_files ?? [];

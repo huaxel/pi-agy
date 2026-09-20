@@ -1,5 +1,11 @@
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 
+import {
+  formatAgySubagentProgress,
+  observeAgySubagents,
+  type AgyObservedSubagent,
+} from "./subagents.js";
+
 export interface AgyUsage {
   input_tokens?: number;
   output_tokens?: number;
@@ -20,7 +26,10 @@ export interface AgyStepUpdate {
   tool_info?: {
     name?: string;
     parameters?: Record<string, unknown>;
+    error?: { message?: unknown };
   };
+  subagent_info?: { subagents?: unknown };
+  error?: { message?: unknown };
 }
 
 export interface AgyStreamLine {
@@ -51,6 +60,8 @@ export interface AgyRunResult {
   conversation_id?: string;
   usage?: AgyUsage;
   duration_seconds?: number;
+  /** Bounded observations from subagent stream steps; not live lifecycle state. */
+  subagents?: AgyObservedSubagent[];
 }
 
 export type AgyProgressHandler = (
@@ -107,6 +118,9 @@ export function formatStepProgress(parsed: AgyStreamLine): string | null {
 
   const step = parsed.step_update;
   if (!step) return null;
+
+  const subagentProgress = formatAgySubagentProgress(step);
+  if (subagentProgress) return subagentProgress;
 
   if (step.step_type === "tool" && step.state === "ACTIVE") {
     const name =
@@ -216,6 +230,7 @@ export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult
 
   const step = parsed.step_update;
   if (typeof step?.conversation_id === "string") next.conversation_id = step.conversation_id;
+  if (step) next.subagents = observeAgySubagents(next.subagents, step);
 
   if (parsed.result) {
     if (typeof parsed.result.conversation_id === "string") {

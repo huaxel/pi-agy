@@ -79,6 +79,7 @@ agy_usage
 - **Quota discovery** — `agy_usage` and `/agy usage` report model-specific remaining quota and reset times; executions refresh quota snapshots, automatically fall back when an implicit default is exhausted, and return machine-readable `quota_status` as well.
 - **Custom-agent selection** — `agy_agents` and `/agy agents` list configured agents without inference; `agent` / `agent=name` passes a validated `--agent` and persists its identity with resumable conversations.
 - **Streaming progress and receipts** — live tool steps via `stream-json` and Pi `onUpdate`; direct `/agy` runs persist bounded, expandable TUI-only receipts without feeding them to the primary model.
+- **Observed subagents** — native subagent stream steps produce bounded progress and a capped per-run roster in result details/receipts. `active at last event` is diagnostic history, never a claim of live lifecycle control.
 - **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default) with one-line task summaries; runs that time out or are cancelled are recorded too and stay resumable, and the `agy_history` tool lets agents list past conversations.
 - **Optional Pi context handoff** — `context=summary|recent` sends bounded text-only history while excluding system prompts, thinking, tool calls/results, images, and custom messages; default is `none`.
 - **Repo-aware verify** — prefers `just ci` when a justfile defines `ci:`.

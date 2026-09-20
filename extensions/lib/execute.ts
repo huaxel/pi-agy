@@ -19,6 +19,10 @@ import {
 import { loadAgyConfig, resolveDefaultModel } from "./config.js";
 import type { AgyContextMode } from "./context.js";
 import type { AgyUsage } from "./stream.js";
+import {
+  formatAgySubagentObservations,
+  type AgyObservedSubagent,
+} from "./subagents.js";
 import { withDirLock } from "./lock.js";
 import {
   captureGitBaseline,
@@ -60,6 +64,8 @@ export interface AgyExecutionDetails {
   agent?: string;
   usage?: AgyUsage;
   duration_seconds?: number;
+  /** Stream observations only; entries do not imply a live controllable process. */
+  subagents?: AgyObservedSubagent[];
   changed_files?: string[];
   preexisting_files?: string[];
   context_mode?: AgyContextMode;
@@ -243,6 +249,8 @@ export async function executeAgyTask(
         }
 
         let text = run.response;
+        const subagentSummary = formatAgySubagentObservations(run.subagents);
+        if (subagentSummary) text = `${text}\n\n## ${subagentSummary}`;
         const quotaSummary = quota?.models.length
           ? formatAgyUsage(quota, resolveAgyModelId(model, options.tier))
           : undefined;
@@ -281,6 +289,7 @@ export async function executeAgyTask(
             agent,
             usage: run.usage,
             duration_seconds: run.duration_seconds,
+            subagents: run.subagents,
             changed_files: changedFiles,
             preexisting_files: preexistingFiles,
             context_mode: options.context ?? "none",
