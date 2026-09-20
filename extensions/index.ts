@@ -12,6 +12,7 @@ import {
   resolveAgyModelId,
   type AgyModel,
 } from "./lib/cli.js";
+import { buildAgyContextFromEntries, type AgyContextMode } from "./lib/context.js";
 import { describePreRunDirt } from "./lib/postflight.js";
 import { registerAgyCommand } from "./commands.js";
 import {
@@ -20,6 +21,7 @@ import {
   type AgyMode,
 } from "./lib/execute.js";
 import { describeWhen, truncate } from "./lib/output.js";
+import { renderAgyCall, renderAgyResult } from "./lib/render.js";
 import { getHistory } from "./lib/sessions.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
@@ -50,6 +52,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       "Use gpt-oss when an open-model alternative is specifically desired.",
       "For consequential work, use one family to produce and the opposite family to cross-review in mode=plan; do not spend both quota groups on trivial tasks.",
       "Reuse conversation_id or continue=true for multi-step plan→implement→review handoffs.",
+      "Keep agy_execute context=none unless the delegated task depends on prior Pi discussion; use summary before recent to minimize disclosure.",
       "Use agy_usage before choosing a model when quota availability matters; agy_execute also refreshes and returns a quota snapshot.",
       "Batch related work, prefer digest output for non-write calls, and avoid parallel agy_execute calls within one shared-quota group or directory.",
       "Always review the git diff and run just ci (or the project gate) after agy_execute with mode=accept-edits.",
@@ -105,6 +108,16 @@ export default function piAgyExtension(pi: ExtensionAPI) {
             "Request compact digests instead of full output. Defaults on for plan/sandbox and off for accept-edits.",
         }),
       ),
+      context: Type.Optional(
+        Type.Union(
+          [Type.Literal("none"), Type.Literal("summary"), Type.Literal("recent")],
+          {
+            description:
+              "Optional bounded Pi conversation handoff. Defaults to none; excludes system prompts, thinking, tool arguments, tool results, images, and custom messages.",
+            default: "none",
+          },
+        ),
+      ),
       timeout_ms: Type.Optional(
         Type.Number({
           description: "Timeout in milliseconds (default 300000 = 5m, max 600000).",
@@ -142,6 +155,11 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       const timeoutMs = Math.min(params.timeout_ms ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
       const mode = resolveAgyMode(params.mode);
       const model = params.model as AgyModel | undefined;
+      const contextMode = (params.context ?? "none") as AgyContextMode;
+      const contextText =
+        contextMode === "none"
+          ? undefined
+          : buildAgyContextFromEntries(ctx.sessionManager.buildContextEntries(), contextMode);
       const executionOptions = {
         prompt: params.prompt,
         model,
@@ -155,6 +173,8 @@ export default function piAgyExtension(pi: ExtensionAPI) {
         continue: params.continue,
         new_session: params.new_session,
         stream: params.stream ?? true,
+        context: contextMode,
+        context_text: contextText,
       };
       validateAgyExecutionOptions(executionOptions);
 
@@ -170,13 +190,19 @@ export default function piAgyExtension(pi: ExtensionAPI) {
         const excerpt =
           params.prompt.slice(0, 200) + (params.prompt.length > 200 ? "…" : "");
         const dirtLine = dirt ? `\nworkspace: ${dirt}` : "";
+        const contextLine =
+          contextMode === "none"
+            ? "\ncontext: none"
+            : contextText
+              ? `\ncontext: ${contextMode} (${contextText.length.toLocaleString()} chars; text-only)`
+              : `\ncontext: ${contextMode} (0 chars; no eligible text)`;
         const warning =
           dirt && dirt !== "clean"
             ? `\n\nWarning: uncommitted changes already exist — the result summary only attributes newly-dirty files to agy.`
             : "";
         const approved = await ctx.ui.confirm(
           "Run agy (accept-edits)?",
-          `model: ${modelLabel}\ndir: ${cwd}${dirtLine}\n\ntask: ${excerpt}\n\nThis grants agy permission to modify files and run commands.${warning}`,
+          `model: ${modelLabel}\ndir: ${cwd}${dirtLine}${contextLine}\n\ntask: ${excerpt}\n\nThis grants agy permission to modify files and run commands.${warning}`,
         );
         if (!approved) throw new Error("agy accept-edits cancelled by user");
       }
@@ -193,6 +219,14 @@ export default function piAgyExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: truncate(result.text || "(empty response)") }],
         details: result.details,
       };
+    },
+
+    renderCall(args, theme) {
+      return renderAgyCall(args, theme);
+    },
+
+    renderResult(result, options, theme, context) {
+      return renderAgyResult(result, options, theme, context);
     },
   });
 

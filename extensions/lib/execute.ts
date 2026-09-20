@@ -16,6 +16,7 @@ import {
   type AgyUsageSnapshot,
 } from "./cli.js";
 import { loadAgyConfig, resolveDefaultModel } from "./config.js";
+import type { AgyContextMode } from "./context.js";
 import type { AgyUsage } from "./stream.js";
 import { withDirLock } from "./lock.js";
 import {
@@ -41,6 +42,9 @@ export interface AgyExecutionOptions {
   continue?: boolean;
   new_session?: boolean;
   stream?: boolean;
+  context?: AgyContextMode;
+  /** Pre-serialized bounded Pi context; supplied only when context is not none. */
+  context_text?: string;
 }
 
 export interface AgyExecutionDetails {
@@ -55,6 +59,8 @@ export interface AgyExecutionDetails {
   duration_seconds?: number;
   changed_files?: string[];
   preexisting_files?: string[];
+  context_mode?: AgyContextMode;
+  context_chars?: number;
   /** Model-specific quota information refreshed before the run, when supported. */
   quota?: AgyUsageSnapshot;
   quota_status?: "available" | "unknown";
@@ -128,6 +134,7 @@ export async function executeAgyTask(
           options.mode,
           useDigest,
           verifyCmd,
+          options.context_text,
         );
 
         let quota: AgyUsageSnapshot | undefined;
@@ -253,6 +260,8 @@ export async function executeAgyTask(
             duration_seconds: run.duration_seconds,
             changed_files: changedFiles,
             preexisting_files: preexistingFiles,
+            context_mode: options.context ?? "none",
+            context_chars: options.context_text?.length ?? 0,
             quota,
             quota_status: quotaStatus,
           },

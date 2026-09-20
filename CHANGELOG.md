@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.3
+
+- Add `/agy doctor` diagnostics for the CLI/version, stable model discovery, quota health, config validation, session-store corruption, active/stale workspace locks, and the repository verification gate; add `/agy usage [model]` for direct quota inspection.
+- Add opt-in bounded Pi-context handoff (`context=summary|recent`) for tools and commands. The default remains `none`; system prompts, thinking, tool calls/results, images, and custom extension state are excluded, and the current task stays authoritative.
+- Add native `agy_execute` rendering for compact call cards, live progress, quota/verification/context metadata, duration, changed-versus-pre-existing file attribution, expandable diagnostics, and ANSI-safe output bounds.
+- Persist successful direct and resumed `/agy` runs as bounded, expandable TUI-only receipts that never enter the primary model context; retain notification fallback for stripped-down hosts and treat user aborts as informational cancellations without receipts.
+- Sharpen the package's delegation-first positioning: Pi remains the primary agent, while full provider/model-picker integration is intentionally left to provider packages.
+- Isolate fake-agy tests from live Pi directory locks and add focused doctor, context-privacy, rendering, receipt, fallback, resume, and cancellation coverage.
+
 ## 0.6.2
 
 - Omit unsupported `--effort` flags for Claude thinking and Gemini variant aliases; retain effort selection for GPT-OSS.

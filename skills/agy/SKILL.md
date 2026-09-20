@@ -40,6 +40,7 @@ repetitive refactors, or exhaustive test generation via the Antigravity CLI.
 agy_execute prompt="Refactor all snake_case variables to camelCase in src/models/"
 agy_execute prompt="Generate exhaustive unit tests for src/auth/" model=flash-low
 agy_execute prompt="Plan the migration to ESM" model=sonnet mode=plan digest=true
+agy_execute prompt="Review our earlier API decision" model=sonnet mode=plan context=summary
 agy_execute prompt="Implement the approved plan" conversation_id=<id> mode=accept-edits
 agy_execute prompt="Adversarial review the diff" model=opus effort=high mode=plan
 agy_history
@@ -61,6 +62,7 @@ agy_usage
 - **Run `just ci`** (or the project gate) after write modes in this repo.
 - **Never use agy for irreversible production changes.**
 - Reuse `conversation_id` or `continue=true` for multi-step plan → implement → review.
+- Keep `context=none` (default) unless the task depends on prior Pi discussion; prefer `summary` over `recent` to minimize disclosure. Context handoff excludes system prompts, thinking, tool arguments/results, images, and custom messages.
 - Use `flash-medium` by default, `flash-low` for trivial/high-volume work, and `flash-high` for difficult agentic work.
 - Escalate within the Gemini quota group to `pro-low` or `pro-high` only when needed.
 - Use `sonnet` for normal Claude-group coding/review; reserve `opus` for the hardest architecture or root-cause work.
@@ -72,8 +74,9 @@ agy_usage
 ## Enhancements over upstream pi-agy
 
 - **Quota discovery** — `agy_usage` and `/agy usage` report model-specific remaining quota and reset times; executions refresh quota snapshots, automatically fall back when an implicit default is exhausted, and return machine-readable `quota_status` as well.
-- **Streaming progress** — live tool steps via `stream-json` and Pi `onUpdate`.
+- **Streaming progress and receipts** — live tool steps via `stream-json` and Pi `onUpdate`; direct `/agy` runs persist bounded, expandable TUI-only receipts without feeding them to the primary model.
 - **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default) with one-line task summaries; runs that time out or are cancelled are recorded too and stay resumable, and the `agy_history` tool lets agents list past conversations.
+- **Optional Pi context handoff** — `context=summary|recent` sends bounded text-only history while excluding system prompts, thinking, tool calls/results, images, and custom messages; default is `none`.
 - **Repo-aware verify** — prefers `just ci` when a justfile defines `ci:`.
 - **Diff summary** — accept-edits results append newly-dirty files only; pre-existing dirt is listed separately, never misattributed.
 - **Per-directory lock** — serializes concurrent agy calls on the same tree across Pi processes (symlink-aware).

@@ -1,8 +1,14 @@
 # @juanbenjumea/pi-agy
 
-Enhanced fork of [`@bacnh85/pi-agy`](https://github.com/bacnh85/pi-extensions/tree/main/pi-agy).
+Reliable Antigravity delegation for Pi: quota-aware runs, resumable tasks,
+repo verification, cancellation, and trustworthy diff summaries.
 
-Delegates bulk work to the Antigravity CLI (`agy`) while Pi stays the conductor.
+Pi stays the primary agent and explicitly delegates scoped work to the
+Antigravity CLI (`agy`). Choose this package when you want dependable delegation
+from any Pi model; choose a provider integration when you want Antigravity to be
+your primary model for every turn.
+
+Enhanced fork of [`@bacnh85/pi-agy`](https://github.com/bacnh85/pi-extensions/tree/main/pi-agy).
 
 ## Install
 
@@ -55,6 +61,7 @@ The deadline never discards finished work:
 | `new_session` | Force fresh session; set `false` to reuse last ID for dir |
 | `effort` | Reasoning effort via `--effort` where supported; `gpt-oss` accepts it, while Claude thinking models reject it and Gemini aliases already encode it |
 | `stream` | Use `stream-json` (default `true`) |
+| `context` | Optional Pi history handoff: `none` (default), `summary`, or `recent` |
 | `mode` | `accept-edits` by default; use `plan` for exploration/review |
 
 `agy_execute` refreshes quota information before each run (best effort) and
@@ -72,6 +79,13 @@ headless `/usage` continue without failing the task. The extension requires
 agy 1.1.11+ before invoking `/usage`; older versions are refused safely because
 that command could otherwise consume model quota as a prompt.
 
+Context handoff is opt-in and text-only. `summary` sends up to 12,000
+characters from the latest durable summaries and four conversational messages;
+`recent` sends up to 40,000 characters from the recent conversational tail.
+Both exclude Pi system prompts, thinking, tool arguments, tool results, images,
+and custom extension messages. The current delegated task is appended after the
+reference context and remains authoritative.
+
 The `agy_history` tool lists recorded conversations for a directory — ids,
 models, ages, and one-line task summaries — so agents can find a
 `conversation_id` to resume; `/agy sessions` offers the same in the TUI
@@ -84,15 +98,18 @@ Run agy directly from the Pi TUI — fast path when fully specified, wizard othe
 ```
 /agy flash fix git conflicts        # fully specified → runs immediately
 /agy plan sonnet review the diff    # mode + model + prompt
+/agy context=summary plan sonnet review our earlier decision
 /agy plan                           # wizard: model select → task editor
 /agy                                # wizard: mode → model → task editor
 /agy continue fix the tests         # continue this directory's last conversation
 /agy timeout=10m sonnet big task    # raise the run cap (also 90s / 1500ms; bare = minutes)
 /agy sessions                       # pick a recorded conversation to resume
+/agy doctor                         # diagnose CLI, models, quota, config, sessions, lock, and repo gate
 /agy usage                          # inspect model quotas and reset times
 ```
 
-Leading option tokens (`plan`, a model alias, `continue`, `timeout=…`) are
+Leading option tokens (`plan`, a model alias, `continue`, `context=summary`,
+`context=recent`, `timeout=…`) are
 consumed in any order; the remainder is the prompt. `/agy continue` reuses the
 last model when the session store recorded one. `timeout=` caps at 10m.
 
@@ -102,12 +119,19 @@ The interactive wizard and direct `agy_execute` calls default to
 `accept-edits`; the wizard confirms before writing. Use `plan` explicitly for
 exploration/review. Sandbox runs do not bypass agy permission checks.
 
+`/agy doctor` performs no inference and spends no model tokens. It reports the
+installed CLI version, discoverable stable model aliases, quota support, active
+config, recorded sessions, workspace lock state, and detected verification gate.
+
 Missing pieces open interactive dialogs (mode select, model select with
 descriptions, multi-line task editor). `accept-edits` asks for confirmation
 before writing. The command then runs agy directly with the selected parameters;
-progress is shown in the (throttled) status bar and the final response is
-notified — no second LLM turn or custom TUI surface. `/agy usage` performs the
-same read-only quota check without starting a model turn.
+progress is shown in the throttled status bar and a durable, expandable receipt
+is appended to Pi's transcript. Receipts are TUI-only custom entries: they are
+not sent to the primary model, and context handoff excludes them. Stored task
+text is capped at 500 characters and result text at 8,000 characters. Stripped-down
+hosts fall back to a normal notification. `/agy usage` performs the same read-only
+quota check without starting a model turn.
 
 ## Config
 

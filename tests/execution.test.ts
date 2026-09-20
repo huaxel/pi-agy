@@ -219,6 +219,78 @@ describe("extension registration", () => {
     );
   });
 
+  it("hands opted-in Pi context to agy without system or tool-result content", async () => {
+    type ExecuteTool = { execute: (...args: any[]) => Promise<any> };
+    let executeTool: ExecuteTool | undefined;
+    const fakePi = {
+      registerCommand: () => {},
+      registerTool: (tool: { name: string; execute?: (...args: any[]) => Promise<any> }) => {
+        if (tool.name === "agy_execute" && tool.execute) executeTool = tool as ExecuteTool;
+      },
+    };
+    piAgyExtension(fakePi as unknown as ExtensionAPI);
+    const raw =
+      JSON.stringify({ event: "result", result: { response: "context received", status: "SUCCESS" } }) +
+      "\n";
+
+    await withFakeAgy(raw, async (bin) => {
+      resetPreflightCache();
+      const workDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-context-work-"));
+      const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-context-agent-"));
+      const previousDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      try {
+        const result = await executeTool!.execute(
+          "context-1",
+          {
+            prompt: "Review the compatibility decision",
+            model: "flash-medium",
+            mode: "plan",
+            context: "recent",
+            timeout_ms: 60_000,
+          },
+          undefined,
+          undefined,
+          {
+            cwd: workDir,
+            hasUI: false,
+            sessionManager: {
+              buildContextEntries: () => [
+                { type: "message", message: { role: "system", content: "SYSTEM_SECRET" } },
+                {
+                  type: "message",
+                  message: { role: "user", content: "Keep the public API stable" },
+                },
+                {
+                  type: "message",
+                  message: {
+                    role: "toolResult",
+                    content: [{ type: "text", text: "TOOL_SECRET" }],
+                  },
+                },
+              ],
+            },
+          },
+        );
+
+        const invocations = await readFakeAgyArgs(bin);
+        const printArgs = invocations.find(
+          (argv) => argv.includes("-p") && !argv.includes("/usage"),
+        )!;
+        const recordedInvocation = printArgs.join("\n");
+        assert.match(recordedInvocation, /Keep the public API stable/);
+        assert.match(recordedInvocation, /Review the compatibility decision/);
+        assert.ok(!recordedInvocation.includes("SYSTEM_SECRET"));
+        assert.ok(!recordedInvocation.includes("TOOL_SECRET"));
+        assert.equal(result.details.context_mode, "recent");
+        assert.ok(result.details.context_chars > 0);
+      } finally {
+        if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousDir;
+      }
+    });
+  });
+
   it("validates the agy_usage working directory before spawning", async () => {
     type UsageTool = {
       execute: (...args: any[]) => Promise<unknown>;

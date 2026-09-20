@@ -7,9 +7,16 @@ import {
   resolveAgyModelId,
   type AgyModel,
 } from "./lib/cli.js";
+import { buildAgyContextFromEntries, type AgyContextMode } from "./lib/context.js";
+import { runAgyDoctor } from "./lib/doctor.js";
 import { executeAgyTask } from "./lib/execute.js";
 import { describeWhen, truncate } from "./lib/output.js";
 import { describePreRunDirt } from "./lib/postflight.js";
+import {
+  AGY_RUN_ENTRY_TYPE,
+  renderAgyRunReceipt,
+  type AgyRunReceipt,
+} from "./lib/render.js";
 import { getHistory, getSession } from "./lib/sessions.js";
 
 const MODEL_ALIASES: Record<string, AgyModel> = {
@@ -56,6 +63,8 @@ export interface AgyCommandArgs {
   prompt?: string;
   continue?: boolean;
   timeout_ms?: number;
+  context?: AgyContextMode;
+  error?: string;
 }
 
 /**
@@ -78,6 +87,13 @@ export function parseAgyCommandArgs(args: string): AgyCommandArgs {
       parsed.model = MODEL_ALIASES[value];
     } else if (value === "continue") {
       parsed.continue = true;
+    } else if (value.startsWith("context=")) {
+      const context = value.slice("context=".length);
+      if (context === "none" || context === "summary" || context === "recent") {
+        parsed.context = context;
+      } else {
+        parsed.error = `unknown context mode '${context || "(empty)"}'`;
+      }
     } else if (timeout !== undefined) {
       parsed.timeout_ms = timeout;
     } else {
@@ -112,6 +128,7 @@ interface InteractiveRun {
   conversation_id?: string;
   continue?: boolean;
   timeout_ms?: number;
+  context?: AgyContextMode;
 }
 
 /**
@@ -120,9 +137,13 @@ interface InteractiveRun {
  * confirmed parameters stay authoritative with no second LLM turn.
  */
 export function registerAgyCommand(pi: ExtensionAPI): void {
+  pi.registerEntryRenderer?.(AGY_RUN_ENTRY_TYPE, (entry, options, theme) =>
+    renderAgyRunReceipt(entry.data, options, theme),
+  );
+
   pi.registerCommand("agy", {
     description:
-      "Run agy directly: /agy [mode] [model] [continue] [timeout=10m] <prompt>; use /agy usage to inspect model quotas.",
+      "Run agy directly: /agy [mode] [model] [continue] [context=summary|recent] [timeout=10m] <prompt>; use /agy doctor for diagnostics or /agy usage for quotas.",
     getArgumentCompletions: (prefix: string) => {
       const tokens = prefix.trim().split(/\s+/).filter(Boolean);
       const p = prefix.toLowerCase();
@@ -156,9 +177,16 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       if (tokens.length <= 1) {
         const modes = MODE_KEYS.filter((m) => m.startsWith(tokens[0] ?? ""));
         const models = MODEL_KEYS.filter((k) => k.startsWith(p));
-        const extras = ["continue", "sessions", "usage", "quota", "timeout=10m"].filter((k) =>
-          k.startsWith(p),
-        );
+        const extras = [
+          "continue",
+          "sessions",
+          "doctor",
+          "usage",
+          "quota",
+          "context=summary",
+          "context=recent",
+          "timeout=10m",
+        ].filter((k) => k.startsWith(p));
         return [
           ...modes.map((m) => ({ value: m, label: m })),
           ...models.map((m) => ({ value: m, label: m })),
@@ -175,7 +203,16 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
 
       const command = args.trim().toLowerCase();
       if (command === "sessions") {
-        await runSessionsPicker(ctx);
+        await runSessionsPicker(pi, ctx);
+        return;
+      }
+      const doctorMatch = /^doctor(?:\s+(.+))?$/.exec(command);
+      if (doctorMatch) {
+        if (doctorMatch[1]) {
+          ctx.ui.notify("agy: doctor takes no arguments", "error");
+          return;
+        }
+        await showDoctor(ctx);
         return;
       }
       const usageMatch = /^(?:usage|quota)(?:\s+(\S+))?$/.exec(command);
@@ -190,6 +227,10 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       }
 
       const parsed = parseAgyCommandArgs(args);
+      if (parsed.error) {
+        ctx.ui.notify(`agy: ${parsed.error}`, "error");
+        return;
+      }
 
       let mode: InteractiveRun["mode"] | undefined = parsed.mode;
       if (!mode) {
@@ -225,15 +266,36 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
         prompt = text.trim();
       }
 
-      await executeConfirmedRun(ctx, {
+      await executeConfirmedRun(pi, ctx, {
         mode,
         model,
         prompt,
         continue: parsed.continue,
         timeout_ms: parsed.timeout_ms,
+        context: parsed.context,
       });
     },
   });
+}
+
+/** `/agy doctor` — diagnose the CLI and local integration without inference. */
+async function showDoctor(ctx: ExtensionCommandContext): Promise<void> {
+  try {
+    await ctx.waitForIdle();
+    ctx.ui.setStatus("agy", "agy: running diagnostics…");
+    const report = await runAgyDoctor(ctx.cwd, ctx.signal);
+    const type = report.status === "error" ? "error" : report.status === "warn" ? "warning" : "info";
+    ctx.ui.notify(report.text, type);
+  } catch (error) {
+    if (ctx.signal?.aborted) {
+      ctx.ui.notify("agy: doctor cancelled", "info");
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`agy doctor failed: ${message}`, "error");
+    }
+  } finally {
+    ctx.ui.setStatus("agy", undefined);
+  }
 }
 
 /** `/agy usage` — show model quotas without starting an agent turn. */
@@ -253,7 +315,10 @@ async function showUsage(
 }
 
 /** `/agy sessions` — pick a recorded conversation and resume it with a follow-up. */
-async function runSessionsPicker(ctx: ExtensionCommandContext): Promise<void> {
+async function runSessionsPicker(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
   const history = await getHistory(ctx.cwd);
   if (history.length === 0) {
     ctx.ui.notify("agy: no recorded conversations for this directory", "info");
@@ -290,7 +355,7 @@ async function runSessionsPicker(ctx: ExtensionCommandContext): Promise<void> {
     return;
   }
 
-  await executeConfirmedRun(ctx, {
+  await executeConfirmedRun(pi, ctx, {
     mode,
     model: isAgyModel(entry.model) ? entry.model : "flash-medium",
     prompt: text.trim(),
@@ -298,19 +363,35 @@ async function runSessionsPicker(ctx: ExtensionCommandContext): Promise<void> {
   });
 }
 
-async function executeConfirmedRun(ctx: ExtensionCommandContext, run: InteractiveRun): Promise<void> {
+async function executeConfirmedRun(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  run: InteractiveRun,
+): Promise<void> {
   const cwd = ctx.cwd;
+  await ctx.waitForIdle();
+  const contextMode = run.context ?? "none";
+  const contextText =
+    contextMode === "none"
+      ? undefined
+      : buildAgyContextFromEntries(ctx.sessionManager.buildContextEntries(), contextMode);
 
   if (run.mode === "accept-edits") {
     const dirt = await describePreRunDirt(cwd, ctx.signal).catch(() => null);
     const dirtLine = dirt ? `\nworkspace: ${dirt}` : "";
+    const contextLine =
+      contextMode === "none"
+        ? "\ncontext: none"
+        : contextText
+          ? `\ncontext: ${contextMode} (${contextText.length.toLocaleString()} chars; text-only)`
+          : `\ncontext: ${contextMode} (0 chars; no eligible text)`;
     const warning =
       dirt && dirt !== "clean"
         ? `\n\nWarning: uncommitted changes already exist — the result summary only attributes newly-dirty files to agy.`
         : "";
     const ok = await ctx.ui.confirm(
       "Run agy (accept-edits)?",
-      `model: ${run.model} (${resolveAgyModelId(run.model)})\ndir: ${cwd}${dirtLine}\n\ntask: ${run.prompt.slice(0, 200)}${run.prompt.length > 200 ? "…" : ""}\n\nThis grants agy permission to modify files and run commands.${warning}`,
+      `model: ${run.model} (${resolveAgyModelId(run.model)})\ndir: ${cwd}${dirtLine}${contextLine}\n\ntask: ${run.prompt.slice(0, 200)}${run.prompt.length > 200 ? "…" : ""}\n\nThis grants agy permission to modify files and run commands.${warning}`,
     );
     if (!ok) {
       ctx.ui.notify("agy: cancelled", "info");
@@ -322,7 +403,6 @@ async function executeConfirmedRun(ctx: ExtensionCommandContext, run: Interactiv
   // a second LLM turn and the command works even when tools are limited.
   const status = createStatusThrottler(ctx);
   try {
-    await ctx.waitForIdle();
     status(`starting (${run.model} · ${run.mode})`);
     const result = await executeAgyTask(
       {
@@ -335,16 +415,33 @@ async function executeConfirmedRun(ctx: ExtensionCommandContext, run: Interactiv
         continue: run.continue,
         new_session: run.conversation_id || run.continue ? false : true,
         stream: true,
+        context: contextMode,
+        context_text: contextText,
       },
       ctx.signal,
       (progress) => status(progress),
     );
     status(undefined);
-    ctx.ui.notify(truncate(result.text || "(empty response)", 4000), "info");
+    const text = truncate(result.text || "(empty response)");
+    if (typeof pi.appendEntry === "function") {
+      pi.appendEntry(AGY_RUN_ENTRY_TYPE, {
+        task: truncate(run.prompt, 500),
+        text,
+        details: result.details,
+        completed_at: new Date().toISOString(),
+      } satisfies AgyRunReceipt);
+    } else {
+      // Compatibility fallback for stripped-down hosts and test harnesses.
+      ctx.ui.notify(truncate(text, 4000), "info");
+    }
   } catch (error) {
     status(undefined);
-    const message = error instanceof Error ? error.message : String(error);
-    ctx.ui.notify(`agy failed: ${message}`, "error");
+    if (ctx.signal?.aborted) {
+      ctx.ui.notify("agy: cancelled", "info");
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`agy failed: ${message}`, "error");
+    }
   }
 }
 

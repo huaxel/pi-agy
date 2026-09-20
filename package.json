@@ -1,7 +1,7 @@
 {
   "name": "@juanbenjumea/pi-agy",
   "version": "0.6.2",
-  "description": "Enhanced Antigravity CLI (agy) bridge for Pi — streaming progress, conversation continuity, repo-aware verify, and diff summaries.",
+  "description": "Reliable Antigravity delegation for Pi — quota-aware runs, resumable tasks, repo verification, cancellation, and trustworthy diff summaries.",
   "type": "module",
   "license": "MIT",
   "author": "Juan Benjumea",
@@ -45,9 +45,11 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "@sinclair/typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-tui": "^0.85.1",
     "@sinclair/typebox": "^0.34.41",
     "@types/node": "^22.0.0",
     "typescript": "^5.0.0"

@@ -58,7 +58,16 @@ describe("/agy command", () => {
     assert.ok(getCompletions);
 
     const bare = getCompletions!("")!.map((c) => c.value);
-    for (const expected of ["plan", "flash", "sonnet", "continue", "sessions", "timeout=10m"]) {
+    for (const expected of [
+      "plan",
+      "flash",
+      "sonnet",
+      "continue",
+      "sessions",
+      "doctor",
+      "context=summary",
+      "timeout=10m",
+    ]) {
       assert.ok(bare.includes(expected), `missing completion: ${expected}`);
     }
 
@@ -76,17 +85,96 @@ describe("/agy command", () => {
     assert.equal(getCompletions!("plan flash review the diff"), null);
   });
 
+  it("rejects doctor arguments without falling through to the task wizard", async () => {
+    let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+    const fakePi = {
+      registerCommand: (
+        _name: string,
+        definition: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+      ) => {
+        handler = definition.handler;
+      },
+    };
+    registerAgyCommand(fakePi as unknown as ExtensionAPI);
+
+    const notifications: Array<[string, string | undefined]> = [];
+    await handler!("doctor --json", {
+      mode: "tui",
+      cwd: process.cwd(),
+      waitForIdle: async () => {},
+      ui: {
+        select: async () => {
+          throw new Error("doctor arguments fell through to the task wizard");
+        },
+        notify: (message: string, type?: "info" | "warning" | "error") =>
+          notifications.push([message, type]),
+      },
+    } as unknown as ExtensionCommandContext);
+
+    assert.deepEqual(notifications, [["agy: doctor takes no arguments", "error"]]);
+  });
+
+  it("runs doctor diagnostics and delivers the report through the UI", async () => {
+    await withFakeAgy("", async () => {
+      const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-doctor-command-"));
+      const previousDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      try {
+        let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+        const fakePi = {
+          registerCommand: (
+            _name: string,
+            definition: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+          ) => {
+            handler = definition.handler;
+          },
+        };
+        registerAgyCommand(fakePi as unknown as ExtensionAPI);
+
+        const statuses: Array<[string, string | undefined]> = [];
+        const notifications: Array<[string, string | undefined]> = [];
+        await handler!("doctor", {
+          mode: "tui",
+          cwd: process.cwd(),
+          waitForIdle: async () => {},
+          ui: {
+            setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
+            notify: (message: string, type?: "info" | "warning" | "error") =>
+              notifications.push([message, type]),
+          },
+        } as unknown as ExtensionCommandContext);
+
+        assert.ok(statuses.some(([, text]) => text === "agy: running diagnostics…"));
+        assert.deepEqual(statuses.at(-1), ["agy", undefined]);
+        assert.ok(notifications.some(([message]) => message.startsWith("agy doctor — ")));
+      } finally {
+        if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousDir;
+      }
+    });
+  });
+
   it("executes directly without sending a second user message", async () => {
     const raw =
       JSON.stringify({ event: "result", result: { response: "direct result", status: "SUCCESS" } }) +
       "\n";
     await withFakeAgy(raw, async () => {
       resetPreflightCache();
+      const workDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-command-work-"));
+      const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-command-agent-"));
+      const previousDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
       let waitForIdleCalls = 0;
       const statuses: Array<[string, string | undefined]> = [];
       const notifications: Array<[string, string | undefined]> = [];
+      const entries: Array<{ customType: string; data: any }> = [];
+      let rendererType: string | undefined;
       let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
       const fakePi = {
+        registerEntryRenderer: (customType: string) => {
+          rendererType = customType;
+        },
+        appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
         registerCommand: (
           _name: string,
           definition: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
@@ -96,24 +184,99 @@ describe("/agy command", () => {
       };
       registerAgyCommand(fakePi as unknown as ExtensionAPI);
 
-      await handler!("plan flash inspect files", {
+      try {
+        const task = `inspect files ${"carefully ".repeat(80)}`;
+        await handler!(`plan flash ${task}`, {
+          mode: "tui",
+          cwd: workDir,
+          signal: undefined,
+          waitForIdle: async () => {
+            waitForIdleCalls++;
+          },
+          ui: {
+            setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
+            notify: (message: string, type?: "info" | "warning" | "error") =>
+              notifications.push([message, type]),
+          },
+        } as unknown as ExtensionCommandContext);
+
+        assert.equal(waitForIdleCalls, 1);
+        assert.ok(statuses.some(([, text]) => text?.includes("starting")));
+        assert.deepEqual(statuses.at(-1), ["agy", undefined]);
+        assert.equal(rendererType, "agy-run-receipt");
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0]!.customType, "agy-run-receipt");
+        assert.equal(entries[0]!.data.text, "direct result");
+        assert.equal(entries[0]!.data.details.mode, "plan");
+        assert.ok(entries[0]!.data.task.length <= 500);
+        assert.match(entries[0]!.data.completed_at, /^\d{4}-\d{2}-\d{2}T/);
+        assert.ok(!notifications.some(([message]) => message.includes("direct result")));
+      } finally {
+        if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousDir;
+      }
+    });
+  });
+
+  it("falls back to a notification when custom entries are unavailable", async () => {
+    const raw = JSON.stringify({
+      event: "result",
+      result: { response: "fallback result", status: "SUCCESS" },
+    });
+    await withFakeAgy(raw, async () => {
+      let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+      registerAgyCommand({
+        registerCommand: (
+          _name: string,
+          definition: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+        ) => {
+          handler = definition.handler;
+        },
+      } as unknown as ExtensionAPI);
+      const notifications: Array<[string, string | undefined]> = [];
+      await handler!("plan flash fallback task", {
         mode: "tui",
         cwd: process.cwd(),
-        signal: undefined,
-        waitForIdle: async () => {
-          waitForIdleCalls++;
-        },
+        waitForIdle: async () => {},
         ui: {
-          setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
+          setStatus: () => {},
           notify: (message: string, type?: "info" | "warning" | "error") =>
             notifications.push([message, type]),
         },
       } as unknown as ExtensionCommandContext);
+      assert.ok(notifications.some(([message, type]) => message.includes("fallback result") && type === "info"));
+    });
+  });
 
-      assert.equal(waitForIdleCalls, 1);
-      assert.ok(statuses.some(([, text]) => text?.includes("starting")));
-      assert.deepEqual(statuses.at(-1), ["agy", undefined]);
-      assert.ok(notifications.some(([message]) => message.includes("direct result")));
+  it("reports an aborted direct run as cancellation and appends no receipt", async () => {
+    await withFakeAgy("", async () => {
+      let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+      const entries: unknown[] = [];
+      registerAgyCommand({
+        appendEntry: (_customType: string, data: unknown) => entries.push(data),
+        registerCommand: (
+          _name: string,
+          definition: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+        ) => {
+          handler = definition.handler;
+        },
+      } as unknown as ExtensionAPI);
+      const controller = new AbortController();
+      controller.abort();
+      const notifications: Array<[string, string | undefined]> = [];
+      await handler!("plan flash cancelled task", {
+        mode: "tui",
+        cwd: process.cwd(),
+        signal: controller.signal,
+        waitForIdle: async () => {},
+        ui: {
+          setStatus: () => {},
+          notify: (message: string, type?: "info" | "warning" | "error") =>
+            notifications.push([message, type]),
+        },
+      } as unknown as ExtensionCommandContext);
+      assert.deepEqual(notifications.at(-1), ["agy: cancelled", "info"]);
+      assert.equal(entries.length, 0);
     });
   });
 
@@ -147,7 +310,9 @@ describe("/agy command", () => {
         let handler:
           | ((args: string, ctx: ExtensionCommandContext) => Promise<void>)
           | undefined;
+        const entries: Array<{ customType: string; data: any }> = [];
         const fakePi = {
+          appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
           registerCommand: (
             _name: string,
             definition: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
@@ -184,7 +349,10 @@ describe("/agy command", () => {
         ]);
         const args = await readFakeAgyArgs(bin);
         assert.ok(args.some((argv) => hasFlagPair(argv, "--conversation", "conv-1111")));
-        assert.ok(notifications.some(([message]) => message.includes("resumed")));
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0]!.customType, "agy-run-receipt");
+        assert.match(entries[0]!.data.text, /^resumed(?:\n|$)/);
+        assert.ok(!notifications.some(([message]) => message.includes("resumed")));
       } finally {
         if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = previousDir;
@@ -257,6 +425,20 @@ describe("parseAgyCommandArgs", () => {
     const parsed = parseAgyCommandArgs("plan review, then continue");
     assert.equal(parsed.continue, undefined);
     assert.equal(parsed.prompt, "review, then continue");
+  });
+
+  it("parses bounded context modes among leading options", () => {
+    const parsed = parseAgyCommandArgs("context=summary plan sonnet review the decision");
+    assert.equal(parsed.context, "summary");
+    assert.equal(parsed.mode, "plan");
+    assert.equal(parsed.model, "sonnet");
+    assert.equal(parsed.prompt, "review the decision");
+  });
+
+  it("rejects unknown context modes before they become prompt text", () => {
+    const parsed = parseAgyCommandArgs("context=everything plan inspect");
+    assert.equal(parsed.error, "unknown context mode 'everything'");
+    assert.equal(parsed.prompt, "inspect");
   });
 });
 

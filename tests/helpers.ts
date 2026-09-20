@@ -12,11 +12,13 @@ export async function withFakeAgy<T>(
   failureConversationId = "",
   usageOutput = "{}",
   hangAfterOutputMs = 0,
+  modelsOutput = "fake-model",
 ): Promise<T> {
   const delaySeconds = (delayMs / 1000).toFixed(3);
   const hangSeconds = (hangAfterOutputMs / 1000).toFixed(3);
   const failureEncoded = Buffer.from(failureOutput).toString("base64");
   const usageEncoded = Buffer.from(usageOutput).toString("base64");
+  const modelsEncoded = Buffer.from(modelsOutput).toString("base64");
   const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bin-"));
   // Output travels via a file: argv strings are capped at ~128 KB, which
   // megabyte-scale payloads would exceed.
@@ -37,7 +39,8 @@ case "$1" in
     echo
     ;;
   models)
-    echo "fake-model"
+    printf '%s' '${modelsEncoded}' | base64 --decode
+    echo
     echo "gemini-9.9-flash-medium is deprecated, use the latest" >&2
     ;;
   *)
@@ -63,12 +66,19 @@ esac
   await chmod(path.join(bin, "agy"), 0o755);
 
   const originalPath = process.env.PATH;
+  const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`;
+  const tempRoot = path.resolve(os.tmpdir()) + path.sep;
+  const hasExplicitTempAgentDir =
+    originalAgentDir !== undefined && path.resolve(originalAgentDir).startsWith(tempRoot);
+  if (!hasExplicitTempAgentDir) process.env.PI_CODING_AGENT_DIR = path.join(bin, "agent");
   try {
     return await fn(bin);
   } finally {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
+    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
     resetPreflightCache();
   }
 }
