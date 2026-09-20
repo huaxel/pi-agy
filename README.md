@@ -42,7 +42,9 @@ Auth is unchanged: existing `agy` OAuth (`~/.gemini/oauth_creds.json`).
 `timeout_ms` (default 5m, max 10m) is a hard parent-side deadline — lock
 waits, preflight probes, and post-run summaries all count against it. When
 it fires, the full agy process group is killed so nested tools cannot
-outlive the run.
+outlive the run. agy's own `--print-timeout` is set five seconds later because
+agy 1.1.28+ returns partial output with exit code 0 when that internal timer
+fires; Pi therefore remains the authoritative timeout owner.
 
 Active tool updates show bounded intent (for example a tool action or async
 threshold) but never echo full command lines, which may contain secrets.

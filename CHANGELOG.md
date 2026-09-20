@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.8
+
+- Keep agy's internal `--print-timeout` five seconds behind Pi's hard parent deadline. agy 1.1.28+ returns partial output with exit code 0 when its own timeout fires, so Pi must win the race to classify the run as timed out and preserve resumable-conversation guidance.
+- Recognize agy 1.2.6+ structured `AGY_ERROR` records with a top-level `retryable` boolean while retaining legacy status-text matching. Strict whole-line JSON parsing rejects malformed and user-controlled lookalikes, and canonical `retryable: false` overrides legacy patterns such as `429`.
+- Add `npm run test:live`, an opt-in, zero-inference smoke for the installed CLI version, stable model aliases, custom-agent roster, quota schema, and doctor integration; refresh compile/test dependencies to Pi 0.86.1.
+- Make CI and releases deterministic with `npm ci`, clean-tree and package checks, and isolate npm OIDC permissions in a publish-only job that runs only after unprivileged verification succeeds.
+
 ## 0.6.7
 
 - Add custom-agent discovery health to `/agy doctor` using the same bounded, read-only `agy agents` path as `agy_agents` and `/agy agents`.

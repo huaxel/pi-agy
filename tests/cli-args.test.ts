@@ -57,6 +57,16 @@ describe("buildAgyArgs", () => {
     assert.ok(args.includes("stream-json"));
   });
 
+  it("keeps agy's partial-success print timeout behind Pi's hard deadline", () => {
+    const args = buildAgyArgs({
+      prompt: "test",
+      mode: "plan",
+      dir: "/tmp",
+      timeout_ms: 1_500,
+    });
+    assert.ok(hasFlagPair(args, "--print-timeout", "7s"));
+  });
+
   it("passes a normalized custom agent as a distinct argv value", () => {
     const args = buildAgyArgs({
       prompt: "test",
@@ -241,11 +251,23 @@ describe("isTransientAgyFailure", () => {
     assert.ok(isTransientAgyFailure("RESOURCE_EXHAUSTED (code 429): quota exceeded"));
     assert.ok(isTransientAgyFailure("503 overloaded, try again"));
     assert.ok(isTransientAgyFailure("fetch failed: socket hang up"));
+    assert.ok(
+      isTransientAgyFailure(
+        'AGY_ERROR: {"status":"UNKNOWN","code":14,"retryable":true,"error_id":"abc"}',
+      ),
+    );
   });
 
   it("does not classify cancellations or hard errors as transient", () => {
     assert.ok(!isTransientAgyFailure("agy was cancelled (timeout)"));
     assert.ok(!isTransientAgyFailure("agy exited with code 2:\nunknown flag"));
+    assert.ok(
+      !isTransientAgyFailure(
+        'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED","code":429,"retryable":false}',
+      ),
+    );
+    assert.ok(!isTransientAgyFailure('tool rejected input {"retryable":true}'));
+    assert.ok(!isTransientAgyFailure('AGY_ERROR: not-json {"retryable":true}'));
     assert.ok(!isTransientAgyFailure("Antigravity CLI not found in PATH."));
   });
 });

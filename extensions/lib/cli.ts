@@ -90,6 +90,10 @@ export interface AgyOptions {
 }
 
 const PREFLIGHT_TIMEOUT_MS = 10_000;
+// agy >= 1.1.28 returns partial output with exit 0 when its own print timeout
+// fires. Keep that timeout behind Pi's hard parent deadline (and its 2s kill
+// escalation) so a timed-out partial response can never be reported as success.
+const PRINT_TIMEOUT_BUFFER_MS = 5_000;
 // Raw stdout capture bound; only the non-streaming/parse-failure fallback —
 // the stream-json path accumulates results incrementally and is not capped by
 // it. Large enough that plain-text fallbacks rarely truncate.
@@ -236,9 +240,29 @@ export function supportsAgyEffort(model?: AgyModel, tier?: AgyOptions["tier"]): 
 const TRANSIENT_FAILURE_PATTERN =
   /rate.?limit|resource[_ -]?exhausted|429|overloaded|temporarily unavailable|network|connection (reset|refused)|econnreset|etimedout|socket hang up|\b50[023]\b/i;
 
+function parseStructuredRetryability(message: string): boolean | undefined {
+  for (const line of message.split(/\r?\n/)) {
+    const match = line.match(/^\s*AGY_ERROR:\s*(\{.*\})\s*$/);
+    if (!match) continue;
+    try {
+      const parsed: unknown = JSON.parse(match[1]);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        typeof (parsed as { retryable?: unknown }).retryable === "boolean"
+      ) {
+        return (parsed as { retryable: boolean }).retryable;
+      }
+    } catch {
+      // Malformed structured diagnostics fall back to legacy text matching.
+    }
+  }
+  return undefined;
+}
+
 /** Heuristic for transient agy failures that are safe to retry once. */
 export function isTransientAgyFailure(message: string): boolean {
-  return TRANSIENT_FAILURE_PATTERN.test(message);
+  return parseStructuredRetryability(message) ?? TRANSIENT_FAILURE_PATTERN.test(message);
 }
 
 const MAX_AGENT_NAME_LENGTH = 128;
@@ -294,7 +318,7 @@ export function buildAgyArgs(options: AgyOptions): string[] {
 
   const model = resolveAgyModelId(options.model, options.tier);
   const agent = normalizeAgyAgentName(options.agent);
-  const timeoutSec = Math.ceil(options.timeout_ms / 1000);
+  const timeoutSec = Math.ceil((options.timeout_ms + PRINT_TIMEOUT_BUFFER_MS) / 1000);
   const mode = options.mode ?? "accept-edits";
   const writes = mode === "accept-edits";
   const skipPermissions = options.skipPermissions ?? true;
