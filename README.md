@@ -42,6 +42,13 @@ waits, preflight probes, and post-run summaries all count against it. When
 it fires, the full agy process group is killed so nested tools cannot
 outlive the run.
 
+Active tool updates show bounded intent (for example a tool action or async
+threshold) but never echo full command lines, which may contain secrets.
+Background commands are intentionally not detached or managed out-of-band:
+agy exposes no reliable headless task lifecycle or task-to-process ownership,
+so timeout/cancellation still kills the full process tree and prevents work from
+continuing after the directory lock is released.
+
 The deadline never discards finished work:
 
 - A response that fully arrived before the kill is returned with an
@@ -51,6 +58,9 @@ The deadline never discards finished work:
   are skipped with a note rather than failing the run.
 - The conversation id is recorded on timeout and cancellation, so the run
   stays resumable via `conversation_id`, `/agy continue`, or `/agy sessions`.
+  Timeout errors distinguish ids successfully recorded for `/agy continue` or
+  `/agy sessions` from ids merely observed when local persistence failed; the
+  latter can still be resumed by passing `conversation_id` explicitly.
 
 ## Tool params (new)
 

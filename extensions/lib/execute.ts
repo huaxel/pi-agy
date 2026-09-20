@@ -272,6 +272,7 @@ export async function executeAgyTask(
     );
   } catch (error) {
     const conversationId = getAgyConversationId(error);
+    let conversationPersisted = false;
     if (conversationId) {
       try {
         // The composed signal is aborted in exactly the cases this save
@@ -285,12 +286,18 @@ export async function executeAgyTask(
           AbortSignal.timeout(10_000),
           conversationSummary(options.prompt),
         );
+        conversationPersisted = true;
       } catch {
         // Preserve the original agy failure; session persistence is best effort.
       }
     }
     if (budgetController.signal.aborted && !signal?.aborted) {
-      throw new Error(`agy timed out after ${options.timeout_ms}ms`);
+      const resume = conversationId
+        ? conversationPersisted
+          ? `; conversation ${JSON.stringify(conversationId.slice(0, 128))} was recorded — resume with conversation_id, /agy continue, or /agy sessions`
+          : `; conversation ${JSON.stringify(conversationId.slice(0, 128))} was observed — resume with conversation_id`
+        : "";
+      throw new Error(`agy timed out after ${options.timeout_ms}ms${resume}`);
     }
     throw error;
   } finally {

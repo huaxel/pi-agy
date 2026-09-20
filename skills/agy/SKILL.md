@@ -60,7 +60,7 @@ agy_usage
 - **Default to `mode=plan`** for exploration; escalate to `accept-edits` only for scoped batches.
 - **Always review the `git diff`** after agy runs with `accept-edits`.
 - **Run `just ci`** (or the project gate) after write modes in this repo.
-- **Never use agy for irreversible production changes.**
+- **Never use agy for irreversible production changes or persistent background servers/watchers.** Delegations are bounded; timeout/cancellation kills the full process tree rather than releasing unowned work.
 - Reuse `conversation_id` or `continue=true` for multi-step plan → implement → review.
 - Keep `context=none` (default) unless the task depends on prior Pi discussion; prefer `summary` over `recent` to minimize disclosure. Context handoff excludes system prompts, thinking, tool arguments/results, images, and custom messages.
 - Use `flash-medium` by default, `flash-low` for trivial/high-volume work, and `flash-high` for difficult agentic work.

@@ -654,7 +654,7 @@ describe("shared executor", () => {
               },
               undefined,
             ),
-            /timed out/,
+            /timed out.*conversation "timeout-conv" was recorded.*resume with conversation_id.*\/agy continue.*\/agy sessions/s,
           );
           const store = JSON.parse(
             await readFile(path.join(agentDir, "agy-sessions.json"), "utf8"),
@@ -669,6 +669,49 @@ describe("shared executor", () => {
         "", // failureConversationId
         "{}", // usageOutput
         60_000, // hangAfterOutputMs — far past the 1.5s budget
+      );
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+  });
+
+  it("reports an observed id when timeout persistence fails", async () => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
+    await writeFile(path.join(agentDir, "agy-sessions.json"), "{broken");
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const raw = JSON.stringify({
+      event: "init",
+      conversation_id: "observed-conv",
+      init: { model: "fake" },
+    });
+    try {
+      await withFakeAgy(
+        raw,
+        async () => {
+          resetPreflightCache();
+          await assert.rejects(
+            executeAgyTask(
+              {
+                prompt: "hang with a corrupt store",
+                mode: "plan",
+                dir: process.cwd(),
+                timeout_ms: 1_000,
+                new_session: true,
+                stream: true,
+              },
+              undefined,
+            ),
+            /conversation "observed-conv" was observed — resume with conversation_id/,
+          );
+        },
+        0,
+        0,
+        "",
+        "",
+        "{}",
+        60_000,
       );
     } finally {
       if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

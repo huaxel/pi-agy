@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.4
+
+- Add bounded active-tool progress details from agy's existing stream (`TargetFile`, task id, human-facing action/summary, and async threshold) while deliberately never exposing full `CommandLine` values that may contain secrets.
+- Strip ANSI CSI/OSC sequences, ASCII/C1 controls, and Unicode bidi controls from streamed tool names and progress details before rendering.
+- Make timeout recovery guidance truthful: successfully persisted conversation ids point to `conversation_id`, `/agy continue`, and `/agy sessions`; observed-only ids fall back to explicit `conversation_id` when the local session store could not be written.
+- Document and preserve the bounded execution invariant: background tasks are not detached because agy 1.2.7 exposes no reliable headless lifecycle or task-to-process ownership; timeout/cancellation continues to kill the full process tree before releasing the workspace lock.
+
 ## 0.6.3
 
 - Add `/agy doctor` diagnostics for the CLI/version, stable model discovery, quota health, config validation, session-store corruption, active/stale workspace locks, and the repository verification gate; add `/agy usage [model]` for direct quota inspection.

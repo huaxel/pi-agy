@@ -165,6 +165,67 @@ describe("stream parser", () => {
     assert.equal(formatStepProgress(parsed!), "▸ write_to_file → /tmp/a.ts");
   });
 
+  it("shows active-tool intent and async thresholds without exposing command text", () => {
+    const command = parseStreamLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          step_type: "tool",
+          state: "ACTIVE",
+          tool_name: "\u001b[31mrun_command\u001b[0m",
+          tool_info: {
+            parameters: {
+              CommandLine: "curl -H 'Authorization: secret' https://example.test",
+              toolAction: "\u001b]0;hidden title\u0007Starting\u202e\n development server",
+              WaitMsBeforeAsync: 5_000,
+            },
+          },
+        },
+      }),
+    );
+    const progress = formatStepProgress(command!);
+    assert.equal(progress, "▸ run_command — Starting development server · async threshold 5s");
+    assert.ok(!progress?.includes("secret"));
+
+    const task = parseStreamLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          step_type: "tool",
+          state: "ACTIVE",
+          tool_name: "manage_task",
+          tool_info: {
+            parameters: {
+              TaskId: "task-42",
+              toolAction: "Checking status",
+              WaitMsBeforeAsync: -1,
+            },
+          },
+        },
+      }),
+    );
+    assert.equal(
+      formatStepProgress(task!),
+      "▸ manage_task → task task-42 — Checking status",
+    );
+
+    const summary = parseStreamLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          step_type: "tool",
+          state: "ACTIVE",
+          tool_name: "run_command",
+          tool_info: { parameters: { toolSummary: "Building project", WaitMsBeforeAsync: 250 } },
+        },
+      }),
+    );
+    assert.equal(
+      formatStepProgress(summary!),
+      "▸ run_command — Building project · async threshold 250ms",
+    );
+  });
+
   it("uses stable progress for response deltas", () => {
     const parsed = parseStreamLine(
       JSON.stringify({

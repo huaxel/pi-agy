@@ -1,3 +1,5 @@
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
+
 export interface AgyUsage {
   input_tokens?: number;
   output_tokens?: number;
@@ -70,6 +72,25 @@ export function parseStreamLine(line: string): AgyStreamLine | null {
   }
 }
 
+function compactProgressValue(value: unknown, max = 120): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const compact = stripTerminalSequences(value)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!compact) return undefined;
+  return compact.length > max ? compact.slice(0, max - 1) + "…" : compact;
+}
+
+function formatAsyncThreshold(value: unknown): string | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+  if (value >= 1_000) {
+    const seconds = value / 1_000;
+    return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s`;
+  }
+  return `${value}ms`;
+}
+
 export function formatStepProgress(parsed: AgyStreamLine): string | null {
   if (parsed.event === "init") {
     const model = parsed.init?.model ?? "agy";
@@ -88,9 +109,24 @@ export function formatStepProgress(parsed: AgyStreamLine): string | null {
   if (!step) return null;
 
   if (step.step_type === "tool" && step.state === "ACTIVE") {
-    const name = step.tool_name ?? step.tool_info?.name ?? "tool";
-    const target = step.tool_info?.parameters?.TargetFile;
-    return target ? `▸ ${name} → ${String(target)}` : `▸ ${name}`;
+    const name =
+      compactProgressValue(step.tool_name ?? step.tool_info?.name, 40) ?? "tool";
+    const parameters = step.tool_info?.parameters;
+    const target = compactProgressValue(parameters?.TargetFile);
+    const action =
+      compactProgressValue(parameters?.toolAction) ??
+      compactProgressValue(parameters?.toolSummary);
+    const taskId = compactProgressValue(parameters?.TaskId, 60);
+    const asyncThreshold = formatAsyncThreshold(parameters?.WaitMsBeforeAsync);
+    const detail = target
+      ? ` → ${target}`
+      : taskId
+        ? ` → task ${taskId}${action ? ` — ${action}` : ""}`
+        : action
+          ? ` — ${action}`
+          : "";
+    const asyncNote = asyncThreshold ? ` · async threshold ${asyncThreshold}` : "";
+    return `▸ ${name}${detail}${asyncNote}`;
   }
 
   if (step.step_type === "agent_response" && step.text_delta) {
