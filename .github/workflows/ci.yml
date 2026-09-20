@@ -10,10 +10,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - run: npm install
+          package-manager-cache: false
+      - run: npm ci
       - run: npm test
       - run: npm run typecheck
+      - run: git diff --exit-code
+      - run: npm run pack:check

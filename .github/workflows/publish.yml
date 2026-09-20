@@ -5,14 +5,30 @@ on:
     tags: ['v*.*.*']
   workflow_dispatch:
 
-permissions:
-  id-token: write
-  contents: read
-  attestations: write
-
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: git diff --exit-code
+      - run: npm run pack:check
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -33,9 +49,6 @@ jobs:
           NPM_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
           echo "::add-mask::$NPM_TOKEN"
           echo "token=$NPM_TOKEN" >> "$GITHUB_OUTPUT"
-      - run: npm install
-      - run: npm test
-      - run: npm run typecheck
       - run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ steps.npm-token.outputs.token }}
