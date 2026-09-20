@@ -58,13 +58,12 @@ describe("extension registration", () => {
     };
     piAgyExtension(fakePi as unknown as ExtensionAPI);
     assert.deepEqual(commands, ["agy"]);
-    assert.equal(tools.length, 3);
+    assert.equal(tools.length, 4);
     assert.equal(tools[0].name, "agy_execute");
-    assert.equal(tools[1].name, "agy_history");
-    assert.equal(tools[2].name, "agy_usage");
-    assert.ok(tools[0].parameters);
-    assert.ok(tools[1].parameters);
-    assert.ok(tools[2].parameters);
+    assert.equal(tools[1].name, "agy_agents");
+    assert.equal(tools[2].name, "agy_history");
+    assert.equal(tools[3].name, "agy_usage");
+    for (const tool of tools) assert.ok(tool.parameters);
   });
 
   it("lists recorded conversations through agy_history", async () => {
@@ -101,6 +100,7 @@ describe("extension registration", () => {
             {
               conversation_id: "conv-1",
               model: "flash-low",
+              agent: "gsd-debugger",
               updated_at: new Date().toISOString(),
               summary: "fix git conflicts",
             },
@@ -120,7 +120,7 @@ describe("extension registration", () => {
       });
       assert.match(result.content[0].text, new RegExp(`agy conversations for .*${workDir}`));
       assert.match(result.content[0].text, /conv-1/);
-      assert.match(result.content[0].text, /flash-low · just now/);
+      assert.match(result.content[0].text, /flash-low · agent gsd-debugger · just now/);
       assert.match(result.content[0].text, /fix git conflicts/);
       assert.match(result.content[0].text, /sonnet · 1h ago/);
       assert.match(result.content[0].text, /review the auth diff/);
@@ -141,6 +141,34 @@ describe("extension registration", () => {
       if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousDir;
     }
+  });
+
+  it("lists configured custom agents through agy_agents", async () => {
+    type AgentsTool = {
+      execute: (...args: any[]) => Promise<{
+        content: Array<{ text: string }>;
+        details: { agents: string[] };
+      }>;
+    };
+    let agentsTool: AgentsTool | undefined;
+    piAgyExtension({
+      registerCommand: () => {},
+      registerTool: (tool: { name: string; execute?: (...args: any[]) => Promise<any> }) => {
+        if (tool.name === "agy_agents" && tool.execute) agentsTool = tool as AgentsTool;
+      },
+    } as unknown as ExtensionAPI);
+
+    await withFakeAgy("", async () => {
+      const result = await agentsTool!.execute(
+        "agents-1",
+        {},
+        undefined,
+        undefined,
+        { cwd: process.cwd() },
+      );
+      assert.deepEqual(result.details.agents, ["fake-agent"]);
+      assert.match(result.content[0].text, /configured agy agents:\n- fake-agent/);
+    });
   });
 
   it("reports targeted quota status through agy_usage", async () => {
@@ -333,6 +361,52 @@ describe("extension registration", () => {
 
 
 describe("shared executor", () => {
+  it("inherits the recorded custom agent for an explicit conversation resume", async () => {
+    const raw =
+      JSON.stringify({ event: "result", result: { response: "resumed", status: "SUCCESS" } }) +
+      "\n";
+    await withFakeAgy(raw, async (bin) => {
+      resetPreflightCache();
+      const workDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agent-resume-work-"));
+      const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agent-resume-store-"));
+      const previousDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      await writeFile(
+        path.join(agentDir, "agy-sessions.json"),
+        JSON.stringify({
+          [path.resolve(workDir)]: {
+            history: [{
+              conversation_id: "conv-agent",
+              model: "flash-medium",
+              agent: "gsd-debugger",
+              updated_at: new Date().toISOString(),
+            }],
+          },
+        }),
+      );
+      try {
+        const result = await executeAgyTask(
+          {
+            prompt: "continue debugging",
+            model: "flash-medium",
+            mode: "plan",
+            dir: workDir,
+            timeout_ms: 60_000,
+            conversation_id: "conv-agent",
+            stream: true,
+          },
+          undefined,
+        );
+        assert.equal(result.details.agent, "gsd-debugger");
+        const args = await readFakeAgyArgs(bin);
+        assert.ok(args.some((argv) => hasFlagPair(argv, "--agent", "gsd-debugger")));
+      } finally {
+        if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousDir;
+      }
+    });
+  });
+
   it("includes refreshed model quota in the result", async () => {
     const raw =
       JSON.stringify({ event: "result", result: { response: "quota-aware", status: "SUCCESS" } }) +

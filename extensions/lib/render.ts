@@ -64,6 +64,7 @@ export function renderAgyCall(
     model?: unknown;
     tier?: unknown;
     mode?: unknown;
+    agent?: unknown;
     context?: unknown;
     prompt?: unknown;
   } | undefined,
@@ -73,12 +74,13 @@ export function renderAgyCall(
   const model = callArgs.model ?? callArgs.tier ?? "default";
   const mode = callArgs.mode ?? "accept-edits";
   const contextMode = callArgs.context ?? "none";
+  const agent = callArgs.agent ? oneLine(callArgs.agent, 128) : "";
   const header =
     theme.fg("toolTitle", theme.bold("agy ")) +
     theme.fg("accent", String(model)) +
     theme.fg(
       "dim",
-      ` · ${String(mode)}${contextMode === "none" ? "" : ` · context ${String(contextMode)}`}`,
+      ` · ${String(mode)}${agent ? ` · agent ${agent}` : ""}${contextMode === "none" ? "" : ` · context ${String(contextMode)}`}`,
     );
   const promptLine = oneLine(callArgs.prompt, 180);
   return new Text(
@@ -123,7 +125,10 @@ function formatAgyResult(
       : "";
   const lines = [
     theme.fg("success", "✓ agy") +
-      theme.fg("muted", ` · ${details.model} · ${details.mode}${duration}`),
+      theme.fg(
+        "muted",
+        ` · ${details.model} · ${details.mode}${details.agent ? ` · agent ${oneLine(details.agent, 128)}` : ""}${duration}`,
+      ),
   ];
 
   const metadata: string[] = [];

@@ -13,12 +13,14 @@ export async function withFakeAgy<T>(
   usageOutput = "{}",
   hangAfterOutputMs = 0,
   modelsOutput = "fake-model",
+  agentsOutput = "fake-agent",
 ): Promise<T> {
   const delaySeconds = (delayMs / 1000).toFixed(3);
   const hangSeconds = (hangAfterOutputMs / 1000).toFixed(3);
   const failureEncoded = Buffer.from(failureOutput).toString("base64");
   const usageEncoded = Buffer.from(usageOutput).toString("base64");
   const modelsEncoded = Buffer.from(modelsOutput).toString("base64");
+  const agentsEncoded = Buffer.from(agentsOutput).toString("base64");
   const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bin-"));
   // Output travels via a file: argv strings are capped at ~128 KB, which
   // megabyte-scale payloads would exceed.
@@ -42,6 +44,10 @@ case "$1" in
     printf '%s' '${modelsEncoded}' | base64 --decode
     echo
     echo "gemini-9.9-flash-medium is deprecated, use the latest" >&2
+    ;;
+  agents)
+    printf '%s' '${agentsEncoded}' | base64 --decode
+    echo
     ;;
   *)
     if [ "${delayMs}" -gt 0 ]; then sleep "${delaySeconds}"; fi

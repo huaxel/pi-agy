@@ -42,6 +42,7 @@ describe("agy run receipt rendering", () => {
       details: {
         model: "sonnet",
         mode: "plan",
+        agent: "gsd-debugger",
         dir: "/repo",
         verify_cmd: null,
         duration_seconds: 4.2,
@@ -52,7 +53,7 @@ describe("agy run receipt rendering", () => {
     };
     const text = rendered(renderAgyRunReceipt(receipt, { expanded: false }, theme as any));
     assert.match(text, /task: Review the cancellation path and preserve cleanup diagnostics/);
-    assert.match(text, /✓ agy · sonnet · plan · 4\.2s/);
+    assert.match(text, /✓ agy · sonnet · plan · agent gsd-debugger · 4\.2s/);
     assert.match(text, /review complete/);
     assert.ok(!text.includes("hidden quota"));
     assert.ok(!text.includes("src/cancel.ts"));
@@ -78,13 +79,14 @@ describe("agy_execute rendering", () => {
           prompt: "Review the compatibility layer and focus on cancellation semantics",
           model: "sonnet",
           mode: "plan",
+          agent: "gsd-debugger",
           context: "summary",
         },
         theme,
         {},
       ),
     );
-    assert.match(text, /agy sonnet · plan · context summary/);
+    assert.match(text, /agy sonnet · plan · agent gsd-debugger · context summary/);
     assert.match(text, /Review the compatibility layer/);
 
     const incomplete = tool.renderCall(undefined, theme, {}).render(200);

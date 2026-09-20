@@ -74,9 +74,9 @@ describe("session store", () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-sessions-"));
     const store = createSessionStore(path.join(tmp, "agy-sessions.json"));
 
-    await store.saveSession("/p", "c1", "flash-medium");
+    await store.saveSession("/p", "c1", "flash-medium", undefined, undefined, "gsd-debugger");
     await store.saveSession("/p", "c2", "sonnet");
-    await store.saveSession("/p", "c1", "flash-low");
+    await store.saveSession("/p", "c1", "flash-low", undefined, undefined, "gsd-debugger");
 
     const history = await store.getHistory("/p");
     assert.deepEqual(
@@ -84,6 +84,8 @@ describe("session store", () => {
       ["c1", "c2"],
     );
     assert.equal(history[0].model, "flash-low");
+    assert.equal(history[0].agent, "gsd-debugger");
+    assert.equal((await store.getSession("/p"))?.last_agent, "gsd-debugger");
 
     for (let i = 0; i < 12; i++) await store.saveSession("/p", `extra-${i}`);
     assert.equal((await store.getHistory("/p")).length, 10);
@@ -115,7 +117,11 @@ describe("session store", () => {
       storePath,
       JSON.stringify({
         [path.resolve("/p")]: {
-          history: [{ conversation_id: 42 }, null, { conversation_id: "ok", updated_at: "now" }],
+          history: [
+            { conversation_id: 42 },
+            null,
+            { conversation_id: "ok", updated_at: "now", agent: "bad\nagent" },
+          ],
         },
       }),
     );

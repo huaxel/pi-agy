@@ -24,11 +24,12 @@ Requires Node.js >= 20.3.
 |---------|----------|-----------|
 | Live progress | Final text only | `stream-json` → Pi `onUpdate` cards |
 | Model aliases | Hardcoded ids | Live `agy models` catalog (newest stable generation wins; preview/experimental ignored), static map fallback |
-| Conversation resume | None | `conversation_id`, `continue`, session store with task summaries, `/agy sessions` picker, `agy_history` discovery tool — runs that time out or are cancelled are recorded too |
+| Conversation resume | None | `conversation_id`, `continue`, session store with task summaries and custom-agent identity, `/agy sessions` picker, `agy_history` discovery tool — runs that time out or are cancelled are recorded too |
 | Verify injection | `npm test` only | `just ci` first, then `npm test`/`uv run pytest` |
 | Post-write summary | None | Appends `git diff --stat` for newly-dirty files only; pre-existing dirt (including renames and unstaged edits) is listed separately and never misattributed |
 | Preflight | Every call | Health/model checks cached 5 min per process; model quotas refresh every minute |
 | Quota discovery | None | Read-only `/usage` probe exposes model-specific remaining quota and reset times to agents |
+| Custom agents | None | Read-only `agy_agents` / `/agy agents` discovery plus validated `agent` / `agent=name` selection via `--agent` |
 | Concurrency | Unlocked | Per-directory lock (in-process + filesystem, symlink-aware), lock wait counts against the timeout |
 | Transient failures | Fatal | One retry when agy fails before doing any work |
 | Cancellation | Direct child only | Full process-tree kill on cancel/timeout via detached process groups; a fully delivered result is preserved |
@@ -70,6 +71,7 @@ The deadline never discards finished work:
 | `continue` | `--continue` most recent conversation |
 | `new_session` | Force fresh session; set `false` to reuse last ID for dir |
 | `effort` | Reasoning effort via `--effort` where supported; `gpt-oss` accepts it, while Claude thinking models reject it and Gemini aliases already encode it |
+| `agent` | Optional configured custom agy agent name; discover names with `agy_agents` |
 | `stream` | Use `stream-json` (default `true`) |
 | `context` | Optional Pi history handoff: `none` (default), `summary`, or `recent` |
 | `mode` | `accept-edits` by default; use `plan` for exploration/review |
@@ -96,10 +98,16 @@ Both exclude Pi system prompts, thinking, tool arguments, tool results, images,
 and custom extension messages. The current delegated task is appended after the
 reference context and remains authoritative.
 
+The `agy_agents` tool runs the read-only `agy agents` subcommand and returns
+configured custom-agent names without spending a model turn. Pass an exact
+name as `agy_execute agent`; initial selection is always explicit, while known
+conversation resumes restore their recorded agent.
+
 The `agy_history` tool lists recorded conversations for a directory — ids,
-models, ages, and one-line task summaries — so agents can find a
+models, custom agents, ages, and one-line task summaries — so agents can find a
 `conversation_id` to resume; `/agy sessions` offers the same in the TUI
-picker. Summaries are stored locally (first ~80 chars of each prompt).
+picker. Summaries are stored locally (first ~80 chars of each prompt), and a
+recorded custom agent is restored when that conversation resumes.
 
 ## Human-callable `/agy` command
 
@@ -108,6 +116,8 @@ Run agy directly from the Pi TUI — fast path when fully specified, wizard othe
 ```
 /agy flash fix git conflicts        # fully specified → runs immediately
 /agy plan sonnet review the diff    # mode + model + prompt
+/agy agents                         # list configured custom agents (read-only)
+/agy plan agent=gsd-debugger investigate the crash
 /agy context=summary plan sonnet review our earlier decision
 /agy plan                           # wizard: model select → task editor
 /agy                                # wizard: mode → model → task editor
@@ -118,10 +128,10 @@ Run agy directly from the Pi TUI — fast path when fully specified, wizard othe
 /agy usage                          # inspect model quotas and reset times
 ```
 
-Leading option tokens (`plan`, a model alias, `continue`, `context=summary`,
-`context=recent`, `timeout=…`) are
-consumed in any order; the remainder is the prompt. `/agy continue` reuses the
-last model when the session store recorded one. `timeout=` caps at 10m.
+Leading option tokens (`plan`, a model alias, `agent=name`, `continue`,
+`context=summary`, `context=recent`, `timeout=…`) are consumed in any order;
+the remainder is the prompt. `/agy continue` reuses the last model and custom
+agent when the session store recorded them. `timeout=` caps at 10m.
 
 First token optional: `accept-edits` / `plan` / `sandbox` mode prefix, then a
 model alias (`flash`, `pro`, `sonnet`, `opus`, `gpt-oss`, …), then the prompt.
@@ -141,7 +151,8 @@ is appended to Pi's transcript. Receipts are TUI-only custom entries: they are
 not sent to the primary model, and context handoff excludes them. Stored task
 text is capped at 500 characters and result text at 8,000 characters. Stripped-down
 hosts fall back to a normal notification. `/agy usage` performs the same read-only
-quota check without starting a model turn.
+quota check without starting a model turn; `/agy agents` likewise lists custom
+agents without inference.
 
 ## Config
 

@@ -7,7 +7,9 @@ import {
   checkAgyUsage,
   findAgyQuotaEntries,
   formatAgyUsage,
+  inspectAgyAgents,
   isAgyQuotaExhausted,
+  normalizeAgyAgentName,
   resolveAgyModelAlias,
   resolveAgyModelId,
   type AgyModel,
@@ -22,7 +24,7 @@ import {
 } from "./lib/execute.js";
 import { describeWhen, truncate } from "./lib/output.js";
 import { renderAgyCall, renderAgyResult } from "./lib/render.js";
-import { getHistory } from "./lib/sessions.js";
+import { getHistory, getSession } from "./lib/sessions.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -52,6 +54,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       "Use gpt-oss when an open-model alternative is specifically desired.",
       "For consequential work, use one family to produce and the opposite family to cross-review in mode=plan; do not spend both quota groups on trivial tasks.",
       "Reuse conversation_id or continue=true for multi-step plan→implement→review handoffs.",
+      "Use agent only when the user requests a configured custom agy agent; call agy_agents first if the exact name is unknown.",
       "Keep agy_execute context=none unless the delegated task depends on prior Pi discussion; use summary before recent to minimize disclosure.",
       "Use agy_usage before choosing a model when quota availability matters; agy_execute also refreshes and returns a quota snapshot.",
       "Batch related work, prefer digest output for non-write calls, and avoid parallel agy_execute calls within one shared-quota group or directory.",
@@ -83,6 +86,13 @@ export default function piAgyExtension(pi: ExtensionAPI) {
         Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
           description:
             "Reasoning effort passed to agy (--effort). Optional; mostly useful for sonnet/opus/gpt-oss since Gemini aliases encode effort in the model id.",
+        }),
+      ),
+      agent: Type.Optional(
+        Type.String({
+          description: "Configured custom agy agent name. Use agy_agents to discover names.",
+          minLength: 1,
+          maxLength: 128,
         }),
       ),
       tier: Type.Optional(
@@ -156,6 +166,19 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       const mode = resolveAgyMode(params.mode);
       const model = params.model as AgyModel | undefined;
       const contextMode = (params.context ?? "none") as AgyContextMode;
+      let agent = normalizeAgyAgentName(params.agent);
+      if (!agent && params.conversation_id) {
+        agent = (await getHistory(cwd)).find(
+          (entry) => entry.conversation_id === params.conversation_id,
+        )?.agent;
+      } else if (!agent && (params.continue || params.new_session === false)) {
+        const storedAgent = (await getSession(cwd))?.last_agent;
+        try {
+          agent = normalizeAgyAgentName(storedAgent);
+        } catch {
+          // Ignore malformed legacy session metadata.
+        }
+      }
       const contextText =
         contextMode === "none"
           ? undefined
@@ -165,6 +188,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
         model,
         tier: params.tier,
         effort: params.effort,
+        agent,
         mode,
         dir: cwd,
         digest: params.digest,
@@ -190,6 +214,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
         const excerpt =
           params.prompt.slice(0, 200) + (params.prompt.length > 200 ? "…" : "");
         const dirtLine = dirt ? `\nworkspace: ${dirt}` : "";
+        const agentLine = agent ? `\nagent: ${agent}` : "";
         const contextLine =
           contextMode === "none"
             ? "\ncontext: none"
@@ -202,7 +227,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
             : "";
         const approved = await ctx.ui.confirm(
           "Run agy (accept-edits)?",
-          `model: ${modelLabel}\ndir: ${cwd}${dirtLine}${contextLine}\n\ntask: ${excerpt}\n\nThis grants agy permission to modify files and run commands.${warning}`,
+          `model: ${modelLabel}${agentLine}\ndir: ${cwd}${dirtLine}${contextLine}\n\ntask: ${excerpt}\n\nThis grants agy permission to modify files and run commands.${warning}`,
         );
         if (!approved) throw new Error("agy accept-edits cancelled by user");
       }
@@ -227,6 +252,44 @@ export default function piAgyExtension(pi: ExtensionAPI) {
 
     renderResult(result, options, theme, context) {
       return renderAgyResult(result, options, theme, context);
+    },
+  });
+
+  pi.registerTool({
+    name: "agy_agents",
+    label: "Antigravity Agents",
+    description:
+      "List configured custom agy agents without spending a model turn. Use the returned name as agy_execute agent.",
+    promptSnippet: "Discover configured custom agy agents before selecting one",
+    parameters: Type.Object({
+      dir: Type.Optional(
+        Type.String({
+          description: "Working directory used for the agy CLI check. Defaults to current project root.",
+        }),
+      ),
+    }),
+
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const cwd = params.dir ? path.resolve(ctx.cwd, params.dir) : ctx.cwd;
+      if (params.dir) {
+        try {
+          const info = await stat(cwd);
+          if (!info.isDirectory()) throw new Error(`Working directory is not a directory: ${cwd}`);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            throw new Error(`Working directory does not exist: ${cwd}`);
+          }
+          throw error;
+        }
+      }
+      const agents = await inspectAgyAgents(cwd, signal);
+      const text = agents.length
+        ? `configured agy agents:\n${agents.map((agent) => `- ${agent}`).join("\n")}`
+        : "No custom agy agents are configured.";
+      return {
+        content: [{ type: "text", text }],
+        details: { cwd, agents },
+      };
     },
   });
 
@@ -267,12 +330,13 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       }
       const lines = limited.map((entry, index) => {
         const model = entry.model ?? "unknown model";
+        const agent = entry.agent ? ` · agent ${entry.agent}` : "";
         const summary = entry.summary ? ` · ${entry.summary}` : "";
-        return `${index + 1}. ${entry.conversation_id} · ${model} · ${describeWhen(entry.updated_at)}${summary}`;
+        return `${index + 1}. ${entry.conversation_id} · ${model}${agent} · ${describeWhen(entry.updated_at)}${summary}`;
       });
       const text =
         `agy conversations for ${cwd} (most recent first):\n${lines.join("\n")}\n\n` +
-        "Resume with agy_execute conversation_id=<id>, or continue=true for the most recent.";
+        "Resume with agy_execute conversation_id=<id>, or continue=true for the most recent; recorded agents are restored automatically.";
       return {
         content: [{ type: "text", text }],
         details: { dir: cwd, conversations: limited },

@@ -64,6 +64,8 @@ describe("/agy command", () => {
       "sonnet",
       "continue",
       "sessions",
+      "agents",
+      "agent=",
       "doctor",
       "context=summary",
       "timeout=10m",
@@ -73,6 +75,7 @@ describe("/agy command", () => {
 
     const afterMode = getCompletions!("plan ")!.map((c) => c.value);
     assert.ok(afterMode.includes("flash-medium"));
+    assert.ok(afterMode.includes("agent="));
     assert.ok(afterMode.includes("continue"));
     assert.ok(afterMode.includes("timeout=10m"));
     assert.ok(!afterMode.includes("plan"));
@@ -154,11 +157,38 @@ describe("/agy command", () => {
     });
   });
 
+  it("lists configured custom agents without starting an inference turn", async () => {
+    await withFakeAgy("", async (bin) => {
+      let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+      registerAgyCommand({
+        registerCommand: (
+          _name: string,
+          definition: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+        ) => {
+          handler = definition.handler;
+        },
+      } as unknown as ExtensionAPI);
+      const notifications: Array<[string, string | undefined]> = [];
+      await handler!("agents", {
+        mode: "tui",
+        cwd: process.cwd(),
+        waitForIdle: async () => {},
+        ui: {
+          setStatus: () => {},
+          notify: (message: string, type?: "info" | "warning" | "error") =>
+            notifications.push([message, type]),
+        },
+      } as unknown as ExtensionCommandContext);
+      assert.deepEqual(notifications, [["configured agy agents:\n- fake-agent", "info"]]);
+      assert.deepEqual(await readFakeAgyArgs(bin), [["agents"]]);
+    });
+  });
+
   it("executes directly without sending a second user message", async () => {
     const raw =
       JSON.stringify({ event: "result", result: { response: "direct result", status: "SUCCESS" } }) +
       "\n";
-    await withFakeAgy(raw, async () => {
+    await withFakeAgy(raw, async (bin) => {
       resetPreflightCache();
       const workDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-command-work-"));
       const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-command-agent-"));
@@ -186,7 +216,7 @@ describe("/agy command", () => {
 
       try {
         const task = `inspect files ${"carefully ".repeat(80)}`;
-        await handler!(`plan flash ${task}`, {
+        await handler!(`plan flash agent=gsd-debugger ${task}`, {
           mode: "tui",
           cwd: workDir,
           signal: undefined,
@@ -208,6 +238,9 @@ describe("/agy command", () => {
         assert.equal(entries[0]!.customType, "agy-run-receipt");
         assert.equal(entries[0]!.data.text, "direct result");
         assert.equal(entries[0]!.data.details.mode, "plan");
+        assert.equal(entries[0]!.data.details.agent, "gsd-debugger");
+        const invocations = await readFakeAgyArgs(bin);
+        assert.ok(invocations.some((argv) => hasFlagPair(argv, "--agent", "gsd-debugger")));
         assert.ok(entries[0]!.data.task.length <= 500);
         assert.match(entries[0]!.data.completed_at, /^\d{4}-\d{2}-\d{2}T/);
         assert.ok(!notifications.some(([message]) => message.includes("direct result")));
@@ -291,6 +324,7 @@ describe("/agy command", () => {
             {
               conversation_id: "conv-1111",
               model: "flash-medium",
+              agent: "gsd-debugger",
               updated_at: new Date().toISOString(),
               summary: "fix git conflicts",
             },
@@ -344,11 +378,12 @@ describe("/agy command", () => {
         } as unknown as ExtensionCommandContext);
 
         assert.deepEqual(selections, [
-          "1. fix git conflicts · flash-medium · just now · conv-111…",
+          "1. fix git conflicts · flash-medium · agent gsd-debugger · just now · conv-111…",
           "accept-edits — writes files (default)",
         ]);
         const args = await readFakeAgyArgs(bin);
         assert.ok(args.some((argv) => hasFlagPair(argv, "--conversation", "conv-1111")));
+        assert.ok(args.some((argv) => hasFlagPair(argv, "--agent", "gsd-debugger")));
         assert.equal(entries.length, 1);
         assert.equal(entries[0]!.customType, "agy-run-receipt");
         assert.match(entries[0]!.data.text, /^resumed(?:\n|$)/);
@@ -406,6 +441,13 @@ describe("parseAgyCommandArgs", () => {
   it("returns empty object for bare /agy", () => {
     const parsed = parseAgyCommandArgs("");
     assert.deepEqual(parsed, {});
+  });
+
+  it("parses and preserves a custom agent name", () => {
+    const parsed = parseAgyCommandArgs("plan agent=GSD-Debugger review the crash");
+    assert.equal(parsed.agent, "GSD-Debugger");
+    assert.equal(parsed.prompt, "review the crash");
+    assert.match(parseAgyCommandArgs("agent= plan task").error ?? "", /must not be empty/);
   });
 
   it("parses continue and timeout tokens", () => {

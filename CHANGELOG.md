@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.5
+
+- Add `agy_agents` and `/agy agents` to list configured custom agy agents through the CLI's read-only `agy agents` subcommand without spending a model turn; parsing is control-safe and capped at 200 names.
+- Add validated custom-agent selection to `agy_execute` (`agent`) and `/agy` (`agent=name`), passed as a distinct `--agent` argv value with no shell interpolation.
+- Persist custom-agent identity with conversation history and restore it automatically for known `conversation_id`, `continue=true`, `/agy continue`, and `/agy sessions` resumes.
+- Show the effective custom agent in write confirmations, progress, native tool cards, durable receipts, history output, and session-picker labels; add focused discovery, validation, argv, rendering, and continuity coverage.
+
 ## 0.6.4
 
 - Add bounded active-tool progress details from agy's existing stream (`TargetFile`, task id, human-facing action/summary, and async threshold) while deliberately never exposing full `CommandLine` values that may contain secrets.

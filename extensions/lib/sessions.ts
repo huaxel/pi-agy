@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 export interface AgyConversationEntry {
   conversation_id: string;
   model?: string;
+  agent?: string;
   updated_at: string;
   /** Short task excerpt so humans and agents can tell conversations apart. */
   summary?: string;
@@ -24,6 +25,7 @@ export interface AgyConversationEntry {
 export interface AgySessionRecord {
   last_conversation_id?: string;
   last_model?: string;
+  last_agent?: string;
   updated_at?: string;
   /** Recent conversations for the directory, most recent first. */
   history?: AgyConversationEntry[];
@@ -69,6 +71,7 @@ export interface AgySessionStore {
     model?: string,
     signal?: AbortSignal,
     summary?: string,
+    agent?: string,
   ): Promise<void>;
 }
 
@@ -160,6 +163,12 @@ export function createSessionStore(
               updated_at: entry.updated_at,
             };
             if (typeof entry.model === "string") normalized.model = entry.model;
+            if (typeof entry.agent === "string") {
+              const agent = entry.agent.trim();
+              if (agent && agent.length <= 128 && !/[\x00-\x1f\x7f]/.test(agent)) {
+                normalized.agent = agent;
+              }
+            }
             if (typeof entry.summary === "string") normalized.summary = entry.summary;
             return normalized;
           })
@@ -245,6 +254,7 @@ export function createSessionStore(
     model?: string,
     signal?: AbortSignal,
     summary?: string,
+    agent?: string,
   ): Promise<void> {
     const operation = waitForMutation(signal).then(() =>
       withStoreLock(async () => {
@@ -255,9 +265,10 @@ export function createSessionStore(
         store[key] = {
           last_conversation_id: conversationId,
           last_model: model,
+          last_agent: agent,
           updated_at: updatedAt,
           history: [
-            { conversation_id: conversationId, model, updated_at: updatedAt, summary },
+            { conversation_id: conversationId, model, agent, updated_at: updatedAt, summary },
             ...(Array.isArray(record.history) ? record.history : []).filter(
               (entry) =>
                 entry &&
@@ -295,6 +306,7 @@ export function saveSession(
   model?: string,
   signal?: AbortSignal,
   summary?: string,
+  agent?: string,
 ): Promise<void> {
-  return defaultStore.saveSession(dir, conversationId, model, signal, summary);
+  return defaultStore.saveSession(dir, conversationId, model, signal, summary, agent);
 }

@@ -3,7 +3,9 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import {
   checkAgyUsage,
   formatAgyUsage,
+  inspectAgyAgents,
   isAgyModel,
+  normalizeAgyAgentName,
   resolveAgyModelId,
   type AgyModel,
 } from "./lib/cli.js";
@@ -60,6 +62,7 @@ const MAX_TIMEOUT_MS = 600_000;
 export interface AgyCommandArgs {
   mode?: "plan" | "accept-edits" | "sandbox";
   model?: AgyModel;
+  agent?: string;
   prompt?: string;
   continue?: boolean;
   timeout_ms?: number;
@@ -68,7 +71,7 @@ export interface AgyCommandArgs {
 }
 
 /**
- * Parse `/agy [mode] [model] [continue] [timeout=10m] <prompt>` — leading
+ * Parse `/agy [mode] [model] [agent=name] [continue] [timeout=10m] <prompt>` — leading
  * option tokens are consumed in any order; the remainder is the prompt.
  */
 export function parseAgyCommandArgs(args: string): AgyCommandArgs {
@@ -87,6 +90,12 @@ export function parseAgyCommandArgs(args: string): AgyCommandArgs {
       parsed.model = MODEL_ALIASES[value];
     } else if (value === "continue") {
       parsed.continue = true;
+    } else if (value.startsWith("agent=")) {
+      try {
+        parsed.agent = normalizeAgyAgentName(token.value.slice("agent=".length));
+      } catch (error) {
+        parsed.error = error instanceof Error ? error.message : String(error);
+      }
     } else if (value.startsWith("context=")) {
       const context = value.slice("context=".length);
       if (context === "none" || context === "summary" || context === "recent") {
@@ -124,6 +133,7 @@ function readToken(value: string): { value: string; end: number } | undefined {
 interface InteractiveRun {
   mode: "plan" | "accept-edits" | "sandbox";
   model: AgyModel;
+  agent?: string;
   prompt: string;
   conversation_id?: string;
   continue?: boolean;
@@ -143,7 +153,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
 
   pi.registerCommand("agy", {
     description:
-      "Run agy directly: /agy [mode] [model] [continue] [context=summary|recent] [timeout=10m] <prompt>; use /agy doctor for diagnostics or /agy usage for quotas.",
+      "Run agy directly: /agy [mode] [model] [agent=name] [continue] [context=summary|recent] [timeout=10m] <prompt>; use /agy agents to list custom agents.",
     getArgumentCompletions: (prefix: string) => {
       const tokens = prefix.trim().split(/\s+/).filter(Boolean);
       const p = prefix.toLowerCase();
@@ -159,6 +169,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
           ...(tokens[0] === "usage" || tokens[0] === "quota"
             ? []
             : [
+                { value: "agent=", label: "agent=" },
                 { value: "continue", label: "continue" },
                 { value: "timeout=10m", label: "timeout=10m" },
               ]),
@@ -180,6 +191,8 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
         const extras = [
           "continue",
           "sessions",
+          "agents",
+          "agent=",
           "doctor",
           "usage",
           "quota",
@@ -204,6 +217,15 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       const command = args.trim().toLowerCase();
       if (command === "sessions") {
         await runSessionsPicker(pi, ctx);
+        return;
+      }
+      const agentsMatch = /^agents(?:\s+(.+))?$/.exec(command);
+      if (agentsMatch) {
+        if (agentsMatch[1]) {
+          ctx.ui.notify("agy: agents takes no arguments", "error");
+          return;
+        }
+        await showAgents(ctx);
         return;
       }
       const doctorMatch = /^doctor(?:\s+(.+))?$/.exec(command);
@@ -243,9 +265,17 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       }
 
       let model = parsed.model;
-      if (!model && parsed.continue) {
+      let agent = parsed.agent;
+      if (parsed.continue && (!model || !agent)) {
         const prior = await getSession(ctx.cwd);
-        if (prior?.last_model && isAgyModel(prior.last_model)) model = prior.last_model;
+        if (!model && prior?.last_model && isAgyModel(prior.last_model)) model = prior.last_model;
+        if (!agent && prior?.last_agent) {
+          try {
+            agent = normalizeAgyAgentName(prior.last_agent);
+          } catch {
+            // Ignore malformed legacy session metadata.
+          }
+        }
       }
       if (!model) {
         const pick = await ctx.ui.select("agy model", MODEL_OPTIONS);
@@ -269,6 +299,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       await executeConfirmedRun(pi, ctx, {
         mode,
         model,
+        agent,
         prompt,
         continue: parsed.continue,
         timeout_ms: parsed.timeout_ms,
@@ -292,6 +323,27 @@ async function showDoctor(ctx: ExtensionCommandContext): Promise<void> {
     } else {
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`agy doctor failed: ${message}`, "error");
+    }
+  } finally {
+    ctx.ui.setStatus("agy", undefined);
+  }
+}
+
+/** `/agy agents` — list configured custom agents without inference. */
+async function showAgents(ctx: ExtensionCommandContext): Promise<void> {
+  try {
+    await ctx.waitForIdle();
+    ctx.ui.setStatus("agy", "agy: discovering custom agents…");
+    const agents = await inspectAgyAgents(ctx.cwd, ctx.signal);
+    ctx.ui.notify(
+      agents.length ? `configured agy agents:\n${agents.map((agent) => `- ${agent}`).join("\n")}` : "No custom agy agents are configured.",
+      "info",
+    );
+  } catch (error) {
+    if (ctx.signal?.aborted) ctx.ui.notify("agy: agent discovery cancelled", "info");
+    else {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`agy agent discovery failed: ${message}`, "error");
     }
   } finally {
     ctx.ui.setStatus("agy", undefined);
@@ -328,8 +380,9 @@ async function runSessionsPicker(
   const options = history.map((entry, index) => {
     const id = entry.conversation_id.slice(0, 8);
     const model = entry.model ?? "unknown model";
+    const agent = entry.agent ? ` · agent ${entry.agent}` : "";
     const summary = entry.summary ? `${entry.summary.slice(0, 50)} · ` : "";
-    return `${index + 1}. ${summary}${model} · ${describeWhen(entry.updated_at)} · ${id}…`;
+    return `${index + 1}. ${summary}${model}${agent} · ${describeWhen(entry.updated_at)} · ${id}…`;
   });
   const pick = await ctx.ui.select("resume agy conversation", options);
   if (!pick) {
@@ -358,6 +411,7 @@ async function runSessionsPicker(
   await executeConfirmedRun(pi, ctx, {
     mode,
     model: isAgyModel(entry.model) ? entry.model : "flash-medium",
+    agent: entry.agent,
     prompt: text.trim(),
     conversation_id: entry.conversation_id,
   });
@@ -379,6 +433,7 @@ async function executeConfirmedRun(
   if (run.mode === "accept-edits") {
     const dirt = await describePreRunDirt(cwd, ctx.signal).catch(() => null);
     const dirtLine = dirt ? `\nworkspace: ${dirt}` : "";
+    const agentLine = run.agent ? `\nagent: ${run.agent}` : "";
     const contextLine =
       contextMode === "none"
         ? "\ncontext: none"
@@ -391,7 +446,7 @@ async function executeConfirmedRun(
         : "";
     const ok = await ctx.ui.confirm(
       "Run agy (accept-edits)?",
-      `model: ${run.model} (${resolveAgyModelId(run.model)})\ndir: ${cwd}${dirtLine}${contextLine}\n\ntask: ${run.prompt.slice(0, 200)}${run.prompt.length > 200 ? "…" : ""}\n\nThis grants agy permission to modify files and run commands.${warning}`,
+      `model: ${run.model} (${resolveAgyModelId(run.model)})${agentLine}\ndir: ${cwd}${dirtLine}${contextLine}\n\ntask: ${run.prompt.slice(0, 200)}${run.prompt.length > 200 ? "…" : ""}\n\nThis grants agy permission to modify files and run commands.${warning}`,
     );
     if (!ok) {
       ctx.ui.notify("agy: cancelled", "info");
@@ -403,11 +458,12 @@ async function executeConfirmedRun(
   // a second LLM turn and the command works even when tools are limited.
   const status = createStatusThrottler(ctx);
   try {
-    status(`starting (${run.model} · ${run.mode})`);
+    status(`starting (${run.model} · ${run.mode}${run.agent ? ` · agent ${run.agent}` : ""})`);
     const result = await executeAgyTask(
       {
         prompt: run.prompt,
         model: run.model,
+        agent: run.agent,
         mode: run.mode,
         dir: cwd,
         timeout_ms: run.timeout_ms ?? DEFAULT_TIMEOUT_MS,

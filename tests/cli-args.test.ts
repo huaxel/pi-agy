@@ -17,6 +17,8 @@ import {
   buildAgyPrompt,
   isAgyModel,
   isTransientAgyFailure,
+  normalizeAgyAgentName,
+  parseAgyAgents,
   parseModelCatalog,
   resetModelCatalog,
   resolveAgyModelId,
@@ -53,6 +55,30 @@ describe("buildAgyArgs", () => {
     });
     assert.ok(args.includes("--output-format"));
     assert.ok(args.includes("stream-json"));
+  });
+
+  it("passes a normalized custom agent as a distinct argv value", () => {
+    const args = buildAgyArgs({
+      prompt: "test",
+      dir: "/tmp",
+      timeout_ms: 60_000,
+      agent: "  gsd-debugger  ",
+    });
+    assert.ok(hasFlagPair(args, "--agent", "gsd-debugger"));
+  });
+
+  it("rejects unsafe or invalid custom agent names", () => {
+    assert.throws(() => normalizeAgyAgentName("  "), /must not be empty/);
+    assert.throws(() => normalizeAgyAgentName("bad\nname"), /control characters/);
+    assert.throws(() => normalizeAgyAgentName("x".repeat(129)), /at most 128/);
+  });
+
+  it("parses the line-oriented agent roster tolerantly", () => {
+    assert.deepEqual(
+      parseAgyAgents("Available agents:\n- reviewer\nplanner  custom plan\nreviewer\nNo custom agents configured\n\u001b[31mbad\n"),
+      ["reviewer", "planner"],
+    );
+    assert.equal(parseAgyAgents(Array.from({ length: 250 }, (_, i) => `agent-${i}`).join("\n")).length, 200);
   });
 
   it("passes conversation id", () => {

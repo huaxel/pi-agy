@@ -8,6 +8,7 @@ import {
   getAgyConversationId,
   isAgyQuotaExhausted,
   isTransientAgyFailure,
+  normalizeAgyAgentName,
   resolveAgyModelAlias,
   resolveAgyModelId,
   spawnAgyStream,
@@ -25,7 +26,7 @@ import {
   type GitBaseline,
 } from "./postflight.js";
 import { resetPreflightCache, runPreflight } from "./preflight.js";
-import { getSession, saveSession, conversationSummary } from "./sessions.js";
+import { getHistory, getSession, saveSession, conversationSummary } from "./sessions.js";
 
 export type AgyMode = "plan" | "accept-edits" | "sandbox";
 
@@ -34,6 +35,7 @@ export interface AgyExecutionOptions {
   model?: AgyModel;
   tier?: "flash" | "flash-lo" | "pro";
   effort?: AgyEffort;
+  agent?: string;
   mode: AgyMode;
   dir: string;
   digest?: boolean;
@@ -55,6 +57,7 @@ export interface AgyExecutionDetails {
   verify_cmd: string | null;
   permissions_skipped?: boolean;
   effort?: AgyEffort;
+  agent?: string;
   usage?: AgyUsage;
   duration_seconds?: number;
   changed_files?: string[];
@@ -77,6 +80,7 @@ export async function executeAgyTask(
   onProgress?: (message: string) => void,
 ): Promise<AgyExecutionResult> {
   validateAgyExecutionOptions(options);
+  let agent = normalizeAgyAgentName(options.agent);
   const startedAt = Date.now();
   const budgetController = new AbortController();
   const abortSignal = signal
@@ -108,15 +112,31 @@ export async function executeAgyTask(
         }
 
         let conversationId = options.conversation_id;
+        const resumesLatest = options.continue || options.new_session === false;
+        const prior =
+          (!conversationId && options.new_session !== true) || (!agent && resumesLatest)
+            ? await getSession(options.dir)
+            : undefined;
         if (
           !conversationId &&
           !options.continue &&
-          options.new_session !== true
+          prior?.last_conversation_id &&
+          options.new_session === false
         ) {
-          const prior = await getSession(options.dir);
-          if (prior?.last_conversation_id && options.new_session === false) {
-            conversationId = prior.last_conversation_id;
+          conversationId = prior.last_conversation_id;
+        }
+        if (!agent && resumesLatest && prior?.last_agent) {
+          try {
+            agent = normalizeAgyAgentName(prior.last_agent);
+          } catch {
+            // Ignore malformed legacy store data rather than blocking a resume.
           }
+        }
+        if (!agent && conversationId) {
+          const recorded = (await getHistory(options.dir)).find(
+            (entry) => entry.conversation_id === conversationId,
+          );
+          if (recorded?.agent) agent = normalizeAgyAgentName(recorded.agent);
         }
 
         const useDigest = options.digest ?? options.mode !== "accept-edits";
@@ -182,7 +202,7 @@ export async function executeAgyTask(
           // Emitted via onProgress directly: progress tracking (and therefore
           // retry eligibility) must only reflect activity from agy itself.
           onProgress?.(
-            `agy: starting (${effectiveModel}, ${options.mode}${options.effort ? `, effort ${options.effort}` : ""})…`,
+            `agy: starting (${effectiveModel}, ${options.mode}${agent ? `, agent ${agent}` : ""}${options.effort ? `, effort ${options.effort}` : ""})…`,
           );
 
           return spawnAgyStream(
@@ -190,6 +210,7 @@ export async function executeAgyTask(
               prompt: finalPrompt,
               model,
               effort: options.effort,
+              agent,
               mode: options.mode,
               dir: options.dir,
               timeout_ms: runTimeoutMs,
@@ -213,6 +234,7 @@ export async function executeAgyTask(
               effectiveModel,
               AbortSignal.timeout(10_000),
               conversationSummary(options.prompt),
+              agent,
             );
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
@@ -256,6 +278,7 @@ export async function executeAgyTask(
             verify_cmd: verifyCmd,
             permissions_skipped: options.mode === "accept-edits" ? skipPermissions : false,
             effort: options.effort,
+            agent,
             usage: run.usage,
             duration_seconds: run.duration_seconds,
             changed_files: changedFiles,
@@ -285,6 +308,7 @@ export async function executeAgyTask(
           effectiveModel,
           AbortSignal.timeout(10_000),
           conversationSummary(options.prompt),
+          agent,
         );
         conversationPersisted = true;
       } catch {
@@ -307,6 +331,7 @@ export async function executeAgyTask(
 
 export function validateAgyExecutionOptions(options: AgyExecutionOptions): void {
   if (!options.prompt?.trim()) throw new Error("agy prompt must not be empty");
+  normalizeAgyAgentName(options.agent);
   if (!Number.isFinite(options.timeout_ms) || options.timeout_ms <= 0) {
     throw new Error("agy timeout_ms must be a positive finite number");
   }

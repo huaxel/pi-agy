@@ -78,6 +78,8 @@ export interface AgyOptions {
   model?: AgyModel;
   tier?: "flash" | "flash-lo" | "pro";
   effort?: AgyEffort;
+  /** Optional custom agent name passed to `agy --agent`. */
+  agent?: string;
   mode?: "plan" | "accept-edits" | "sandbox";
   dir: string;
   timeout_ms: number;
@@ -239,12 +241,59 @@ export function isTransientAgyFailure(message: string): boolean {
   return TRANSIENT_FAILURE_PATTERN.test(message);
 }
 
+const MAX_AGENT_NAME_LENGTH = 128;
+const MAX_AGENT_COUNT = 200;
+
+export function normalizeAgyAgentName(value?: string): string | undefined {
+  if (value === undefined) return undefined;
+  const agent = value.trim();
+  if (!agent) throw new Error("agy agent must not be empty");
+  if (/[\x00-\x1f\x7f]/.test(agent)) {
+    throw new Error("agy agent must not contain control characters");
+  }
+  if (agent.length > MAX_AGENT_NAME_LENGTH) {
+    throw new Error(`agy agent must be at most ${MAX_AGENT_NAME_LENGTH} characters`);
+  }
+  return agent;
+}
+
+/** Parse the intentionally simple, line-oriented output of `agy agents`. */
+export function parseAgyAgents(output: string): string[] {
+  const agents: string[] = [];
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (
+      !line ||
+      /^available\s+agents:?$/i.test(line) ||
+      /^name\s+/i.test(line) ||
+      /^(?:no|zero)\s+(?:custom\s+)?agents?\b/i.test(line)
+    ) {
+      continue;
+    }
+    const candidate = line
+      .split(/\t|\s{2,}/, 1)[0]
+      ?.replace(/^[-*]\s*/, "")
+      .trim();
+    try {
+      const agent = normalizeAgyAgentName(candidate);
+      if (agent && !agents.includes(agent)) {
+        agents.push(agent);
+        if (agents.length >= MAX_AGENT_COUNT) break;
+      }
+    } catch {
+      // Ignore malformed diagnostics and overlong names from CLI output.
+    }
+  }
+  return agents;
+}
+
 export function buildAgyArgs(options: AgyOptions): string[] {
   if (options.continue && options.conversation_id) {
     throw new Error("agy cannot use --continue and --conversation together");
   }
 
   const model = resolveAgyModelId(options.model, options.tier);
+  const agent = normalizeAgyAgentName(options.agent);
   const timeoutSec = Math.ceil(options.timeout_ms / 1000);
   const mode = options.mode ?? "accept-edits";
   const writes = mode === "accept-edits";
@@ -266,6 +315,7 @@ export function buildAgyArgs(options: AgyOptions): string[] {
     ...(options.effort && supportsAgyEffort(options.model, options.tier)
       ? ["--effort", options.effort]
       : []),
+    ...(agent ? ["--agent", agent] : []),
   ];
 
   if (options.continue) {
@@ -364,6 +414,23 @@ export async function checkAgyConnectivity(
   timeoutMs?: number,
 ): Promise<void> {
   await inspectAgyModels(cwd, signal, timeoutMs);
+}
+
+/** List configured custom agents without spending a model turn. */
+export async function inspectAgyAgents(
+  cwd: string,
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): Promise<string[]> {
+  const output = await runPreflightCommand(
+    ["agents"],
+    cwd,
+    signal,
+    "agy agents check",
+    true,
+    timeoutMs,
+  );
+  return parseAgyAgents(output);
 }
 
 /**
