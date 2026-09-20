@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.11
+
+- Parse agy 1.1.27+ `denied_actions` from nested stream results and top-level JSON envelopes, sanitizing, deduplicating, and bounding the untrusted action metadata.
+- Reject `SUCCESS` envelopes that contain denied actions but no response instead of reporting a silent empty success; preserve the conversation id so the interrupted delegation remains resumable.
+- Preserve explanatory responses that accompany denied actions while adding a visible model-facing warning, structured details, and non-duplicated native tool/receipt rendering.
+- Document headless permission-denial behavior and add parser, execution, bounds, sanitization, and rendering regressions. Independent review found zero blockers; the full 204-test gate passes.
+
 ## 0.6.10
 
 - Validate terminal status only after finalizing the complete captured result, so pretty-printed top-level JSON errors cannot bypass 0.6.9's fail-closed status handling.

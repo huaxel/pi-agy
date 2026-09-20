@@ -112,7 +112,7 @@ describe("agy_execute rendering", () => {
     const result = {
       content: [{
         type: "text",
-        text: "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n\n## agy quota snapshot\nquota details",
+        text: "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n\n## agy denied actions\nRun Command (command)\n\n## agy quota snapshot\nquota details",
       }],
       details: {
         model: "flash-medium",
@@ -123,6 +123,7 @@ describe("agy_execute rendering", () => {
         quota_status: "available",
         context_mode: "recent",
         context_chars: 1234,
+        denied_actions: [{ action: "command", display_name: "Run Command" }],
         subagents: [
           { slot: 0, name: "Reviewer", status: "done", task: "Review auth" },
           { slot: 1, name: "Researcher", status: "active", task: "Map callers" },
@@ -137,6 +138,7 @@ describe("agy_execute rendering", () => {
     );
     assert.match(collapsed, /✓ agy · flash-medium · accept-edits · 12\.3s/);
     assert.match(collapsed, /quota available · verify requested: just ci · context recent \(1234 chars\)/);
+    assert.match(collapsed, /⚠ 1 denied action · Run Command \(command\)/);
     assert.match(collapsed, /2 subagents observed · 1 done/);
     assert.match(collapsed, /1 changed by agy · 1 pre-existing/);
     assert.match(collapsed, /… 2 more lines/);
@@ -145,11 +147,13 @@ describe("agy_execute rendering", () => {
     const expanded = rendered(
       tool.renderResult(result, { expanded: true, isPartial: false }, theme, { isError: false }),
     );
+    assert.match(expanded, /↳ denied Run Command \(command\)/);
     assert.match(expanded, /↳ Reviewer · done · Review auth/);
     assert.match(expanded, /↳ Researcher · active at last event · Map callers/);
     assert.match(expanded, /\+ src\/new\.ts/);
     assert.match(expanded, /~ README\.md \(pre-existing\)/);
     assert.match(expanded, /line 6/);
+    assert.ok(!expanded.includes("## agy denied actions"));
     assert.ok(!expanded.includes("## agy quota snapshot"));
   });
 

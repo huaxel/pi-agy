@@ -184,7 +184,9 @@ Optional `$PI_CODING_AGENT_DIR/agy-config.json` (default
 - `skipPermissions` (default `true`) — pass `--dangerously-skip-permissions`
   for `accept-edits` runs. Set `false` to leave agy's own permission checks in
   place; note print mode has no interactive approval path, so restricted
-  operations may fail instead of prompting.
+  operations may be reported as `denied_actions` instead of prompting. The
+  extension rejects a denied run with no response and visibly warns when agy
+  returns an explanatory response alongside denied actions.
 - `defaultModel` — alias used when `agy_execute` omits `model`/`tier`.
 - `defaultModelCommand` — shell command whose stdout sets the default alias
   when `defaultModel` is unset (an explicit `defaultModel` always wins).

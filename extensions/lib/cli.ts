@@ -13,6 +13,7 @@ import {
   finalizeRunResult,
   formatStepProgress,
   parseStreamLine,
+  summarizeAgyDeniedActions,
   type AgyProgressHandler,
   type AgyRunResult,
   type AgyStreamLine,
@@ -1174,6 +1175,15 @@ function spawnAgyInternal(
         const terminalFailure = terminalFailureMessage(finalized, err);
         if (terminalFailure) {
           reject(withConversationId(terminalFailure, finalized));
+          return;
+        }
+
+        // Headless permission denials are intentionally nonfatal in agy and
+        // can therefore arrive as SUCCESS with an empty response. Never turn
+        // that incomplete delegation into a silent successful tool result.
+        if (finalized.denied_actions?.length && !finalized.response.trim()) {
+          const denied = summarizeAgyDeniedActions(finalized.denied_actions);
+          reject(withConversationId(`agy denied tool actions: ${denied}`, finalized));
           return;
         }
 

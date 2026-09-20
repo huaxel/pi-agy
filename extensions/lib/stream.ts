@@ -14,6 +14,11 @@ export interface AgyUsage {
   total_tokens?: number;
 }
 
+export interface AgyDeniedAction {
+  action?: string;
+  display_name?: string;
+}
+
 export interface AgyStepUpdate {
   conversation_id?: string;
   step_index?: number;
@@ -42,6 +47,7 @@ export interface AgyStreamLine {
   status?: string;
   response?: string;
   error?: string;
+  denied_actions?: unknown;
   duration_seconds?: number;
   usage?: AgyUsage;
   init?: { model?: string; cwd?: string };
@@ -51,6 +57,7 @@ export interface AgyStreamLine {
     status?: string;
     response?: string;
     error?: string;
+    denied_actions?: unknown;
     duration_seconds?: number;
     usage?: AgyUsage;
   };
@@ -64,6 +71,8 @@ export interface AgyRunResult {
   terminal_status?: string;
   /** Bounded terminal error detail from the result envelope. */
   terminal_error?: string;
+  /** Bounded permission refusals reported by headless agy. */
+  denied_actions?: AgyDeniedAction[];
   conversation_id?: string;
   usage?: AgyUsage;
   duration_seconds?: number;
@@ -222,6 +231,58 @@ function capTerminalError(error: string): string {
     .slice(0, 2_000);
 }
 
+const MAX_DENIED_ACTIONS = 32;
+const MAX_DENIED_ACTION_CHARS = 120;
+
+function cleanDeniedActionField(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = stripTerminalSequences(value)
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_DENIED_ACTION_CHARS);
+  return clean || undefined;
+}
+
+export function normalizeAgyDeniedActions(value: unknown): AgyDeniedAction[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const denied: AgyDeniedAction[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    let action: string | undefined;
+    let displayName: string | undefined;
+    if (typeof item === "string") {
+      action = cleanDeniedActionField(item);
+    } else if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+      const record = item as Record<string, unknown>;
+      action = cleanDeniedActionField(record.action);
+      displayName = cleanDeniedActionField(record.display_name);
+    }
+    if (!action && !displayName) continue;
+    const key = `${action ?? ""}\u0000${displayName ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    denied.push({
+      ...(action ? { action } : {}),
+      ...(displayName ? { display_name: displayName } : {}),
+    });
+    if (denied.length >= MAX_DENIED_ACTIONS) break;
+  }
+  return denied.length ? denied : undefined;
+}
+
+export function summarizeAgyDeniedActions(value: unknown, max = 12): string {
+  const denied = normalizeAgyDeniedActions(value) ?? [];
+  const shown = denied.slice(0, Math.max(0, max));
+  const labels = shown.map(({ action, display_name: displayName }) =>
+    displayName && action && displayName !== action
+      ? `${displayName} (${action})`
+      : displayName ?? action ?? "unknown action",
+  );
+  if (denied.length > shown.length) labels.push(`… ${denied.length - shown.length} more`);
+  return labels.join(", ");
+}
+
 export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult): AgyRunResult {
   const next = { ...current };
 
@@ -238,6 +299,8 @@ export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult
     next.response_complete = true;
   }
   if (typeof parsed.error === "string") next.terminal_error = capTerminalError(parsed.error);
+  const topLevelDenied = normalizeAgyDeniedActions(parsed.denied_actions);
+  if (topLevelDenied) next.denied_actions = topLevelDenied;
   if (typeof parsed.duration_seconds === "number" && Number.isFinite(parsed.duration_seconds)) {
     next.duration_seconds = parsed.duration_seconds;
   }
@@ -264,6 +327,8 @@ export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult
     if (typeof parsed.result.error === "string") {
       next.terminal_error = capTerminalError(parsed.result.error);
     }
+    const denied = normalizeAgyDeniedActions(parsed.result.denied_actions);
+    if (denied) next.denied_actions = denied;
     if (typeof parsed.result.usage === "object" && parsed.result.usage !== null) {
       next.usage = parsed.result.usage;
     }
@@ -329,6 +394,11 @@ function mergeJsonEnvelope(parsed: unknown, current: AgyRunResult): AgyRunResult
   }
   if (typeof record.error === "string") {
     next.terminal_error = capTerminalError(record.error);
+    found = true;
+  }
+  const denied = normalizeAgyDeniedActions(record.denied_actions);
+  if (denied) {
+    next.denied_actions = denied;
     found = true;
   }
   if (typeof record.duration_seconds === "number") {

@@ -2,6 +2,10 @@ import { keyHint, type Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, Text, truncateToWidth } from "@earendil-works/pi-tui";
 
 import type { AgyExecutionDetails } from "./execute.js";
+import {
+  normalizeAgyDeniedActions,
+  summarizeAgyDeniedActions,
+} from "./stream.js";
 
 export const AGY_RUN_ENTRY_TYPE = "agy-run-receipt";
 
@@ -47,6 +51,7 @@ function firstText(content: unknown): string {
 
 function stripSyntheticResultSections(value: string): string {
   const markers = [
+    "\n\n## agy denied actions",
     "\n\n## agy quota snapshot",
     "\n\n## agy subagents observed",
     "\n\n## git diff --stat",
@@ -139,6 +144,18 @@ function formatAgyResult(
     metadata.push(`context ${details.context_mode} (${details.context_chars ?? 0} chars)`);
   }
   if (metadata.length) lines.push(theme.fg("dim", metadata.join(" · ")));
+
+  const denied = normalizeAgyDeniedActions(details.denied_actions) ?? [];
+  if (denied.length) {
+    const count = `${denied.length} denied action${denied.length === 1 ? "" : "s"}`;
+    const summary = summarizeAgyDeniedActions(denied, 3);
+    lines.push(theme.fg("warning", `⚠ ${count}${summary ? ` · ${summary}` : ""}`));
+    if (expanded) {
+      for (const entry of denied) {
+        lines.push(theme.fg("toolOutput", `↳ denied ${summarizeAgyDeniedActions([entry], 1)}`));
+      }
+    }
+  }
 
   const subagents = Array.isArray(details.subagents) ? details.subagents.slice(0, 32) : [];
   if (subagents.length) {

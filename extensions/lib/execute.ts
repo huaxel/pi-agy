@@ -18,7 +18,11 @@ import {
 } from "./cli.js";
 import { loadAgyConfig, resolveDefaultModel } from "./config.js";
 import type { AgyContextMode } from "./context.js";
-import type { AgyUsage } from "./stream.js";
+import {
+  summarizeAgyDeniedActions,
+  type AgyDeniedAction,
+  type AgyUsage,
+} from "./stream.js";
 import {
   formatAgySubagentObservations,
   type AgyObservedSubagent,
@@ -66,6 +70,8 @@ export interface AgyExecutionDetails {
   duration_seconds?: number;
   /** Stream observations only; entries do not imply a live controllable process. */
   subagents?: AgyObservedSubagent[];
+  /** Bounded tool actions refused by agy's headless permission policy. */
+  denied_actions?: AgyDeniedAction[];
   changed_files?: string[];
   preexisting_files?: string[];
   context_mode?: AgyContextMode;
@@ -249,6 +255,9 @@ export async function executeAgyTask(
         }
 
         let text = run.response;
+        if (run.denied_actions?.length) {
+          text = `${text}\n\n## agy denied actions\n${summarizeAgyDeniedActions(run.denied_actions)}`;
+        }
         const subagentSummary = formatAgySubagentObservations(run.subagents);
         if (subagentSummary) text = `${text}\n\n## ${subagentSummary}`;
         const quotaSummary = quota?.models.length
@@ -290,6 +299,7 @@ export async function executeAgyTask(
             usage: run.usage,
             duration_seconds: run.duration_seconds,
             subagents: run.subagents,
+            denied_actions: run.denied_actions,
             changed_files: changedFiles,
             preexisting_files: preexistingFiles,
             context_mode: options.context ?? "none",

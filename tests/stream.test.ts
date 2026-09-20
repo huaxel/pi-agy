@@ -346,6 +346,38 @@ describe("stream parser", () => {
     assert.equal(out.response, "");
   });
 
+  it("sanitizes, deduplicates, and bounds denied actions from both envelope shapes", () => {
+    const denied = [
+      { action: "command", display_name: "\u001b[31mRun\nCommand\u001b[0m" },
+      { action: "command", display_name: "Run Command" },
+      "read_file",
+      { action: 42 },
+      ...Array.from({ length: 40 }, (_, index) => ({ action: `action-${index}` })),
+    ];
+    const nested = accumulateRunResult(
+      parseStreamLine(JSON.stringify({ result: { denied_actions: denied } }))!,
+      { response: "" },
+    );
+    assert.deepEqual(nested.denied_actions?.slice(0, 3), [
+      { action: "command", display_name: "Run Command" },
+      { action: "read_file" },
+      { action: "action-0" },
+    ]);
+    assert.equal(nested.denied_actions?.length, 32);
+
+    const topLevel = finalizeRunResult(
+      JSON.stringify({
+        status: "SUCCESS",
+        response: "permission was refused",
+        denied_actions: [{ action: "write_file", display_name: "Write File" }],
+      }),
+      { response: "" },
+    );
+    assert.deepEqual(topLevel.denied_actions, [
+      { action: "write_file", display_name: "Write File" },
+    ]);
+  });
+
   it("fails closed on malformed status while ignoring other malformed result fields", () => {
     const line = parseStreamLine(
       JSON.stringify({

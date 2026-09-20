@@ -774,6 +774,66 @@ describe("shared executor", () => {
     });
   });
 
+  it("rejects an empty successful response when tool actions were denied", async () => {
+    const raw = JSON.stringify({
+      event: "result",
+      result: {
+        conversation_id: "denied-empty",
+        response: "",
+        status: "SUCCESS",
+        denied_actions: [{ action: "command", display_name: "Run Command" }],
+      },
+    });
+    await withFakeAgy(raw, async () => {
+      resetPreflightCache();
+      await assert.rejects(
+        executeAgyTask(
+          {
+            prompt: "run a command",
+            mode: "plan",
+            dir: process.cwd(),
+            timeout_ms: 60_000,
+            new_session: true,
+            stream: true,
+          },
+          undefined,
+        ),
+        (error: unknown) => {
+          assert.match(String(error), /denied tool actions: Run Command \(command\)/);
+          assert.equal((error as { conversation_id?: string }).conversation_id, "denied-empty");
+          return true;
+        },
+      );
+    });
+  });
+
+  it("surfaces denied actions when agy also returns an explanatory response", async () => {
+    const raw = JSON.stringify({
+      status: "SUCCESS",
+      response: "I could not run the requested command.",
+      denied_actions: [{ action: "command", display_name: "Run Command" }],
+    });
+    await withFakeAgy(raw, async () => {
+      resetPreflightCache();
+      const result = await executeAgyTask(
+        {
+          prompt: "run a command",
+          mode: "plan",
+          dir: process.cwd(),
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: false,
+        },
+        undefined,
+      );
+      assert.match(result.text, /I could not run the requested command\./);
+      assert.match(result.text, /## agy denied actions\nRun Command \(command\)/);
+      assert.deepEqual(result.details.denied_actions, [
+        { action: "command", display_name: "Run Command" },
+      ]);
+    });
+  });
+
   it("fails closed on failed and unknown terminal statuses even with exit zero", async () => {
     for (const status of ["ERROR", "FAILURE", "CANCELLED", "TIMEOUT", "MYSTERY"]) {
       const raw = JSON.stringify({
