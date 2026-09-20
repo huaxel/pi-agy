@@ -1,6 +1,6 @@
 {
   "name": "@juanbenjumea/pi-agy",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Reliable Antigravity delegation for Pi — quota-aware runs, resumable tasks, repo verification, cancellation, and trustworthy diff summaries.",
   "type": "module",
   "license": "MIT",
