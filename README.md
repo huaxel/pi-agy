@@ -207,6 +207,11 @@ npm test
 npm run typecheck
 ```
 
+With an installed, authenticated `agy`, run `npm run test:live` to verify the
+CLI version, stable model catalog, custom-agent roster, quota schema, and doctor
+integration against the real binary. The smoke uses read-only commands only and
+does not start an inference turn or spend model tokens.
+
 ## License
 
 MIT

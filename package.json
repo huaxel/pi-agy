@@ -25,6 +25,7 @@
   "homepage": "https://github.com/huaxel/pi-agy#readme",
   "scripts": {
     "test": "node --import ./tests/resolve-hook.mjs --test tests/*.test.ts",
+    "test:live": "node --import ./tests/resolve-hook.mjs tests/live-smoke.ts",
     "typecheck": "tsc --noEmit --pretty false",
     "pack:check": "npm pack --dry-run --json"
   },
