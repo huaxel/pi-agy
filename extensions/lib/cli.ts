@@ -1164,9 +1164,18 @@ function spawnAgyInternal(
           runResult = processStreamLine(lineBuffer, runResult, onProgress);
         }
 
-        // A fully delivered result outranks the kill: when cancellation or
-        // timeout lands after the response arrived, the work is done and the
-        // response must not be discarded.
+        // Terminal status is authoritative when present. agy can emit an
+        // ERROR envelope with response: "" and even exit 0; response
+        // completeness must never turn that failed turn into success.
+        const terminalFailure = terminalFailureMessage(runResult, err);
+        if (terminalFailure) {
+          reject(withConversationId(terminalFailure, runResult));
+          return;
+        }
+
+        // A fully delivered successful result outranks the kill: when
+        // cancellation or timeout lands after the response arrived, the work
+        // is done and the response must not be discarded.
         if (runResult.response_complete) {
           resolve(finalizeRunResult(out, runResult));
           return;
@@ -1200,6 +1209,24 @@ function spawnAgyInternal(
       });
     });
   });
+}
+
+const SUCCESSFUL_TERMINAL_STATUSES = new Set(["SUCCESS", "OK"]);
+
+function terminalFailureMessage(runResult: AgyRunResult, stderr: string): string | undefined {
+  if (runResult.terminal_status === undefined) return undefined;
+  const status = runResult.terminal_status
+    .trim()
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .slice(0, 64);
+  if (SUCCESSFUL_TERMINAL_STATUSES.has(status.toUpperCase())) return undefined;
+
+  const detail = runResult.terminal_error?.trim();
+  let message = `agy reported terminal status ${status || "(empty)"}`;
+  if (detail) message += `: ${detail}`;
+  const stderrDetail = stderr.trim().slice(0, 2_000);
+  if (stderrDetail && !message.includes(stderrDetail)) message += `\n${stderrDetail}`;
+  return message;
 }
 
 function withConversationId(message: string, runResult: AgyRunResult): Error {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.9
+
+- Fail closed on agy terminal result statuses: only `SUCCESS` and `OK` are accepted when a status is present. `ERROR`, `FAILURE`, `CANCELLED`, `TIMEOUT`, empty, malformed, and unknown statuses now reject even when agy includes `response: ""` and exits with code 0.
+- Preserve terminal status/error metadata from both stream-json result events and top-level JSON envelopes. Failed status takes precedence over response completeness and delivered-result cancellation handling, while status-absent legacy output remains compatible.
+- Keep terminal diagnostics bounded and control-safe, append bounded stderr so canonical `AGY_ERROR` retryability remains available, and retain conversation IDs on failure for resumable recovery.
+- Add nested/top-level, `SUCCESS`/`OK`, failed/unknown/empty/malformed, exit-zero, and conversation-continuity regression coverage.
+
 ## 0.6.8
 
 - Keep agy's internal `--print-timeout` five seconds behind Pi's hard parent deadline. agy 1.1.28+ returns partial output with exit code 0 when its own timeout fires, so Pi must win the race to classify the run as timed out and preserve resumable-conversation guidance.

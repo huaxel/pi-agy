@@ -302,7 +302,7 @@ describe("stream parser", () => {
     assert.equal(out.duration_seconds, 2);
   });
 
-  it("accumulates result conversation id", () => {
+  it("accumulates result conversation id and terminal status", () => {
     const line = parseStreamLine(
       JSON.stringify({
         event: "result",
@@ -316,6 +316,23 @@ describe("stream parser", () => {
     const out = accumulateRunResult(line!, { response: "" });
     assert.equal(out.conversation_id, "id-1");
     assert.equal(out.response, "done");
+    assert.equal(out.terminal_status, "SUCCESS");
+  });
+
+  it("preserves top-level JSON terminal errors", () => {
+    const out = finalizeRunResult(
+      JSON.stringify({
+        conversation_id: "id-error",
+        status: "ERROR",
+        response: "",
+        error: "model failed",
+      }),
+      { response: "" },
+    );
+    assert.equal(out.conversation_id, "id-error");
+    assert.equal(out.response, "");
+    assert.equal(out.terminal_status, "ERROR");
+    assert.equal(out.terminal_error, "model failed");
   });
 
   it("preserves an explicitly empty successful response", () => {
@@ -329,12 +346,13 @@ describe("stream parser", () => {
     assert.equal(out.response, "");
   });
 
-  it("ignores malformed result field types", () => {
+  it("fails closed on malformed status while ignoring other malformed result fields", () => {
     const line = parseStreamLine(
       JSON.stringify({
         event: "result",
         result: {
           conversation_id: 42,
+          status: 42,
           response: { text: "not a response" },
           duration_seconds: "slow",
           usage: "not usage",
@@ -343,6 +361,7 @@ describe("stream parser", () => {
     );
     const out = accumulateRunResult(line!, { response: "fallback" });
     assert.equal(out.conversation_id, undefined);
+    assert.equal(out.terminal_status, "(invalid)");
     assert.equal(out.response, "fallback");
     assert.equal(out.duration_seconds, undefined);
     assert.equal(out.usage, undefined);

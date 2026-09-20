@@ -752,6 +752,107 @@ describe("shared executor", () => {
     });
   });
 
+  it("accepts the alternate successful OK terminal status", async () => {
+    const raw = JSON.stringify({
+      event: "result",
+      result: { response: "complete", status: "OK" },
+    });
+    await withFakeAgy(raw, async () => {
+      resetPreflightCache();
+      const result = await executeAgyTask(
+        {
+          prompt: "accept OK",
+          mode: "plan",
+          dir: process.cwd(),
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: true,
+        },
+        undefined,
+      );
+      assert.equal(result.text, "complete");
+    });
+  });
+
+  it("fails closed on failed and unknown terminal statuses even with exit zero", async () => {
+    for (const status of ["ERROR", "FAILURE", "CANCELLED", "TIMEOUT", "MYSTERY"]) {
+      const raw = JSON.stringify({
+        event: "result",
+        result: { conversation_id: `id-${status}`, response: "", status },
+      });
+      await withFakeAgy(raw, async () => {
+        resetPreflightCache();
+        await assert.rejects(
+          executeAgyTask(
+            {
+              prompt: `reject ${status}`,
+              mode: "plan",
+              dir: process.cwd(),
+              timeout_ms: 60_000,
+              new_session: true,
+              stream: true,
+            },
+            undefined,
+          ),
+          (error: unknown) => {
+            assert.match(String(error), new RegExp(`terminal status ${status}`));
+            assert.equal((error as { conversation_id?: string }).conversation_id, `id-${status}`);
+            return true;
+          },
+        );
+      });
+    }
+  });
+
+  it("fails closed on empty and malformed terminal statuses", async () => {
+    for (const status of ["", 42]) {
+      const raw = JSON.stringify({ event: "result", result: { response: "", status } });
+      await withFakeAgy(raw, async () => {
+        resetPreflightCache();
+        await assert.rejects(
+          executeAgyTask(
+            {
+              prompt: "reject invalid status",
+              mode: "plan",
+              dir: process.cwd(),
+              timeout_ms: 60_000,
+              new_session: true,
+              stream: true,
+            },
+            undefined,
+          ),
+          /terminal status (?:\(empty\)|\(invalid\))/,
+        );
+      });
+    }
+  });
+
+  it("fails closed on a top-level JSON error envelope", async () => {
+    const raw = JSON.stringify({
+      conversation_id: "top-level-error",
+      status: "ERROR",
+      response: "",
+      error: "model failed",
+    });
+    await withFakeAgy(raw, async () => {
+      resetPreflightCache();
+      await assert.rejects(
+        executeAgyTask(
+          {
+            prompt: "reject top-level error",
+            mode: "plan",
+            dir: process.cwd(),
+            timeout_ms: 60_000,
+            new_session: true,
+            stream: false,
+          },
+          undefined,
+        ),
+        /terminal status ERROR: model failed/,
+      );
+    });
+  });
+
   it("persists the conversation when a run times out, keeping it resumable", async () => {
     const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
     const previousDir = process.env.PI_CODING_AGENT_DIR;

@@ -44,7 +44,9 @@ waits, preflight probes, and post-run summaries all count against it. When
 it fires, the full agy process group is killed so nested tools cannot
 outlive the run. agy's own `--print-timeout` is set five seconds later because
 agy 1.1.28+ returns partial output with exit code 0 when that internal timer
-fires; Pi therefore remains the authoritative timeout owner.
+fires; Pi therefore remains the authoritative timeout owner. Terminal result
+envelopes also fail closed: when agy supplies a status, only `SUCCESS` and `OK`
+are accepted, even if a failed result carries an empty response and exits 0.
 
 Active tool updates show bounded intent (for example a tool action or async
 threshold) but never echo full command lines, which may contain secrets.

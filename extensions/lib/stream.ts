@@ -39,7 +39,9 @@ export interface AgyStreamLine {
    * Top-level `--output-format json` envelope fields — that mode emits one
    * record without a result event, so the fields are honored directly.
    */
+  status?: string;
   response?: string;
+  error?: string;
   duration_seconds?: number;
   usage?: AgyUsage;
   init?: { model?: string; cwd?: string };
@@ -48,6 +50,7 @@ export interface AgyStreamLine {
     conversation_id?: string;
     status?: string;
     response?: string;
+    error?: string;
     duration_seconds?: number;
     usage?: AgyUsage;
   };
@@ -57,6 +60,10 @@ export interface AgyRunResult {
   response: string;
   /** Internal marker distinguishing a valid empty response from no response. */
   response_complete?: boolean;
+  /** Authoritative terminal status when agy supplied one. */
+  terminal_status?: string;
+  /** Bounded terminal error detail from the result envelope. */
+  terminal_error?: string;
   conversation_id?: string;
   usage?: AgyUsage;
   duration_seconds?: number;
@@ -209,6 +216,12 @@ function capResponse(response: string): string {
     : response;
 }
 
+function capTerminalError(error: string): string {
+  return stripTerminalSequences(error)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ")
+    .slice(0, 2_000);
+}
+
 export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult): AgyRunResult {
   const next = { ...current };
 
@@ -217,10 +230,14 @@ export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult
   // `--output-format json` produces one record with top-level envelope
   // fields; honor them so non-streaming payloads of any size accumulate
   // in-stream instead of falling back to the bounded raw capture.
+  if (Object.hasOwn(parsed, "status")) {
+    next.terminal_status = typeof parsed.status === "string" ? parsed.status : "(invalid)";
+  }
   if (typeof parsed.response === "string") {
     next.response = capResponse(parsed.response);
     next.response_complete = true;
   }
+  if (typeof parsed.error === "string") next.terminal_error = capTerminalError(parsed.error);
   if (typeof parsed.duration_seconds === "number" && Number.isFinite(parsed.duration_seconds)) {
     next.duration_seconds = parsed.duration_seconds;
   }
@@ -236,9 +253,16 @@ export function accumulateRunResult(parsed: AgyStreamLine, current: AgyRunResult
     if (typeof parsed.result.conversation_id === "string") {
       next.conversation_id = parsed.result.conversation_id;
     }
+    if (Object.hasOwn(parsed.result, "status")) {
+      next.terminal_status =
+        typeof parsed.result.status === "string" ? parsed.result.status : "(invalid)";
+    }
     if (typeof parsed.result.response === "string") {
       next.response = capResponse(parsed.result.response);
       next.response_complete = true;
+    }
+    if (typeof parsed.result.error === "string") {
+      next.terminal_error = capTerminalError(parsed.result.error);
     }
     if (typeof parsed.result.usage === "object" && parsed.result.usage !== null) {
       next.usage = parsed.result.usage;
@@ -287,9 +311,17 @@ function mergeJsonEnvelope(parsed: unknown, current: AgyRunResult): AgyRunResult
     next.conversation_id = record.conversation_id;
     found = true;
   }
+  if (Object.hasOwn(record, "status")) {
+    next.terminal_status = typeof record.status === "string" ? record.status : "(invalid)";
+    found = true;
+  }
   if (typeof record.response === "string") {
-    next.response = record.response;
+    next.response = capResponse(record.response);
     next.response_complete = true;
+    found = true;
+  }
+  if (typeof record.error === "string") {
+    next.terminal_error = capTerminalError(record.error);
     found = true;
   }
   if (typeof record.duration_seconds === "number") {
