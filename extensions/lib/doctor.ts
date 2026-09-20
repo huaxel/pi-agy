@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 import {
   checkAgyUsage,
+  inspectAgyAgents,
   inspectAgyModels,
   inspectAgyVersion,
   isAgyModel,
@@ -55,8 +56,9 @@ export async function runAgyDoctor(
   }
 
   if (cliAvailable) {
-    const [modelsResult, usageResult] = await Promise.allSettled([
+    const [modelsResult, agentsResult, usageResult] = await Promise.allSettled([
       inspectAgyModels(resolvedCwd, signal, DOCTOR_TIMEOUT_MS),
+      inspectAgyAgents(resolvedCwd, signal, DOCTOR_TIMEOUT_MS),
       checkAgyUsage(resolvedCwd, signal, DOCTOR_TIMEOUT_MS),
     ]);
 
@@ -74,6 +76,24 @@ export async function runAgyDoctor(
       checks.push({ name: "Models", status: "error", detail: errorMessage(modelsResult.reason) });
     }
 
+    if (agentsResult.status === "fulfilled") {
+      const agents = agentsResult.value;
+      const shown = agents.slice(0, 8);
+      checks.push({
+        name: "Custom agents",
+        status: agents.length ? "ok" : "info",
+        detail: agents.length
+          ? `${agents.length} configured (${shown.join(", ")}${agents.length > shown.length ? `, +${agents.length - shown.length} more` : ""})`
+          : "none configured",
+      });
+    } else {
+      checks.push({
+        name: "Custom agents",
+        status: "warn",
+        detail: errorMessage(agentsResult.reason),
+      });
+    }
+
     if (usageResult.status === "fulfilled") {
       checks.push(quotaCheck(usageResult.value));
     } else {
@@ -81,6 +101,7 @@ export async function runAgyDoctor(
     }
   } else {
     checks.push({ name: "Models", status: "info", detail: "skipped because the CLI check failed" });
+    checks.push({ name: "Custom agents", status: "info", detail: "skipped because the CLI check failed" });
     checks.push({ name: "Quota", status: "info", detail: "skipped because the CLI check failed" });
   }
 

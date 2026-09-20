@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.7
+
+- Add custom-agent discovery health to `/agy doctor` using the same bounded, read-only `agy agents` path as `agy_agents` and `/agy agents`.
+- Report configured agents as healthy (showing at most eight names), an empty roster as informational, and optional discovery failures as warnings without misclassifying the core CLI as unavailable.
+- Skip the custom-agent probe alongside model/quota checks when the core CLI check fails; add configured, empty, failed, and skipped diagnostic coverage.
+
 ## 0.6.6
 
 - Surface agy's native and legacy subagent spawn steps as bounded live progress and structured per-run observations (`details.subagents`) with ACTIVE/DONE/ERROR correlation, multi-spawn support, and retry-safe activity tracking.

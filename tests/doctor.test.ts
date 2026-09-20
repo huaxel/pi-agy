@@ -46,6 +46,7 @@ describe("agy doctor", () => {
         assert.equal(report.status, "ok");
         assert.match(report.text, /✓ CLI: agy 1\.2\.0/);
         assert.match(report.text, /✓ Models: 1 aliases discovered \(flash-medium\)/);
+        assert.match(report.text, /✓ Custom agents: 1 configured \(fake-agent\)/);
         assert.match(report.text, /✓ Quota: 1 windows across 1 model groups/);
         assert.match(report.text, /• Config: defaults/);
         assert.match(report.text, /✓ Sessions: 1 recorded for this workspace/);
@@ -56,6 +57,31 @@ describe("agy doctor", () => {
         else process.env.PI_CODING_AGENT_DIR = previousDir;
       }
     }, 0, 0, "", "", usage, 0, "gemini-3.8-flash-medium");
+  });
+
+  it("treats an empty custom-agent roster as healthy information", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-doctor-no-agents-"));
+    const usage = JSON.stringify({
+      groups: [{ name: "Gemini Models", buckets: [{ remainingFraction: 0.5 }] }],
+    });
+    await withFakeAgy("", async () => {
+      const report = await runAgyDoctor(cwd);
+      assert.equal(report.status, "ok");
+      assert.match(report.text, /• Custom agents: none configured/);
+    }, 0, 0, "", "", usage, 0, "gemini-3.8-flash-medium", "");
+  });
+
+  it("warns when optional custom-agent discovery fails without failing the CLI", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-doctor-agents-fail-"));
+    const usage = JSON.stringify({
+      groups: [{ name: "Gemini Models", buckets: [{ remainingFraction: 0.5 }] }],
+    });
+    await withFakeAgy("", async () => {
+      const report = await runAgyDoctor(cwd);
+      assert.equal(report.status, "warn");
+      assert.match(report.text, /✓ CLI: agy 1\.2\.0/);
+      assert.match(report.text, /! Custom agents: agy agents check failed \(exit 1\)\. unavailable/);
+    }, 0, 0, "", "", usage, 0, "gemini-3.8-flash-medium", "", "unavailable");
   });
 
   it("reports exhausted quota as unhealthy", async () => {
@@ -129,6 +155,7 @@ describe("agy doctor", () => {
       assert.equal(report.status, "error");
       assert.match(report.text, /✗ CLI: Antigravity CLI is not installed/);
       assert.match(report.text, /• Models: skipped because the CLI check failed/);
+      assert.match(report.text, /• Custom agents: skipped because the CLI check failed/);
       assert.match(report.text, /• Quota: skipped because the CLI check failed/);
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
