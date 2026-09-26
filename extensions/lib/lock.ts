@@ -42,7 +42,7 @@ export function getDirLockPath(canonical: string): string {
 }
 
 /** Refresh a held lock so the stale-lock recovery cannot steal it mid-run. */
-export async function touchDirLock(lockPath: string): Promise<void> {
+async function touchDirLock(lockPath: string): Promise<void> {
   const now = new Date();
   await utimes(lockPath, now, now);
 }

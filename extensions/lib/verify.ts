@@ -131,3 +131,14 @@ async function fileExists(filename: string): Promise<boolean> {
 function runScript(runner: string, script: string): string {
   return runner === "npm" && script === "test" ? "npm test" : `${runner} run ${script}`;
 }
+
+// Kept alongside detectVerifyCommand: tests imported it from cli in upstream.
+export async function detectVerifyCommandFromPackageJson(cwd: string): Promise<string | null> {
+  try {
+    const pkg = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
+    if (pkg?.scripts?.test) return "npm test";
+  } catch {
+    // ignore
+  }
+  return null;
+}

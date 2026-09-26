@@ -21,20 +21,8 @@ import {
 } from "./lib/render.js";
 import { getHistory, getSession } from "./lib/sessions.js";
 
-const MODEL_ALIASES: Record<string, AgyModel> = {
-  flash: "flash-medium",
-  "flash-low": "flash-low",
-  "flash-medium": "flash-medium",
-  "flash-high": "flash-high",
-  pro: "pro-high",
-  "pro-low": "pro-low",
-  "pro-high": "pro-high",
-  sonnet: "sonnet",
-  opus: "opus",
-  "gpt-oss": "gpt-oss",
-};
-
-const MODEL_KEYS = Object.keys(MODEL_ALIASES);
+import { DEFAULT_TIMEOUT_MS, MODEL_ALIASES, MODEL_KEYS, MODE_KEYS, parseAgyCommandArgs } from "./lib/command-args.js";
+import { buildAcceptEditsConfirm } from "./lib/confirm.js";
 
 const MODEL_OPTIONS = [
   "flash — fast, cheap (Gemini Flash medium)",
@@ -54,81 +42,7 @@ const MODE_OPTIONS = [
   "sandbox — isolated preview",
 ];
 
-const MODE_KEYS = ["accept-edits", "plan", "sandbox"] as const;
-
-const DEFAULT_TIMEOUT_MS = 300_000;
-const MAX_TIMEOUT_MS = 600_000;
-
-export interface AgyCommandArgs {
-  mode?: "plan" | "accept-edits" | "sandbox";
-  model?: AgyModel;
-  agent?: string;
-  prompt?: string;
-  continue?: boolean;
-  timeout_ms?: number;
-  context?: AgyContextMode;
-  error?: string;
-}
-
-/**
- * Parse `/agy [mode] [model] [agent=name] [continue] [timeout=10m] <prompt>` — leading
- * option tokens are consumed in any order; the remainder is the prompt.
- */
-export function parseAgyCommandArgs(args: string): AgyCommandArgs {
-  let rest = args.trim();
-  const parsed: AgyCommandArgs = {};
-
-  while (rest) {
-    const token = readToken(rest);
-    if (!token) break;
-    const value = token.value.toLowerCase();
-
-    const timeout = parseTimeoutToken(token.value);
-    if (MODE_KEYS.includes(value as (typeof MODE_KEYS)[number])) {
-      parsed.mode = value as AgyCommandArgs["mode"];
-    } else if (MODEL_ALIASES[value]) {
-      parsed.model = MODEL_ALIASES[value];
-    } else if (value === "continue") {
-      parsed.continue = true;
-    } else if (value.startsWith("agent=")) {
-      try {
-        parsed.agent = normalizeAgyAgentName(token.value.slice("agent=".length));
-      } catch (error) {
-        parsed.error = error instanceof Error ? error.message : String(error);
-      }
-    } else if (value.startsWith("context=")) {
-      const context = value.slice("context=".length);
-      if (context === "none" || context === "summary" || context === "recent") {
-        parsed.context = context;
-      } else {
-        parsed.error = `unknown context mode '${context || "(empty)"}'`;
-      }
-    } else if (timeout !== undefined) {
-      parsed.timeout_ms = timeout;
-    } else {
-      break;
-    }
-    rest = rest.slice(token.end).trimStart();
-  }
-
-  if (rest) parsed.prompt = rest;
-  return parsed;
-}
-
-/** `timeout=10m`, `timeout=90s`, `timeout=1500ms`; a bare number means minutes. */
-function parseTimeoutToken(token: string): number | undefined {
-  const match = /^timeout=(\d+(?:\.\d+)?)(ms|s|m)?$/i.exec(token);
-  if (!match) return undefined;
-  const amount = Number.parseFloat(match[1]);
-  const unit = (match[2] ?? "m").toLowerCase();
-  const ms = unit === "ms" ? amount : unit === "s" ? amount * 1_000 : amount * 60_000;
-  return Math.min(Math.max(Math.round(ms), 1_000), MAX_TIMEOUT_MS);
-}
-
-function readToken(value: string): { value: string; end: number } | undefined {
-  const match = /^\S+/.exec(value);
-  return match ? { value: match[0], end: match[0].length } : undefined;
-}
+export { parseAgyCommandArgs, type AgyCommandArgs } from "./lib/command-args.js";
 
 interface InteractiveRun {
   mode: "plan" | "accept-edits" | "sandbox";
@@ -432,22 +346,16 @@ async function executeConfirmedRun(
 
   if (run.mode === "accept-edits") {
     const dirt = await describePreRunDirt(cwd, ctx.signal).catch(() => null);
-    const dirtLine = dirt ? `\nworkspace: ${dirt}` : "";
-    const agentLine = run.agent ? `\nagent: ${run.agent}` : "";
-    const contextLine =
-      contextMode === "none"
-        ? "\ncontext: none"
-        : contextText
-          ? `\ncontext: ${contextMode} (${contextText.length.toLocaleString()} chars; text-only)`
-          : `\ncontext: ${contextMode} (0 chars; no eligible text)`;
-    const warning =
-      dirt && dirt !== "clean"
-        ? `\n\nWarning: uncommitted changes already exist — the result summary only attributes newly-dirty files to agy.`
-        : "";
-    const ok = await ctx.ui.confirm(
-      "Run agy (accept-edits)?",
-      `model: ${run.model} (${resolveAgyModelId(run.model)})${agentLine}\ndir: ${cwd}${dirtLine}${contextLine}\n\ntask: ${run.prompt.slice(0, 200)}${run.prompt.length > 200 ? "…" : ""}\n\nThis grants agy permission to modify files and run commands.${warning}`,
-    );
+    const { title, body } = buildAcceptEditsConfirm({
+      modelLabel: `${run.model} (${resolveAgyModelId(run.model)})`,
+      agent: run.agent,
+      cwd,
+      prompt: run.prompt,
+      contextMode,
+      contextText,
+      dirt,
+    });
+    const ok = await ctx.ui.confirm(title, body);
     if (!ok) {
       ctx.ui.notify("agy: cancelled", "info");
       return;

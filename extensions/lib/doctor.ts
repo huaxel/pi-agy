@@ -136,7 +136,7 @@ export async function runAgyDoctor(
   };
 }
 
-export function formatAgyDoctorReport(cwd: string, checks: AgyDoctorCheck[]): string {
+function formatAgyDoctorReport(cwd: string, checks: AgyDoctorCheck[]): string {
   const icon: Record<AgyDoctorStatus, string> = {
     ok: "✓",
     info: "•",

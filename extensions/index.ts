@@ -17,6 +17,8 @@ import {
 import { buildAgyContextFromEntries, type AgyContextMode } from "./lib/context.js";
 import { describePreRunDirt } from "./lib/postflight.js";
 import { registerAgyCommand } from "./commands.js";
+import { buildAcceptEditsConfirm } from "./lib/confirm.js";
+import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./lib/command-args.js";
 import {
   executeAgyTask,
   validateAgyExecutionOptions,
@@ -26,10 +28,28 @@ import { describeWhen, truncate } from "./lib/output.js";
 import { renderAgyCall, renderAgyResult } from "./lib/render.js";
 import { getHistory, getSession } from "./lib/sessions.js";
 
-const DEFAULT_TIMEOUT_MS = 300_000;
-const MAX_TIMEOUT_MS = 600_000;
-
 export { truncate } from "./lib/output.js";
+
+/**
+ * Resolve a tool `dir` override against the session cwd, validating it
+ * up front so a bad dir is not misreported downstream (e.g. as a missing
+ * Antigravity CLI installation).
+ */
+async function resolveToolDir(cwd: string, dir?: string): Promise<string> {
+  const resolved = dir ? path.resolve(cwd, dir) : cwd;
+  if (dir) {
+    try {
+      const info = await stat(resolved);
+      if (!info.isDirectory()) throw new Error(`Working directory is not a directory: ${resolved}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`Working directory does not exist: ${resolved}`);
+      }
+      throw error;
+    }
+  }
+  return resolved;
+}
 
 export function resolveAgyMode(mode?: AgyMode): AgyMode {
   return mode ?? "accept-edits";
@@ -211,24 +231,16 @@ export default function piAgyExtension(pi: ExtensionAPI) {
           ? `${requestedModel} (${resolveAgyModelId(model, params.tier)})`
           : "configured default (fallback flash-medium)";
         const dirt = await describePreRunDirt(cwd, abortSignal).catch(() => null);
-        const excerpt =
-          params.prompt.slice(0, 200) + (params.prompt.length > 200 ? "…" : "");
-        const dirtLine = dirt ? `\nworkspace: ${dirt}` : "";
-        const agentLine = agent ? `\nagent: ${agent}` : "";
-        const contextLine =
-          contextMode === "none"
-            ? "\ncontext: none"
-            : contextText
-              ? `\ncontext: ${contextMode} (${contextText.length.toLocaleString()} chars; text-only)`
-              : `\ncontext: ${contextMode} (0 chars; no eligible text)`;
-        const warning =
-          dirt && dirt !== "clean"
-            ? `\n\nWarning: uncommitted changes already exist — the result summary only attributes newly-dirty files to agy.`
-            : "";
-        const approved = await ctx.ui.confirm(
-          "Run agy (accept-edits)?",
-          `model: ${modelLabel}${agentLine}\ndir: ${cwd}${dirtLine}${contextLine}\n\ntask: ${excerpt}\n\nThis grants agy permission to modify files and run commands.${warning}`,
-        );
+        const { title, body } = buildAcceptEditsConfirm({
+          modelLabel,
+          agent,
+          cwd,
+          prompt: params.prompt,
+          contextMode,
+          contextText,
+          dirt,
+        });
+        const approved = await ctx.ui.confirm(title, body);
         if (!approved) throw new Error("agy accept-edits cancelled by user");
       }
 
@@ -270,18 +282,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const cwd = params.dir ? path.resolve(ctx.cwd, params.dir) : ctx.cwd;
-      if (params.dir) {
-        try {
-          const info = await stat(cwd);
-          if (!info.isDirectory()) throw new Error(`Working directory is not a directory: ${cwd}`);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-            throw new Error(`Working directory does not exist: ${cwd}`);
-          }
-          throw error;
-        }
-      }
+      const cwd = await resolveToolDir(ctx.cwd, params.dir);
       const agents = await inspectAgyAgents(cwd, signal);
       const text = agents.length
         ? `configured agy agents:\n${agents.map((agent) => `- ${agent}`).join("\n")}`
@@ -374,20 +375,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const cwd = params.dir ? path.resolve(ctx.cwd, params.dir) : ctx.cwd;
-      if (params.dir) {
-        // Validate the override before spawning so a bad dir is not
-        // misreported as a missing Antigravity CLI installation.
-        try {
-          const info = await stat(cwd);
-          if (!info.isDirectory()) throw new Error(`Working directory is not a directory: ${cwd}`);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-            throw new Error(`Working directory does not exist: ${cwd}`);
-          }
-          throw error;
-        }
-      }
+      const cwd = await resolveToolDir(ctx.cwd, params.dir);
       const quota = await checkAgyUsage(cwd, signal);
       const selectedModel = params.model ? resolveAgyModelId(params.model) : undefined;
       const selectedEntries = selectedModel ? findAgyQuotaEntries(quota, selectedModel) : [];
