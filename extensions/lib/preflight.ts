@@ -29,10 +29,7 @@ export async function runPreflight(
 
   const health = healthFresh
     ? Promise.resolve()
-    : Promise.all([
-        checkAgyHealth(cwd, signal, timeoutMs),
-        checkAgyConnectivity(cwd, signal, timeoutMs),
-      ]).then(() => undefined);
+    : runHealthWithRetry(cwd, signal, timeoutMs).then(() => undefined);
   const usage = usageFresh ? Promise.resolve(cachedUsage) : checkAgyUsage(cwd, signal, timeoutMs);
   const [, refreshedUsage] = await Promise.all([health, usage]);
   if (!healthFresh) cachedAt = Date.now();
@@ -41,6 +38,31 @@ export async function runPreflight(
     cachedUsageAt = Date.now();
   }
   return cachedUsage;
+}
+
+/**
+ * Health probes with one retry on timeout. Four parallel cold agy spawns
+ * can serialize behind a single OAuth refresh past the per-probe cap; the
+ * retry almost always lands warm. Only timeouts retry: auth failures,
+ * missing binaries, and cancellations fail fast on first attempt.
+ */
+async function runHealthWithRetry(
+  cwd: string,
+  signal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+): Promise<void> {
+  const attempt = (): Promise<void> =>
+    Promise.all([
+      checkAgyHealth(cwd, signal, timeoutMs),
+      checkAgyConnectivity(cwd, signal, timeoutMs),
+    ]).then(() => undefined);
+  try {
+    await attempt();
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (!(error instanceof Error) || !/timed out/i.test(error.message)) throw error;
+    await attempt();
+  }
 }
 
 /** Test helper — reset the in-process cache. */

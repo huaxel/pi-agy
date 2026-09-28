@@ -11,7 +11,9 @@ import {
 import { runAgyDoctor } from "../extensions/lib/doctor.js";
 
 const cwd = path.resolve(process.argv[2] ?? process.cwd());
-const timeoutMs = 20_000;
+// Generous: four parallel cold agy spawns can serialize behind one OAuth
+// refresh and blow past tighter caps on first run.
+const timeoutMs = 60_000;
 
 // Every probe is read-only. In particular, /usage is the guarded zero-token
 // print-mode command; this script never submits an inference task.

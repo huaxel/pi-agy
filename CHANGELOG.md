@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.3
+
+- Retry health probes once on timeout so cold-start OAuth stampedes no longer fail delegation runs; auth failures, missing binaries, and cancellations still fail fast. Live smoke probe cap raised for the same cold-start reason.
+- Full 282-test gate plus typecheck and package checks pass.
+
 ## 0.7.2
 
 - Resolve stderr text when a successful run leaves stdout empty or whitespace-only (ported from upstream 0.3.8/0.3.9), after the terminal-status and permission-denial fail-closed checks so those semantics stand; stdout responses still win over stderr diagnostics.
