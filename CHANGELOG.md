@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1
+
+- Report provider runtime state in `/agy doctor` (driver turns/reuses/recycles, bridge tool count, suspended turns awaiting Pi tools, live image staging) via a never-throwing status snapshot.
+- Add `/agy bridge [on|off|status]`: inspect or toggle the provider MCP bridge at runtime, persisted to `agy-config.json` with memoized servers invalidated so the next turn picks it up.
+- Full 277-test gate plus typecheck and package checks pass.
+
 ## 0.7.0
 
 - Register an `antigravity` provider so agy-backed models appear in Pi's global `/model` picker as `antigravity/*`, discovered from live `agy models` with a fallback catalog (background refresh, no `/reload`). Gemini bases expose Pi's thinking toggle as agy `--effort` clamped to supported tiers; fixed-thinking families keep agy's exact slug.

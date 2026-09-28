@@ -23,6 +23,8 @@ import { getHistory, getSession } from "./lib/sessions.js";
 
 import { DEFAULT_TIMEOUT_MS, MODEL_ALIASES, MODEL_KEYS, MODE_KEYS, parseAgyCommandArgs } from "./lib/command-args.js";
 import { buildAcceptEditsConfirm } from "./lib/confirm.js";
+import { loadAgyConfig, saveAgyConfig } from "./lib/config.js";
+import { describeProviderBridges, resetProviderBridges } from "./lib/provider.js";
 
 const MODEL_OPTIONS = [
   "flash — fast, cheap (Gemini Flash medium)",
@@ -110,6 +112,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
           "doctor",
           "usage",
           "quota",
+          "bridge",
           "context=summary",
           "context=recent",
           "timeout=10m",
@@ -159,6 +162,11 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
           return;
         }
         await showUsage(ctx, requestedModel);
+        return;
+      }
+      const bridgeMatch = /^bridge(?:\s+(\S+))?$/.exec(command);
+      if (bridgeMatch) {
+        await showBridge(ctx, bridgeMatch[1]);
         return;
       }
 
@@ -277,6 +285,51 @@ async function showUsage(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(`agy usage check failed: ${message}`, "error");
+  }
+}
+
+/** `/agy bridge [on|off|status]` — inspect or toggle the provider MCP bridge. */
+async function showBridge(ctx: ExtensionCommandContext, arg?: string): Promise<void> {
+  const sub = (arg ?? "status").toLowerCase();
+  if (sub !== "on" && sub !== "off" && sub !== "status") {
+    ctx.ui.notify("agy: bridge takes on, off, or no argument (status)", "error");
+    return;
+  }
+  try {
+    await ctx.waitForIdle();
+    if (sub === "on" || sub === "off") {
+      ctx.ui.setStatus("agy", `agy: turning the provider bridge ${sub}…`);
+      await saveAgyConfig({ providerBridge: sub === "on" });
+      // Drop memoized servers so the next provider turn re-resolves;
+      // drivers recycle on the bridge-dir change by themselves.
+      await resetProviderBridges();
+      ctx.ui.notify(
+        sub === "on"
+          ? "Provider bridge on: agy turns get Pi tools via localhost MCP (takes effect on the next turn)."
+          : "Provider bridge off: agy turns run plain (takes effect on the next turn).",
+        "info",
+      );
+      return;
+    }
+    const config = await loadAgyConfig().catch(() => ({ providerBridge: true as const }));
+    const enabled = config.providerBridge !== false;
+    const bridges = describeProviderBridges();
+    const running = bridges.filter((bridge) => bridge.running);
+    const lines = [
+      `Provider bridge: ${enabled ? "on" : "off"} (agy-config.json${enabled ? "" : " — set providerBridge or run /agy bridge on"})`,
+      running.length > 0
+        ? `running servers (${running.length}):\n${running.map((bridge) => `- ${bridge.dir} · ${bridge.toolCount ?? 0} tools`).join("\n")}`
+        : "no bridge servers running (one starts on the next provider turn)",
+    ];
+    ctx.ui.notify(lines.join("\n"), "info");
+  } catch (error) {
+    if (ctx.signal?.aborted) ctx.ui.notify("agy: bridge check cancelled", "info");
+    else {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`agy bridge failed: ${message}`, "error");
+    }
+  } finally {
+    ctx.ui.setStatus("agy", undefined);
   }
 }
 

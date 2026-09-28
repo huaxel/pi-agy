@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -97,6 +97,29 @@ export async function loadAgyConfig(
     // Missing or malformed config falls back to defaults.
   }
   return {};
+}
+
+/**
+ * Persist config overrides, preserving unknown keys. Malformed existing
+ * files are replaced (the caller just made an explicit choice).
+ */
+export async function saveAgyConfig(
+  patch: Partial<AgyConfig>,
+  configPath = getDefaultConfigPath(),
+): Promise<void> {
+  let base: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(configPath, { encoding: "utf8" }));
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      base = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Missing or corrupt: start fresh with the patch.
+  }
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify({ ...base, ...patch }, null, 2) + "\n", {
+    encoding: "utf8",
+  });
 }
 
 const cachedCommandAliases = new Map<string, { at: number; alias?: AgyModel }>();

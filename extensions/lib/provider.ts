@@ -594,6 +594,34 @@ async function ensureProviderBridge(dir: string): Promise<McpBridgeHandle | unde
 
 const providerRunners = new Map<string, ProviderTurnRunner>();
 
+/** Stop memoized bridges so the next turn re-resolves them (toggle support). */
+export async function resetProviderBridges(): Promise<void> {
+  const bridges = [...providerBridges.values()];
+  providerBridges.clear();
+  await Promise.all(
+    bridges.map((bridge) => bridge?.stop().catch(() => undefined)),
+  );
+}
+
+export interface ProviderBridgeStatus {
+  dir: string;
+  running: boolean;
+  toolCount?: number;
+}
+
+/** Point-in-time bridge states for status surfaces. Never throws. */
+export function describeProviderBridges(): ProviderBridgeStatus[] {
+  const out: ProviderBridgeStatus[] = [];
+  try {
+    for (const [dir, bridge] of providerBridges) {
+      out.push({ dir, running: !!bridge, toolCount: bridge?.describe().toolCount });
+    }
+  } catch {
+    // Status surfaces must never break callers.
+  }
+  return out;
+}
+
 export interface ProviderStatusSuspended {
   toolCallId: string;
   toolName: string;
@@ -665,12 +693,8 @@ export async function closeProviderDrivers(): Promise<void> {
   providerRunners.clear();
   clearSuspendedTurns();
   await clearImageStaging();
-  const bridges = [...providerBridges.values()];
-  providerBridges.clear();
   await Promise.all(drivers.map((driver) => driver.close()));
-  await Promise.all(
-    bridges.map((bridge) => bridge?.stop().catch(() => undefined)),
-  );
+  await resetProviderBridges();
 }
 
 export interface AgyProviderStreamDeps {

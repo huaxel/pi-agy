@@ -397,6 +397,66 @@ describe("/agy command", () => {
 });
 
 
+describe("/agy bridge", () => {
+  async function runBridge(
+    commandArgs: string,
+    agentDir: string,
+  ): Promise<Array<[string, string | undefined]>> {
+    let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+    registerAgyCommand({
+      registerCommand: (
+        _name: string,
+        definition: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+      ) => {
+        handler = definition.handler;
+      },
+    } as unknown as ExtensionAPI);
+    const notifications: Array<[string, string | undefined]> = [];
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      await handler!(commandArgs, {
+        mode: "tui",
+        cwd: process.cwd(),
+        waitForIdle: async () => {},
+        ui: {
+          setStatus: () => {},
+          notify: (message: string, type?: "info" | "warning" | "error") =>
+            notifications.push([message, type]),
+        },
+      } as unknown as ExtensionCommandContext);
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+    return notifications;
+  }
+
+  it("toggles the bridge off and on through config", async () => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bridge-cmd-"));
+    let notifications = await runBridge("bridge off", agentDir);
+    assert.ok(notifications.some(([message]) => message.includes("bridge off")));
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(agentDir, "agy-config.json"), "utf8")),
+      { providerBridge: false },
+    );
+    notifications = await runBridge("bridge", agentDir);
+    assert.ok(notifications.some(([message]) => message.includes("Provider bridge: off")));
+    notifications = await runBridge("bridge on", agentDir);
+    assert.ok(notifications.some(([message]) => message.includes("bridge on")));
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(agentDir, "agy-config.json"), "utf8")),
+      { providerBridge: true },
+    );
+  });
+
+  it("rejects unknown bridge arguments", async () => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bridge-cmd-"));
+    const notifications = await runBridge("bridge sideways", agentDir);
+    assert.deepEqual(notifications, [["agy: bridge takes on, off, or no argument (status)", "error"]]);
+  });
+});
+
 describe("parseAgyCommandArgs", () => {
   it("parses model alias + prompt (no mode)", () => {
     const parsed = parseAgyCommandArgs("flash fix git conflicts");

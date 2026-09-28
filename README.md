@@ -192,8 +192,9 @@ Run agy directly from the Pi TUI — fast path when fully specified, wizard othe
 /agy continue fix the tests         # continue this directory's last conversation
 /agy timeout=10m sonnet big task    # raise the run cap (also 90s / 1500ms; bare = minutes)
 /agy sessions                       # pick a recorded conversation to resume
-/agy doctor                         # diagnose CLI, models, agents, quota, config, sessions, lock, and repo gate
+/agy doctor                         # diagnose CLI, models, agents, quota, config, sessions, lock, provider, and repo gate
 /agy usage                          # inspect model quotas and reset times
+/agy bridge [on|off]               # inspect or toggle the provider MCP bridge (takes effect next turn)
 ```
 
 Leading option tokens (`plan`, a model alias, `agent=name`, `continue`,

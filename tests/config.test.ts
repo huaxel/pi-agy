@@ -30,7 +30,7 @@ import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withDirLock } from "../extensions/lib/lock.js";
 import { detectVerifyCommand } from "../extensions/lib/verify.js";
 import { summarizeGitDiff } from "../extensions/lib/postflight.js";
-import { loadAgyConfig, resetDefaultModelCache, resolveDefaultModel } from "../extensions/lib/config.js";
+import { loadAgyConfig, resetDefaultModelCache, resolveDefaultModel, saveAgyConfig } from "../extensions/lib/config.js";
 import {
   accumulateRunResult,
   finalizeRunResult,
@@ -70,6 +70,26 @@ describe("agy config", () => {
       JSON.stringify({ skipPermissions: "false", defaultModel: 42, defaultModelCommand: 7 }),
     );
     assert.deepEqual(await loadAgyConfig(file), { skipPermissions: false });
+  });
+
+  it("persists overrides while preserving unknown keys", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
+    const file = path.join(tmp, "agy-config.json");
+    await saveAgyConfig({ providerBridge: false }, file);
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { providerBridge: false });
+    await saveAgyConfig({ skipPermissions: false }, file);
+    const raw = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+    assert.equal(raw.providerBridge, false);
+    assert.equal(raw.skipPermissions, false);
+    assert.deepEqual(await loadAgyConfig(file), { providerBridge: false, skipPermissions: false });
+  });
+
+  it("replaces malformed config on save", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
+    const file = path.join(tmp, "agy-config.json");
+    await writeFile(file, "not json");
+    await saveAgyConfig({ providerBridge: true }, file);
+    assert.deepEqual(await loadAgyConfig(file), { providerBridge: true });
   });
 });
 
