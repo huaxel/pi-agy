@@ -47,7 +47,20 @@ agy_agents
 agy_execute prompt="Investigate the crash" agent=gsd-debugger mode=plan
 agy_history
 agy_usage
+agy_execute prompt="Migrate the build to ESM" mode=plan background=true
+agy_tasks action=list
+agy_tasks action=status handle=<handle>
+agy_tasks action=collect handle=<handle>
+agy_tasks action=cancel handle=<handle>
 ```
+
+Background runs (`background=true`) return a task handle immediately instead
+of blocking the turn. Poll with `agy_tasks status`, collect the terminal
+result with `agy_tasks collect` (which frees the record), and cancel strays
+with `agy_tasks cancel`. Runs keep their `timeout_ms` deadline, serialize on
+the per-directory lock, record sessions on completion, and die with the Pi
+session — collect promptly, since uncollected payloads do not survive restart
+(conversations stay resumable via `agy_history`).
 
 ## Modes
 
@@ -62,7 +75,7 @@ agy_usage
 - **Default to `mode=plan`** for exploration; escalate to `accept-edits` only for scoped batches.
 - **Always review the `git diff`** after agy runs with `accept-edits`.
 - **Run `just ci`** (or the project gate) after write modes in this repo.
-- **Never use agy for irreversible production changes or persistent background servers/watchers.** Delegations are bounded; timeout/cancellation kills the full process tree rather than releasing unowned work.
+- **Never use agy for irreversible production changes or unowned background servers/watchers.** Delegations are bounded; timeout/cancellation kills the full process tree rather than releasing unowned work. The managed exception is `background=true`, whose runs stay timeout-owned, cancellable, lock-serialized, and die with the session.
 - Reuse `conversation_id` or `continue=true` for multi-step plan → implement → review.
 - Use `agent` only when the user requests a configured custom agent; call `agy_agents` first when the exact name is unknown. Recorded agent identity is restored on resume.
 - Keep `context=none` (default) unless the task depends on prior Pi discussion; prefer `summary` over `recent` to minimize disclosure. Context handoff excludes system prompts, thinking, tool arguments/results, images, and custom messages.
@@ -86,3 +99,5 @@ agy_usage
 - **Diff summary** — accept-edits results append newly-dirty files only; pre-existing dirt is listed separately, never misattributed.
 - **Per-directory lock** — serializes concurrent agy calls on the same tree across Pi processes (symlink-aware).
 - **Cancellation** — abort/timeout kills the full agy process tree, and streamed records plus responses are size-bounded; a fully delivered result survives cancellation or timeout, and the conversation stays resumable.
+- **Background tasks** — `agy_execute background=true` detaches with a task handle; `agy_tasks` polls, collects, and cancels. Timeout-owned, lock-serialized, session-recorded, reaped on shutdown.
+- **Antigravity provider** — `antigravity/*` models in Pi's `/model` picker with live catalog discovery, a persistent stream-json driver, and a localhost MCP bridge: read-only Pi context plus mutating Pi tools via parked calls and real shadow `toolCall` turns (normal permissions and review apply). Toggle with `/agy bridge on|off`; attached images are staged as files agy can open.

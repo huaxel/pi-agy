@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.6
+
+- Document background tasks and the Antigravity provider in the agent-facing skill guide (usage, lifecycle, and the narrowed background-servers rule), and ignore session-local `.pi/` todo state.
+- Full 297-test gate plus typecheck and package checks pass.
+
 ## 0.7.5
 
 - Fix CI-only event-loop drain in background tasks: per-task and shutdown timers hold the loop so timeouts always fire, and shutdown clears task timers so abandoned runs cannot pin process exit. (0.7.4 never reached npm — its publish run caught this.)
