@@ -361,6 +361,52 @@ describe("extension registration", () => {
 
 
 describe("shared executor", () => {
+  it("resolves stderr text when stdout carries no response on success", async () => {
+    const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-stderr-bin-"));
+    await writeFile(
+      path.join(bin, "agy"),
+      "#!/usr/bin/env bash\nset -eu\nif [ \"$1\" = \"--version\" ]; then echo \"agy 1.2.0\"; exit 0; fi\nprintf '   \\n'\necho \"the real message\" >&2\nexit 0\n",
+    );
+    await chmod(path.join(bin, "agy"), 0o755);
+    const { spawnAgy } = await import("../extensions/lib/cli.js");
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`;
+    try {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-stderr-fallback-"));
+      const response = await spawnAgy(
+        { prompt: "say something", dir, timeout_ms: 30_000 },
+        new AbortController().signal,
+      );
+      assert.match(response, /the real message/);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
+  it("prefers stdout responses over stderr diagnostics on success", async () => {
+    const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-stdout-bin-"));
+    await writeFile(
+      path.join(bin, "agy"),
+      "#!/usr/bin/env bash\nset -eu\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"stdout wins\"}}'\necho \"noisy diagnostic\" >&2\nexit 0\n",
+    );
+    await chmod(path.join(bin, "agy"), 0o755);
+    const { spawnAgy } = await import("../extensions/lib/cli.js");
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`;
+    try {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-stdout-wins-"));
+      const response = await spawnAgy(
+        { prompt: "say something", dir, timeout_ms: 30_000 },
+        new AbortController().signal,
+      );
+      assert.equal(response, "stdout wins");
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
   it("inherits the recorded custom agent for an explicit conversation resume", async () => {
     const raw =
       JSON.stringify({ event: "result", result: { response: "resumed", status: "SUCCESS" } }) +

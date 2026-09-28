@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.2
+
+- Resolve stderr text when a successful run leaves stdout empty or whitespace-only (ported from upstream 0.3.8/0.3.9), after the terminal-status and permission-denial fail-closed checks so those semantics stand; stdout responses still win over stderr diagnostics.
+- Cover symlink canonicalization into one directory-lock chain (our answer to upstream 0.3.6's symlink-escape rejection: resolve, don't reject).
+- Full 280-test gate plus typecheck and package checks pass.
+
 ## 0.7.1
 
 - Report provider runtime state in `/agy doctor` (driver turns/reuses/recycles, bridge tool count, suspended turns awaiting Pi tools, live image staging) via a never-throwing status snapshot.

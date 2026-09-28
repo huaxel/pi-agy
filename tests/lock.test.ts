@@ -41,6 +41,45 @@ import { parseJsonResponse } from "../extensions/lib/parse.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
 describe("withDirLock", () => {
+  it("shares one chain for a symlink and its target", async () => {
+    const { symlink } = await import("node:fs/promises");
+    const target = await mkdtemp(path.join(os.tmpdir(), "pi-agy-lock-real-"));
+    const link = path.join(os.tmpdir(), `pi-agy-lock-link-${process.pid}`);
+    await symlink(target, link).catch(() => undefined);
+    try {
+      // Same target through different spellings must serialize, not run
+      // concurrently: canonicalization (not rejection) is our answer to
+      // symlink escapes.
+      assert.equal(await canonicalDir(link), await canonicalDir(target));
+      let release!: () => void;
+      let started!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const running = withDirLock(target, async () => {
+        started();
+        await gate;
+      });
+      await firstStarted;
+      let secondStarted = false;
+      const queued = withDirLock(link, async () => {
+        secondStarted = true;
+      });
+      await Promise.resolve();
+      assert.equal(secondStarted, false);
+      release();
+      await running;
+      await queued;
+      assert.equal(secondStarted, true);
+    } finally {
+      const { unlink } = await import("node:fs/promises");
+      await unlink(link).catch(() => undefined);
+    }
+  });
+
   it("normalizes equivalent directory paths", async () => {
     let release!: () => void;
     let started!: () => void;

@@ -364,6 +364,16 @@ function spawnAgyInternal(
         if (stdoutTruncated && !finalized.response_complete) {
           finalized.response += `\n\n(raw stdout capture was truncated at the ${MAX_CAPTURE_BYTES / 1024} KB fallback bound)`;
         }
+        // Upstream 0.3.8/0.3.9: success resolves stdout-only, except a
+        // stray newline on stdout with the real message on stderr resolves
+        // with the stderr text instead of near-empty output. Runs after
+        // the denied/terminal checks so those fail-closed semantics stand.
+        // Stderr stays bounded by the capture above.
+        const responseText = finalized.response.trim();
+        if ((responseText === "" || responseText === "(empty response)") && err.trim()) {
+          finalized.response = err.trim();
+          finalized.response_complete = true;
+        }
         resolve(finalized);
       });
     });
