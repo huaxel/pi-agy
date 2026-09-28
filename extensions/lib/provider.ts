@@ -513,27 +513,26 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
       );
     },
     resume: async (deliveries, callbacks, resumeSignal, resumeTimeoutMs) => {
-      // Like run: resumed phases hold the child and must not race
-      // delegation (or another session's fresh turn) in the directory.
-      return withDirLock(
-        dir,
-        async () => {
-          const bridge = providerBridges.get(path.resolve(dir));
-          if (!bridge) throw new Error("agy provider turn has no bridge to resume on");
-          for (const delivery of deliveries) {
-            bridge.completePark(delivery.callId, { text: delivery.text, isError: delivery.isError });
-          }
-          const end = await driver.continueTurn({
-            signal: resumeSignal,
-            timeoutMs: resumeTimeoutMs,
-            onText: callbacks?.onText,
-            onActivity: callbacks?.onActivity,
-          });
-          return toRunEnd(end);
-        },
-        resumeSignal,
-        resumeTimeoutMs,
-      );
+      // Deliberately lock-free: resume continues an already-running child
+      // (no spawn) and taking the lock here deadlocks whenever the parked
+      // tool call itself started a lock-holding background run — the resume
+      // would wait on the very run it must complete to proceed. The
+      // suspended-gap race this opens (a foreign delegation run editing
+      // under a live provider child) is inherent to persistent processes;
+      // same-directory concurrency stays the agent's to coordinate, and
+      // fresh provider turns still serialize on the lock.
+      const bridge = providerBridges.get(path.resolve(dir));
+      if (!bridge) throw new Error("agy provider turn has no bridge to resume on");
+      for (const delivery of deliveries) {
+        bridge.completePark(delivery.callId, { text: delivery.text, isError: delivery.isError });
+      }
+      const end = await driver.continueTurn({
+        signal: resumeSignal,
+        timeoutMs: resumeTimeoutMs,
+        onText: callbacks?.onText,
+        onActivity: callbacks?.onActivity,
+      });
+      return toRunEnd(end);
     },
     cancel: () => {
       driver.cancelSuspended("agy provider turn was cancelled");

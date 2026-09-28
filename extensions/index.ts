@@ -36,6 +36,10 @@ import {
 } from "./lib/execute.js";
 import { describeWhen, truncate } from "./lib/output.js";
 import {
+  BackgroundTaskRunner,
+  summarizeTaskPrompt,
+} from "./lib/background.js";
+import {
   AGY_PROVIDER_API,
   AGY_PROVIDER_ID,
   closeProviderDrivers,
@@ -171,16 +175,29 @@ function registerAgyProvider(pi: ExtensionAPI): void {
   })();
 }
 
+const backgroundRunner = new BackgroundTaskRunner();
+
+/** Process-wide background task registry (reset in tests via shutdown). */
+export function getBackgroundRunner(): BackgroundTaskRunner {
+  return backgroundRunner;
+}
+
 export default function piAgyExtension(pi: ExtensionAPI) {
   registerAgyCommand(pi);
   registerAgyProvider(pi);
-  // Persistent driver processes must not outlive the session.
+  // Persistent driver processes and background runs must not outlive the
+  // session (a detached run editing files after exit would be a ghost).
   try {
     pi.on?.("session_shutdown", async () => {
       try {
         await closeProviderDrivers();
       } catch {
         // Shutdown disposal is best effort; turns still work without it.
+      }
+      try {
+        await getBackgroundRunner().shutdown();
+      } catch {
+        // Best effort; the OS reaps anything left.
       }
     });
   } catch {
@@ -207,6 +224,8 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       "Keep agy_execute context=none unless the delegated task depends on prior Pi discussion; use summary before recent to minimize disclosure.",
       "Use agy_usage before choosing a model when quota availability matters; agy_execute also refreshes and returns a quota snapshot.",
       "Batch related work, prefer digest output for non-write calls, and avoid parallel agy_execute calls within one shared-quota group or directory.",
+      "Use background=true for long runs that should not block the turn; poll with agy_tasks status and collect the result when done.",
+      "Collect background results promptly: uncollected payloads die with the session (conversations stay resumable), and cancel strays with agy_tasks cancel.",
       "Always review the git diff and run just ci (or the project gate) after agy_execute with mode=accept-edits.",
       "Never use agy for irreversible production changes.",
       "Set an appropriate timeout_ms for large tasks (default 5m).",
@@ -306,6 +325,13 @@ export default function piAgyExtension(pi: ExtensionAPI) {
           default: true,
         }),
       ),
+      background: Type.Optional(
+        Type.Boolean({
+          description:
+            "Return immediately with a task handle instead of waiting; poll with agy_tasks status and collect the result. The run keeps its timeout_ms deadline; cancel via agy_tasks.",
+          default: false,
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -371,6 +397,36 @@ export default function piAgyExtension(pi: ExtensionAPI) {
         });
         const approved = await ctx.ui.confirm(title, body);
         if (!approved) throw new Error("agy accept-edits cancelled by user");
+      }
+
+      if (params.background) {
+        const runner = getBackgroundRunner();
+        const handle = runner.start({
+          dir: cwd,
+          summary: summarizeTaskPrompt(params.prompt),
+          model,
+          agent,
+          timeoutMs,
+          run: ({ onProgress, signal }) =>
+            executeAgyTask(executionOptions, signal, (progress) => onProgress(progress)).then(
+              (result) => ({
+                text: result.text,
+                conversationId: result.details.conversation_id,
+                details: result.details,
+              }),
+            ),
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `started background task ${handle} (${mode}, ${model ?? "default model"}, timeout ${Math.round(timeoutMs / 1000)}s). ` +
+                `Poll with agy_tasks status, collect the result with agy_tasks collect.`,
+            },
+          ],
+          details: { handle, mode, model, dir: cwd, timeout_ms: timeoutMs },
+        };
       }
 
       const result = await executeAgyTask(
@@ -470,6 +526,124 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text }],
         details: { dir: cwd, conversations: limited },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "agy_tasks",
+    label: "Antigravity Background Tasks",
+    description:
+      "List, poll, collect, or cancel background agy tasks started with agy_execute background=true. Collecting returns the terminal result and frees the record.",
+    promptSnippet: "Poll background agy tasks and collect finished results",
+    parameters: Type.Object({
+      action: Type.Union(
+        [
+          Type.Literal("list"),
+          Type.Literal("status"),
+          Type.Literal("collect"),
+          Type.Literal("cancel"),
+        ],
+        { description: "Task action (default list).", default: "list" },
+      ),
+      handle: Type.Optional(
+        Type.String({
+          description: "Task handle from agy_execute (required for status, collect, cancel).",
+        }),
+      ),
+      dir: Type.Optional(
+        Type.String({
+          description: "Filter listed tasks to a working directory. Defaults to current project root.",
+        }),
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runner = getBackgroundRunner();
+      const action = params.action ?? "list";
+      // List/status carry summaries only: full response text and execution
+      // details stay behind collect, so polling never bloats the transcript.
+      const summarize = (task: {
+        handle: string; dir: string; summary: string; model?: string; agent?: string;
+        state: string; startedAt: number; updatedAt: number; progress: string[];
+        error?: string; conversationId?: string;
+      }) => ({
+        handle: task.handle,
+        dir: task.dir,
+        summary: task.summary,
+        model: task.model,
+        agent: task.agent,
+        state: task.state,
+        startedAt: task.startedAt,
+        updatedAt: task.updatedAt,
+        progressTail: task.progress.slice(-3),
+        error: task.error,
+        conversationId: task.conversationId,
+      });
+      if (action === "list") {
+        const cwd = await resolveToolDir(ctx.cwd, params.dir);
+        const tasks = runner.list(cwd);
+        if (tasks.length === 0) {
+          return {
+            content: [{ type: "text", text: `No background agy tasks for ${cwd}.` }],
+            details: { dir: cwd, tasks: [] },
+          };
+        }
+        const lines = tasks.map((task) => {
+          const age = describeWhen(new Date(task.startedAt).toISOString());
+          const latest = task.state === "running" && task.progress.length > 0
+            ? ` · latest: ${task.progress[task.progress.length - 1]}`
+            : "";
+          return `${task.handle} · ${task.state}${task.model ? ` · ${task.model}` : ""} · ${age} · ${task.summary}${latest}`;
+        });
+        return {
+          content: [{ type: "text", text: `background agy tasks for ${cwd}:\n${lines.join("\n")}` }],
+          details: { dir: cwd, tasks: tasks.map(summarize) },
+        };
+      }
+      if (!params.handle) throw new Error(`agy_tasks ${action} requires a handle`);
+      if (action === "status") {
+        const task = runner.get(params.handle);
+        if (!task) throw new Error(`unknown background task '${params.handle}'`);
+        const elapsed = `${Math.round((Date.now() - task.startedAt) / 1000)}s`;
+        const progress = task.progress.length ? `\nrecent progress:\n${task.progress.slice(-5).join("\n")}` : "";
+        const outcome = task.state === "running"
+          ? ""
+          : task.state === "done"
+            ? `\nresult: ${truncate(task.text ?? "(empty response)")}`
+            : `\n${task.state}${task.error ? `: ${task.error}` : ""}`;
+        const conversation = task.conversationId ? `\nconversation: ${task.conversationId}` : "";
+        return {
+          content: [{
+            type: "text",
+            text: `${task.handle} · ${task.state} · elapsed ${elapsed} · ${task.summary}${progress}${outcome}${conversation}`,
+          }],
+          details: { task: summarize(task) },
+        };
+      }
+      if (action === "collect") {
+        const task = runner.collect(params.handle);
+        const body = task.state === "done"
+          ? truncate(task.text ?? "(empty response)")
+          : `${task.state}${task.error ? `: ${task.error}` : ""}`;
+        const conversation = task.conversationId ? `\nconversation: ${task.conversationId}` : "";
+        return {
+          content: [{ type: "text", text: `${task.handle} · ${task.state}\n${body}${conversation}` }],
+          details: { task },
+        };
+      }
+      const cancelled = runner.cancel(params.handle);
+      if (!cancelled) {
+        const task = runner.get(params.handle);
+        if (!task) throw new Error(`unknown background task '${params.handle}'`);
+        return {
+          content: [{ type: "text", text: `${task.handle} is already ${task.state}; nothing to cancel.` }],
+          details: { task },
+        };
+      }
+      return {
+        content: [{ type: "text", text: `${params.handle} cancellation requested; poll status for settlement.` }],
+        details: { handle: params.handle, cancelled: true },
       };
     },
   });

@@ -51,11 +51,17 @@ async function runHealthWithRetry(
   signal: AbortSignal | undefined,
   timeoutMs: number | undefined,
 ): Promise<void> {
-  const attempt = (): Promise<void> =>
-    Promise.all([
-      checkAgyHealth(cwd, signal, timeoutMs),
-      checkAgyConnectivity(cwd, signal, timeoutMs),
+  const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
+  const attempt = (): Promise<void> => {
+    const remaining = deadline === undefined ? undefined : deadline - Date.now();
+    if (remaining !== undefined && remaining <= 0) {
+      throw new Error("agy timed out before preflight retry");
+    }
+    return Promise.all([
+      checkAgyHealth(cwd, signal, remaining),
+      checkAgyConnectivity(cwd, signal, remaining),
     ]).then(() => undefined);
+  };
   try {
     await attempt();
   } catch (error) {

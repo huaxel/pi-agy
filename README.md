@@ -129,6 +129,7 @@ The deadline never discards finished work:
 
 | Param | Description |
 |-------|-------------|
+| `background` | Return immediately with a task handle instead of waiting; poll with `agy_tasks status` and collect the result. The run keeps its `timeout_ms` deadline; cancel via `agy_tasks`. |
 | `conversation_id` | Resume agy conversation by ID |
 | `continue` | `--continue` most recent conversation |
 | `new_session` | Force fresh session; set `false` to reuse last ID for dir |
@@ -176,6 +177,14 @@ models, custom agents, ages, and one-line task summaries — so agents can find 
 `conversation_id` to resume; `/agy sessions` offers the same in the TUI
 picker. Summaries are stored locally (first ~80 chars of each prompt), and a
 recorded custom agent is restored when that conversation resumes.
+
+The `agy_tasks` tool manages background runs started with
+`agy_execute background=true`: `list` shows tasks per directory, `status`
+polls state and recent progress, `collect` returns the terminal result and
+frees the record, and `cancel` aborts a live run. Background runs keep their
+`timeout_ms` deadline, serialize on the per-directory lock like foreground
+runs, and are recorded to the session store on completion so nothing is lost
+when a payload goes uncollected; session shutdown aborts anything still live.
 
 ## Human-callable `/agy` command
 

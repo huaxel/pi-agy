@@ -59,4 +59,20 @@ describe("preflight cold-start retry", () => {
       );
     });
   });
+
+  it("keeps the health retry inside the remaining timeout budget", async () => {
+    await withSlowModelsFake(10, async () => {
+      resetPreflightCache();
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preflight-"));
+      const started = Date.now();
+      await assert.rejects(
+        runPreflight(dir, undefined, 12_000),
+        /timed out/,
+      );
+      assert.ok(
+        Date.now() - started < 15_000,
+        "health retry exceeded the overall preflight timeout",
+      );
+    });
+  });
 });

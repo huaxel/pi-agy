@@ -58,11 +58,12 @@ describe("extension registration", () => {
     };
     piAgyExtension(fakePi as unknown as ExtensionAPI);
     assert.deepEqual(commands, ["agy"]);
-    assert.equal(tools.length, 4);
+    assert.equal(tools.length, 5);
     assert.equal(tools[0].name, "agy_execute");
     assert.equal(tools[1].name, "agy_agents");
     assert.equal(tools[2].name, "agy_history");
-    assert.equal(tools[3].name, "agy_usage");
+    assert.equal(tools[3].name, "agy_tasks");
+    assert.equal(tools[4].name, "agy_usage");
     for (const tool of tools) assert.ok(tool.parameters);
   });
 
@@ -1534,5 +1535,3 @@ describe("shared executor", () => {
     });
   });
 });
-
-

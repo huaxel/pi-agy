@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.4
+
+- Add background agy tasks: `agy_execute background=true` detaches the run and returns a handle immediately; the new `agy_tasks` tool lists, polls, collects, and cancels. Runs keep their `timeout_ms` deadline, serialize on the per-directory lock, record sessions on completion, and are aborted on session shutdown.
+- Keep the preflight health retry inside the remaining timeout budget.
+- Full 297-test gate plus typecheck and package checks pass.
+
 ## 0.7.3
 
 - Retry health probes once on timeout so cold-start OAuth stampedes no longer fail delegation runs; auth failures, missing binaries, and cancellations still fail fast. Live smoke probe cap raised for the same cold-start reason.
