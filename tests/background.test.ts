@@ -196,6 +196,7 @@ describe("background task runner", () => {
     gate.resolve({ text: "one" });
     await settle();
     runner.collect(runner.list(dir)[0].handle);
+    await runner.shutdown();
   });
 
   it("reports cancelled even when the timeout fires during teardown", async () => {

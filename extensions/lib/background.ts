@@ -131,11 +131,13 @@ export class BackgroundTaskRunner {
       timedOut: false,
       settled: Promise.resolve(),
     };
+    // Ref'd deliberately: this timer guarantees the run settles even if
+    // nothing else holds the loop (an unref'd timer lets the loop drain
+    // with the task pending, hanging collectors forever). Cleared on settle.
     record.timer = setTimeout(() => {
       record.timedOut = true;
       controller.abort();
     }, Math.max(1, options.timeoutMs));
-    (record.timer as unknown as { unref?: () => void }).unref?.();
 
     this.tasks.set(handle, record);
     let runPromise: Promise<BackgroundRunOutcome>;
@@ -248,18 +250,25 @@ export class BackgroundTaskRunner {
     for (const record of this.tasks.values()) {
       if (record.state === "running") {
         record.cancelled = true;
+        // Timers are moot past teardown: clear them so abandoned tasks
+        // cannot pin the process open after shutdown returns.
+        if (record.timer) {
+          clearTimeout(record.timer);
+          record.timer = undefined;
+        }
         controllerAbort(record);
         pending.push(record.settled);
       }
     }
     if (pending.length === 0) return;
+    // Ref'd like the task timers: the bound must hold the loop, or teardown
+    // races an empty loop the same way. Cleared below either way.
     let waiter: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         Promise.allSettled(pending).then(() => undefined),
         new Promise<void>((resolve) => {
           waiter = setTimeout(resolve, this.shutdownTimeoutMs);
-          (waiter as unknown as { unref?: () => void }).unref?.();
         }),
       ]);
     } finally {

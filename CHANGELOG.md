@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.5
+
+- Fix CI-only event-loop drain in background tasks: per-task and shutdown timers hold the loop so timeouts always fire, and shutdown clears task timers so abandoned runs cannot pin process exit. (0.7.4 never reached npm — its publish run caught this.)
+- Full gate plus typecheck and package checks pass.
+
 ## 0.7.4
 
 - Add background agy tasks: `agy_execute background=true` detaches the run and returns a handle immediately; the new `agy_tasks` tool lists, polls, collects, and cancels. Runs keep their `timeout_ms` deadline, serialize on the per-directory lock, record sessions on completion, and are aborted on session shutdown.
