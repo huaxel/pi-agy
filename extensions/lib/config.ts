@@ -47,6 +47,12 @@ export interface AgyConfig {
    * command you control — the config file is user-owned.
    */
   defaultModelCommand?: string;
+  /**
+   * Expose Pi-side read-only context (sessions, quota, model catalog) to
+   * provider agy turns over a localhost MCP bridge injected via an extra
+   * `--add-dir`. Default `true`. Set `false` to run provider turns plain.
+   */
+  providerBridge?: boolean;
 }
 
 export function getDefaultConfigPath(): string {
@@ -78,6 +84,12 @@ export async function loadAgyConfig(
       } else if ("skipPermissions" in record) {
         // A malformed permission setting must never silently enable bypasses.
         config.skipPermissions = false;
+      }
+      if (typeof record.providerBridge === "boolean") {
+        config.providerBridge = record.providerBridge;
+      } else if ("providerBridge" in record) {
+        // A malformed bridge setting must never silently open new surface.
+        config.providerBridge = false;
       }
       return config;
     }

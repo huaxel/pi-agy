@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0
+
+- Register an `antigravity` provider so agy-backed models appear in Pi's global `/model` picker as `antigravity/*`, discovered from live `agy models` with a fallback catalog (background refresh, no `/reload`). Gemini bases expose Pi's thinking toggle as agy `--effort` clamped to supported tiers; fixed-thinking families keep agy's exact slug.
+- Run provider turns on a persistent `agy --input-format stream-json` driver process per directory: serialized queue, reuse on matching profile and conversation, recycle with recorded reasons on drift, abort/timeout as kill-and-respawn with flagged partial text, idle reaping, and session-shutdown disposal.
+- Bridge Pi tools into agy turns over a localhost MCP server injected via an extra `--add-dir` (per-process secret, no global config changes): read-only context tools (sessions, quota, model catalog) plus mutating Pi tools through parked calls and real shadow `toolCall` turns, so Pi permissions, approvals, and diff review engage. `providerBridge: false` opts out.
+- Stage attached images as 0700 files agy opens by path (newest 8, 8 MiB each, strict base64); models advertise image input. Staging is owned per turn, carried across parks, and reclaimed on settle, cancel, abandonment, or teardown.
+- Serialize provider turns on the existing per-directory lock, record them in the shared session store (preserving delegation agents), surface driver/bridge/suspension/staging state in `/agy doctor`, and live-verify discovery, tool calls, and park round-trips against real agy. Do not install `@estebanforge/pi-antigravity-bridge` alongside this package (shared provider id and `/agy` command).
+- Independent reviews per milestone with zero open blockers; the full 273-test gate plus typecheck and package checks pass.
+
 ## 0.6.11
 
 - Parse agy 1.1.27+ `denied_actions` from nested stream results and top-level JSON envelopes, sanitizing, deduplicating, and bounding the untrusted action metadata.

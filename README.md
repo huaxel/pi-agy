@@ -37,6 +37,60 @@ Requires Node.js >= 20.3.
 
 Auth is unchanged: existing `agy` OAuth (`~/.gemini/oauth_creds.json`).
 
+## Antigravity provider (`/model` picker)
+
+This package also registers an `antigravity` provider, so agy-backed models
+appear in Pi's global `/model` picker as `antigravity/<id>` (for example
+`antigravity/gemini-3-8-flash`). Model entries are discovered from live
+`agy models` output at startup (refreshed in the background, no `/reload`
+needed); when discovery fails, a fallback catalog keeps the picker populated
+and selection yields a clear runtime error instead of an empty list.
+
+Gemini bases with multiple effort tiers expose Pi's thinking-level toggle,
+which is sent as agy `--effort` (clamped to tiers the base accepts — Pro has
+no medium). Fixed-thinking families (Claude, GPT-OSS) keep agy's exact slug
+and never receive `--effort`.
+
+Attached images are staged as files under a process-stable 0700 root
+(passed as `--add-dir` so sandboxed turns can open them) and referenced by
+path in the turn prompt, so agy opens them with its file tools; images on
+tool results ride the delivery the same way. Capped at the 8 newest images /
+8 MiB each with strict base64 validation — failures degrade to omitted notes.
+Each staging has a dispose handle owned by its turn (suspensions carry
+theirs forward); terminal settle, stale-cancel, abandonment, and session
+shutdown all reclaim.
+
+Each turn runs on a persistent `agy --input-format stream-json` driver
+process (one per working directory) with the transcript rendered as text.
+The process is reused across turns — follow-ups skip cold start and re-auth —
+and recycled when the model, effort, permissions, or conversation drifts; idle
+processes are reaped after five minutes and everything is disposed on session
+shutdown. Completed turns are recorded to the same session store as
+delegation runs, so `/agy sessions` can resume them. Provider turns take the
+same per-directory lock as delegation runs (lock waits count against the turn
+timeout), so a provider turn never races `agy_execute` in the same directory.
+
+Read-only tool bridge: provider turns also get an extra `--add-dir`
+carrying a localhost MCP server (`pi-agy-tools`) that exposes Pi-side
+context agy cannot see otherwise — `agy_sessions_list`, `agy_quota_report`,
+and `agy_model_catalog`. The server binds 127.0.0.1 with a per-process
+shared secret, serves only reads, and never touches your global agy config.
+Set `"providerBridge": false` in `agy-config.json` to run provider turns
+plain.
+
+Mutating tool bridge: agy turns can also call Pi tools directly. The bridge
+parks the MCP call, the provider emits a real shadow `toolCall`, and Pi
+executes it with normal permissions, approvals, and diff review; the next
+turn's `toolResult` completes the parked call and agy continues. Only active
+non-builtin tools are exposed (`agy_*` and `AskAntigravity` excluded — no
+recursive delegation); the catalog refreshes per turn and the driver recycles
+when it changes so agy always sees a fresh tool list. Suspended turns hold
+the agy child with timers off, re-arm on resume, and are abandoned loudly on
+cancel, teardown, or a 30-minute stall cap.
+
+Do not install `@estebanforge/pi-antigravity-bridge` alongside this package:
+both register the `antigravity` provider id and an `/agy` command.
+
 ## Timeouts & cancellation
 
 `timeout_ms` (default 5m, max 10m) is a hard parent-side deadline — lock
@@ -156,7 +210,9 @@ exploration/review. Sandbox runs do not bypass agy permission checks.
 `/agy doctor` performs no inference and spends no model tokens. It reports the
 installed CLI version, discoverable stable model aliases, optional custom-agent
 discovery, quota support, active config, recorded sessions, workspace lock state,
-and detected verification gate.
+provider runtime state (driver turns/reuses/recycles, bridge tool count,
+suspended turns awaiting Pi tools, live image staging), and detected
+verification gate.
 
 Missing pieces open interactive dialogs (mode select, model select with
 descriptions, multi-line task editor). `accept-edits` asks for confirmation

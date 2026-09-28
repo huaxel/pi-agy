@@ -12,6 +12,7 @@ import {
 } from "./cli.js";
 import { getDefaultConfigPath } from "./config.js";
 import { canonicalDir, getDirLockPath } from "./lock.js";
+import { getProviderStatus } from "./provider.js";
 import { getDefaultStorePath, getHistory } from "./sessions.js";
 import { detectVerifyCommand } from "./verify.js";
 
@@ -106,6 +107,8 @@ export async function runAgyDoctor(
   }
 
   checks.push(await configCheck(signal));
+  throwIfCancelled(signal);
+  checks.push(providerCheck(resolvedCwd));
   throwIfCancelled(signal);
   checks.push(await sessionsCheck(resolvedCwd, signal));
   throwIfCancelled(signal);
@@ -297,6 +300,39 @@ async function lockCheck(cwd: string): Promise<AgyDoctorCheck> {
       return { name: "Workspace lock", status: "ok", detail: "free" };
     }
     return { name: "Workspace lock", status: "warn", detail: errorMessage(error) };
+  }
+}
+
+/** Provider runtime state: driver, bridge, suspensions, staging. Never throws. */
+function providerCheck(cwd: string): AgyDoctorCheck {
+  try {
+    const status = getProviderStatus(cwd);
+    const parts: string[] = [];
+    if (status.driver) {
+      const stats = status.driver;
+      parts.push(
+        `driver ${stats.state} · ${stats.turns} turn${stats.turns === 1 ? "" : "s"}` +
+        ` (${stats.reuses} reuse${stats.reuses === 1 ? "" : "s"}, ${stats.recycles} recycle${stats.recycles === 1 ? "" : "s"}` +
+        `${stats.lastRecycleReason ? `: ${stats.lastRecycleReason}` : ""})`,
+      );
+    } else {
+      parts.push("driver idle (no provider turns yet)");
+    }
+    parts.push(status.bridge ? `bridge ${status.bridge.toolCount} tools` : "bridge off");
+    if (status.suspended.length > 0) {
+      const names = status.suspended.map((entry) => entry.toolName).join(", ");
+      parts.push(`${status.suspended.length} suspended awaiting Pi tools (${names})`);
+    }
+    if (status.stagedImages > 0) {
+      parts.push(`${status.stagedImages} staged image dirs live`);
+    }
+    return {
+      name: "Provider",
+      status: status.driver ? "ok" : "info",
+      detail: parts.join(" · "),
+    };
+  } catch (error) {
+    return { name: "Provider", status: "warn", detail: errorMessage(error) };
   }
 }
 
