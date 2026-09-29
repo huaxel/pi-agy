@@ -34,6 +34,8 @@ Requires Node.js >= 20.3.
 | Concurrency | Unlocked | Per-directory lock (in-process + filesystem, symlink-aware), lock wait counts against the timeout |
 | Transient failures | Fatal | One retry when agy fails before doing any work |
 | Cancellation | Direct child only | Full process-tree kill on cancel/timeout via detached process groups; a fully delivered result is preserved |
+| Primary-model picker | None | `antigravity/*` provider with live catalog, persistent driver, MCP tool bridge, and image staging (see below) |
+| Background runs | Blocking only | `background=true` detaches with a handle; `agy_tasks` polls, collects, and cancels under the same timeout and lock |
 
 Auth is unchanged: existing `agy` OAuth (`~/.gemini/oauth_creds.json`).
 
