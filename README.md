@@ -1,12 +1,11 @@
 # @juanbenjumea/pi-agy
 
-Reliable Antigravity delegation for Pi: quota-aware runs, resumable tasks,
-repo verification, cancellation, and trustworthy diff summaries.
+Antigravity (agy) provider and delegation for Pi: `/model` picker integration,
+persistent driver with loopback MCP tool bridge, background tasks, quota awareness,
+repo verification, and trustworthy diff summaries.
 
-Pi stays the primary agent and explicitly delegates scoped work to the
-Antigravity CLI (`agy`). Choose this package when you want dependable delegation
-from any Pi model; choose a provider integration when you want Antigravity to be
-your primary model for every turn.
+Pi can delegate scoped tasks to the Antigravity CLI (`agy`) or use Antigravity
+as the primary `/model` provider for interactive chat with a full loopback MCP tool bridge.
 
 Enhanced fork of [`@bacnh85/pi-agy`](https://github.com/bacnh85/pi-extensions/tree/main/pi-agy).
 

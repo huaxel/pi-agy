@@ -1,18 +1,22 @@
 {
   "name": "@juanbenjumea/pi-agy",
   "version": "0.7.7",
-  "description": "Reliable Antigravity delegation for Pi — quota-aware runs, resumable tasks, repo verification, cancellation, and trustworthy diff summaries.",
+  "description": "Antigravity (agy) provider and delegation for Pi — /model picker, background tasks, loopback MCP tool bridge, quota awareness, and repo verification.",
   "type": "module",
   "license": "MIT",
   "author": "Juan Benjumea",
   "keywords": [
     "pi-package",
     "pi-extension",
+    "pi-provider",
     "pi-skill",
     "agy",
     "antigravity",
     "gemini",
+    "claude",
     "google-ai",
+    "mcp",
+    "mcp-server",
     "cli"
   ],
   "repository": {
