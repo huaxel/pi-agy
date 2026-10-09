@@ -343,7 +343,7 @@ describe("MCP bridge", () => {
         const listed = await client.listTools();
         const skillTool = listed.tools.find((t) => t.name === "activate_skill");
         assert.ok(skillTool);
-        assert.match(skillTool.description, /test-skill/);
+        assert.match(skillTool.description ?? "", /test-skill/);
 
         // Call activate_skill
         const result = (await client.callTool({
