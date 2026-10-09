@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.7
+
+- Add dynamic Pi Skills injection (`activate_skill`) to the loopback MCP server, scanning global (`~/.pi/agent/skills`, `~/.agents/skills`) and project (`.pi/skills`, `.agents/skills`) locations, presenting an enum of skills with summaries and returning `SKILL.md` markdown to agy.
+- Add long-running tool escalation and polling (`bridge_poll_result`): tools running longer than 20s escalate with an immediate early-ack response, preventing agy client timeouts (~180s) and allowing agy to poll until the tool settles.
+- Full 299-test gate plus typecheck and package checks pass.
+
 ## 0.7.6
 
 - Document background tasks and the Antigravity provider in the agent-facing skill guide (usage, lifecycle, and the narrowed background-servers rule), and ignore session-local `.pi/` todo state.
