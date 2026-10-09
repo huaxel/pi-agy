@@ -67,7 +67,7 @@ describe("MCP bridge", () => {
     });
   });
 
-  it("lists the three read-only tools and serves sessions", async () => {
+  it("lists the built-in read-only tools and serves sessions", async () => {
     await withIsolatedAgentDir(async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
       const handle = await startBridge(dir);
@@ -76,7 +76,7 @@ describe("MCP bridge", () => {
         const listed = await client.listTools();
         assert.deepEqual(
           listed.tools.map((tool) => tool.name).sort(),
-          ["agy_model_catalog", "agy_quota_report", "agy_sessions_list"],
+          ["activate_skill", "agy_model_catalog", "agy_quota_report", "agy_sessions_list", "bridge_poll_result"],
         );
         const sessions = (await client.callTool({ name: "agy_sessions_list", arguments: { dir } })) as {
           content: Array<{ text: string }>;
@@ -157,7 +157,7 @@ describe("MCP bridge", () => {
       const client = await connectClient(bridgeB.url, await readToken(bridgeB.configDir));
       try {
         const listed = await client.listTools();
-        assert.equal(listed.tools.length, 3);
+        assert.equal(listed.tools.length, 5);
       } finally {
         await client.close();
       }
@@ -319,11 +319,112 @@ describe("MCP bridge", () => {
     await withIsolatedAgentDir(async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
       const handle = await startBridge(dir);
-      assert.equal(handle.describe().toolCount, 3);
+      assert.equal(handle.describe().toolCount, 5);
       handle.setTools([
         { name: "read", piName: "read", description: "Read", inputSchema: { type: "object" } },
       ]);
-      assert.equal(handle.describe().toolCount, 4);
+      assert.equal(handle.describe().toolCount, 6);
+    });
+  });
+
+  it("serves activate_skill with skill body from discovered directories", async () => {
+    await withIsolatedAgentDir(async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
+      const skillDir = path.join(dir, ".pi", "skills", "test-skill");
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(
+        path.join(skillDir, "SKILL.md"),
+        "---\nname: test-skill\ndescription: A test skill for bridge testing\n---\n# Test Skill Instructions\nDo test things.",
+      );
+      const handle = await startBridge(dir);
+      const client = await connectClient(handle.url, await readToken(handle.configDir));
+      try {
+        const listed = await client.listTools();
+        const skillTool = listed.tools.find((t) => t.name === "activate_skill");
+        assert.ok(skillTool);
+        assert.match(skillTool.description, /test-skill/);
+
+        // Call activate_skill
+        const result = (await client.callTool({
+          name: "activate_skill",
+          arguments: { name: "test-skill" },
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        assert.equal(result.isError, undefined);
+        assert.match(result.content[0].text, /# Test Skill Instructions/);
+
+        // Unknown skill
+        const unknown = (await client.callTool({
+          name: "activate_skill",
+          arguments: { name: "nonexistent" },
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        assert.equal(unknown.isError, true);
+        assert.match(unknown.content[0].text, /Unknown skill/);
+      } finally {
+        await client.close();
+      }
+    });
+  });
+
+  it("escalates long-running calls to STILL RUNNING and resolves via bridge_poll_result", async () => {
+    await withIsolatedAgentDir(async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
+      // Escalate quickly after 50ms for testing
+      const handle = await startMcpBridge(dir, { escalateAfterMs: 50 });
+      assert.ok(handle);
+      handles.push(handle);
+      handle.setTools([
+        { name: "slow_tool", piName: "slow_tool", description: "Slow tool", inputSchema: { type: "object" } },
+      ]);
+      let callIdCaptured = "";
+      handle.setParkHandler((park) => {
+        callIdCaptured = park.callId;
+        return true;
+      });
+      const client = await connectClient(handle.url, await readToken(handle.configDir));
+      try {
+        // Initial call should early-ack with STILL RUNNING after ~50ms
+        const earlyAck = (await client.callTool({
+          name: "slow_tool",
+          arguments: {},
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        assert.equal(earlyAck.isError, undefined);
+        assert.match(earlyAck.content[0].text, /STILL RUNNING/);
+        assert.match(earlyAck.content[0].text, new RegExp(callIdCaptured));
+
+        // Poll before completion
+        const stillRunningPoll = (await client.callTool({
+          name: "bridge_poll_result",
+          arguments: { callId: callIdCaptured },
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        assert.equal(stillRunningPoll.isError, undefined);
+        assert.match(stillRunningPoll.content[0].text, /STILL RUNNING/);
+
+        // Complete the park
+        const completed = handle.completePark(callIdCaptured, {
+          text: "completed background computation",
+          isError: false,
+        });
+        assert.equal(completed, true);
+
+        // Poll after completion
+        const finishedPoll = (await client.callTool({
+          name: "bridge_poll_result",
+          arguments: { callId: callIdCaptured },
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        assert.equal(finishedPoll.isError, undefined);
+        assert.equal(finishedPoll.content[0].text, "completed background computation");
+
+        // Subsequent poll should now report already finished / unknown
+        const subsequentPoll = (await client.callTool({
+          name: "bridge_poll_result",
+          arguments: { callId: callIdCaptured },
+        })) as { content: Array<{ text: string }>; isError?: boolean };
+        assert.equal(subsequentPoll.isError, true);
+        assert.match(subsequentPoll.content[0].text, /Error: no escalated bridge call/);
+      } finally {
+        await client.close();
+      }
     });
   });
 

@@ -41,12 +41,22 @@ import {
   type AgyProviderModelEntry,
 } from "./provider-models.js";
 import { getHistory } from "./sessions.js";
+import {
+  ACTIVATE_SKILL_TOOL_NAME,
+  formatSkillsSummary,
+  readSkillContent,
+  scanSkills,
+  type SkillEntry,
+} from "./skills.js";
 import { runPreflightCommand } from "./spawn.js";
 
 export const BRIDGE_MCP_KEY = "pi-agy-tools";
-/** Built-in read-only tools (sessions, quota, catalog), plus dynamic bridged Pi tools. */
-const BUILTIN_TOOL_COUNT = 3;
+/** Built-in read-only tools (sessions, quota, catalog, activate_skill, bridge_poll_result), plus dynamic bridged Pi tools. */
+const BUILTIN_TOOL_COUNT = 5;
 export const BRIDGE_TOKEN_HEADER = "x-pi-agy-token";
+export const POLL_TOOL_NAME = "bridge_poll_result";
+/** Async escalation threshold: park requests longer than this early-ack so agy's 180s timeout is avoided. */
+export const DEFAULT_PARK_ESCALATE_MS = 20_000;
 const BRIDGE_MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 1024 * 1024;
 const CATALOG_TTL_MS = 5 * 60_000;
@@ -205,12 +215,20 @@ interface CatalogCache {
   at: number;
 }
 
+export interface StartMcpBridgeOptions {
+  escalateAfterMs?: number;
+}
+
 /**
  * Start the bridge for a workspace directory. Never throws: any failure
  * cleans up and resolves `undefined` so provider turns proceed plain.
  */
-export async function startMcpBridge(dir: string): Promise<McpBridgeHandle | undefined> {
+export async function startMcpBridge(
+  dir: string,
+  options?: StartMcpBridgeOptions,
+): Promise<McpBridgeHandle | undefined> {
   const token = randomBytes(32).toString("hex");
+  const escalateAfterMs = options?.escalateAfterMs ?? DEFAULT_PARK_ESCALATE_MS;
   let catalogCache: CatalogCache | undefined;
 
   const mcp = new McpServer(
@@ -221,45 +239,78 @@ export async function startMcpBridge(dir: string): Promise<McpBridgeHandle | und
   let bridgedTools: BridgeToolDef[] = [];
   let parkHandler: BridgeParkHandler | undefined;
   const parks = new Map<string, (result: BridgeToolResult) => void>();
+  const escalations = new Map<
+    string,
+    { name: string; state: "running" | "done" | "failed"; result?: BridgeToolResult; reason?: string }
+  >();
 
-  mcp.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: [
-      ...bridgedTools.map((tool) => ({
-        name: tool.name,
-        description: `${tool.description} (Pi tool: runs with Pi permissions and review.)`,
-        inputSchema: tool.inputSchema,
-      })),
-      {
-        name: "agy_sessions_list",
-        description:
-          "List recorded agy conversations for a directory (ids, models, ages, summaries) to find a conversation to resume. Read-only.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            dir: { type: "string", description: "Directory to list. Defaults to the current workspace." },
-            limit: { type: "number", description: "Maximum entries (default 10, max 10)." },
+  mcp.setRequestHandler(ListToolsRequestSchema, () => {
+    const skills = scanSkills(dir);
+    return {
+      tools: [
+        ...bridgedTools.map((tool) => ({
+          name: tool.name,
+          description: `${tool.description} (Pi tool: runs with Pi permissions and review. Long calls over 20s report STILL RUNNING; fetch via ${POLL_TOOL_NAME}.)`,
+          inputSchema: tool.inputSchema,
+        })),
+        {
+          name: "agy_sessions_list",
+          description:
+            "List recorded agy conversations for a directory (ids, models, ages, summaries) to find a conversation to resume. Read-only.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              dir: { type: "string", description: "Directory to list. Defaults to the current workspace." },
+              limit: { type: "number", description: "Maximum entries (default 10, max 10)." },
+            },
           },
         },
-      },
-      {
-        name: "agy_quota_report",
-        description:
-          "Read current Antigravity model quotas and reset times without spending a model turn. Read-only.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            model: { type: "string", description: "Optional agy model slug to focus the report." },
+        {
+          name: "agy_quota_report",
+          description:
+            "Read current Antigravity model quotas and reset times without spending a model turn. Read-only.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              model: { type: "string", description: "Optional agy model slug to focus the report." },
+            },
           },
         },
-      },
-      {
-        name: "agy_model_catalog",
-        description:
-          "List agy models available to this workspace as Pi picker entries (id, agy --model value, effort tiers). Read-only.",
-        inputSchema: { type: "object", properties: {} },
-      },
-    ],
-  }));
+        {
+          name: "agy_model_catalog",
+          description:
+            "List agy models available to this workspace as Pi picker entries (id, agy --model value, effort tiers). Read-only.",
+          inputSchema: { type: "object", properties: {} },
+        },
+        {
+          name: ACTIVATE_SKILL_TOOL_NAME,
+          description: `Activate a Pi Agent Skill to read its full instructions (SKILL.md). Available skills:\n${formatSkillsSummary(skills)}`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Skill name to activate from the catalog.",
+              },
+            },
+            required: ["name"],
+          },
+        },
+        {
+          name: POLL_TOOL_NAME,
+          description:
+            "Poll the result of a long-running bridged Pi tool call that returned STILL RUNNING.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              callId: { type: "string", description: "Call ID returned in the STILL RUNNING message." },
+            },
+            required: ["callId"],
+          },
+        },
+      ],
+    };
+  });
 
   mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
@@ -300,6 +351,52 @@ export async function startMcpBridge(dir: string): Promise<McpBridgeHandle | und
           `agy models${entries.fallback ? " (fallback catalog — live discovery unavailable)" : ""}:\n${lines.join("\n")}`,
         );
       }
+      if (name === ACTIVATE_SKILL_TOOL_NAME) {
+        const skillName = stringArg(args.name);
+        if (!skillName) {
+          return toolText("Error: skill 'name' argument is required.", true);
+        }
+        const skills = scanSkills(dir);
+        const found = skills.find((s) => s.name === skillName);
+        if (!found) {
+          return toolText(`Unknown skill: "${skillName}". Available skills:\n${formatSkillsSummary(skills)}`, true);
+        }
+        const body = readSkillContent(found);
+        return toolText(body);
+      }
+      if (name === POLL_TOOL_NAME) {
+        const callId = stringArg(args.callId);
+        if (!callId) {
+          return toolText("Error: 'callId' argument is required.", true);
+        }
+        const record = escalations.get(callId);
+        if (!record) {
+          return toolText(
+            `Error: no escalated bridge call "${callId}". It either finished synchronously or the callId is invalid.`,
+            true,
+          );
+        }
+        if (record.state === "running") {
+          return toolText(
+            `STILL RUNNING: Pi tool "${record.name}" (callId ${callId}) has not finished yet. Poll again shortly.`,
+            false,
+          );
+        }
+        if (record.state === "failed") {
+          escalations.delete(callId);
+          return toolText(
+            `Error: Pi tool "${record.name}" failed: ${record.reason ?? "unknown failure"}`,
+            true,
+          );
+        }
+        // Delivered done result; clean up escalation entry.
+        escalations.delete(callId);
+        const result = record.result;
+        return {
+          content: [{ type: "text" as const, text: result?.text ?? "(no output)" }],
+          ...(result?.isError ? { isError: true as const } : {}),
+        };
+      }
       const bridged = bridgedTools.find((tool) => tool.name === name);
       if (bridged) {
         const callArgs =
@@ -311,8 +408,21 @@ export async function startMcpBridge(dir: string): Promise<McpBridgeHandle | und
         if (!handler) {
           return toolText("Pi tool bridge is not awaiting calls right now; retry shortly.", true);
         }
+        let escalateTimer: NodeJS.Timeout | undefined;
+        let didEscalate = false;
         const parked = await new Promise<BridgeToolResult | undefined>((resolve) => {
-          parks.set(callId, resolve);
+          parks.set(callId, (res) => {
+            if (escalateTimer) clearTimeout(escalateTimer);
+            if (didEscalate) {
+              const record = escalations.get(callId);
+              if (record) {
+                record.state = "done";
+                record.result = res;
+              }
+            } else {
+              resolve(res);
+            }
+          });
           let accepted = false;
           try {
             accepted = handler({ callId, toolName: bridged.piName, args: callArgs });
@@ -322,7 +432,22 @@ export async function startMcpBridge(dir: string): Promise<McpBridgeHandle | und
           if (!accepted) {
             parks.delete(callId);
             resolve(undefined);
+            return;
           }
+          // Early-ack escalation: if the tool runs longer than escalateAfterMs,
+          // settle the MCP request with STILL RUNNING so agy avoids its 180s timeout.
+          escalateTimer = setTimeout(() => {
+            didEscalate = true;
+            escalations.set(callId, { name: bridged.piName, state: "running" });
+            resolve({
+              text: [
+                `STILL RUNNING: the Pi tool "${bridged.piName}" has not finished yet.`,
+                `Call ${POLL_TOOL_NAME} with callId "${callId}" to fetch the result. Poll again if it is still running; you may perform other tasks in between.`,
+              ].join("\n"),
+              isError: false,
+            });
+          }, escalateAfterMs);
+          (escalateTimer as unknown as { unref?: () => void }).unref?.();
         });
         if (!parked) {
           return toolText("Pi turn is not awaiting tool calls; the call was not executed.", true);
@@ -380,6 +505,12 @@ export async function startMcpBridge(dir: string): Promise<McpBridgeHandle | und
   });
 
   const failAllParks = (message: string): void => {
+    for (const [callId, rec] of escalations) {
+      if (rec.state === "running") {
+        rec.state = "failed";
+        rec.reason = message;
+      }
+    }
     if (parks.size === 0) return;
     const pending = [...parks.values()];
     parks.clear();
@@ -393,6 +524,13 @@ export async function startMcpBridge(dir: string): Promise<McpBridgeHandle | und
   };
 
   const completePark = (callId: string, result: BridgeToolResult): boolean => {
+    const esc = escalations.get(callId);
+    if (esc && esc.state === "running") {
+      esc.state = "done";
+      esc.result = result;
+      parks.delete(callId);
+      return true;
+    }
     const resolve = parks.get(callId);
     if (!resolve) return false;
     parks.delete(callId);

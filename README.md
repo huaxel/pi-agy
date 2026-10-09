@@ -75,10 +75,11 @@ timeout), so a provider turn never races `agy_execute` in the same directory.
 Read-only tool bridge: provider turns also get an extra `--add-dir`
 carrying a localhost MCP server (`pi-agy-tools`) that exposes Pi-side
 context agy cannot see otherwise — `agy_sessions_list`, `agy_quota_report`,
-and `agy_model_catalog`. The server binds 127.0.0.1 with a per-process
-shared secret, serves only reads, and never touches your global agy config.
-Set `"providerBridge": false` in `agy-config.json` to run provider turns
-plain.
+`agy_model_catalog`, and `activate_skill` (which dynamically lists and injects
+Pi Agent Skills from `~/.pi/agent/skills`, `~/.agents/skills`, and `.pi/skills`).
+The server binds 127.0.0.1 with a per-process shared secret, serves only reads,
+and never touches your global agy config. Set `"providerBridge": false` in
+`agy-config.json` to run provider turns plain.
 
 Mutating tool bridge: agy turns can also call Pi tools directly. The bridge
 parks the MCP call, the provider emits a real shadow `toolCall`, and Pi
@@ -86,9 +87,11 @@ executes it with normal permissions, approvals, and diff review; the next
 turn's `toolResult` completes the parked call and agy continues. Only active
 non-builtin tools are exposed (`agy_*` and `AskAntigravity` excluded — no
 recursive delegation); the catalog refreshes per turn and the driver recycles
-when it changes so agy always sees a fresh tool list. Suspended turns hold
-the agy child with timers off, re-arm on resume, and are abandoned loudly on
-cancel, teardown, or a 30-minute stall cap.
+when it changes so agy always sees a fresh tool list. Long calls over 20 seconds
+early-ack with `STILL RUNNING` and a `callId` so agy can poll via
+`bridge_poll_result`, completely avoiding agy's ~180-second MCP client timeout.
+Suspended turns hold the agy child with timers off, re-arm on resume, and are
+abandoned loudly on cancel, teardown, or a 30-minute stall cap.
 
 Do not install `@estebanforge/pi-antigravity-bridge` alongside this package:
 both register the `antigravity` provider id and an `/agy` command.
