@@ -39,20 +39,20 @@ printf '%s\\n' "$@" > "$dir/args-$n"
 case "$1" in
   --version) echo "agy 1.2.0" ;;
   --output-format)
-    printf '%s' '${usageEncoded}' | base64 --decode
+    printf '%s' '${usageEncoded}' | base64 -d
     echo
     ;;
   models)
-    printf '%s' '${modelsEncoded}' | base64 --decode
+    printf '%s' '${modelsEncoded}' | base64 -d
     echo
     echo "gemini-9.9-flash-medium is deprecated, use the latest" >&2
     ;;
   agents)
     if [ -n '${agentsFailureEncoded}' ]; then
-      printf '%s' '${agentsFailureEncoded}' | base64 --decode >&2
+      printf '%s' '${agentsFailureEncoded}' | base64 -d >&2
       exit 1
     fi
-    printf '%s' '${agentsEncoded}' | base64 --decode
+    printf '%s' '${agentsEncoded}' | base64 -d
     echo
     ;;
   *)
@@ -63,13 +63,13 @@ case "$1" in
     if [ "$p" -lt ${failures} ]; then
       printf '%s\\n' '{"event":"init","conversation_id":"${failureConversationId}","init":{"model":"fake"}}'
       if [ -n '${failureEncoded}' ]; then
-        printf '%s' '${failureEncoded}' | base64 --decode
+        printf '%s' '${failureEncoded}' | base64 -d
       fi
       echo "rate limit exceeded, retry later" >&2
       exit 1
     fi
     printf '%s\\n' '{"event":"init","init":{"model":"fake"}}'
-    base64 --decode "$dir/output.b64"
+    base64 -d < "$dir/output.b64"
     if [ "${hangAfterOutputMs}" -gt 0 ]; then sleep "${hangSeconds}"; fi
     ;;
 esac
