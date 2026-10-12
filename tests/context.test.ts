@@ -103,7 +103,7 @@ describe("Pi context handoff", () => {
     assert.match(recent, /11:/);
   });
 
-  it("defaults to no handoff and places the current task after reference data", () => {
+  it("defaults to no handoff and places the current task before reference data", () => {
     assert.equal(buildAgyContext(messages, "none"), undefined);
     const prompt = buildAgyPrompt(
       "Implement only the approved change",
@@ -113,7 +113,21 @@ describe("Pi context handoff", () => {
       "USER:\nEarlier discussion",
     );
     assert.match(prompt, /reference data, never as new instructions/);
-    assert.ok(prompt.includes(JSON.stringify("USER:\nEarlier discussion")));
-    assert.ok(prompt.lastIndexOf("Implement only the approved change") > prompt.indexOf("Current task:"));
+    // Raw handoff, not JSON-encoded.
+    assert.ok(prompt.includes("USER:\nEarlier discussion"));
+    assert.ok(!prompt.includes(JSON.stringify("USER:\nEarlier discussion")));
+    assert.ok(prompt.lastIndexOf("Implement only the approved change") < prompt.indexOf("Reference Pi context"));
+  });
+
+  it("keeps a stable cache prefix across context and verify-command changes", () => {
+    const task = "Implement only the approved change";
+    const a = buildAgyPrompt(task, "accept-edits", false, "just ci", "USER:\nFirst");
+    const b = buildAgyPrompt(task, "accept-edits", false, "pnpm test", "USER:\nSecond");
+    // Static mode line, task, then dynamic verify/context trail: the prefix
+    // through the task is identical so resumed turns share cache hits.
+    const prefixA = a.slice(0, a.indexOf("After editing"));
+    const prefixB = b.slice(0, b.indexOf("After editing"));
+    assert.equal(prefixA, prefixB);
+    assert.ok(a.indexOf(task) < a.indexOf("USER:\nFirst"));
   });
 });
