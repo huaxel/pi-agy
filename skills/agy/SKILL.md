@@ -78,7 +78,7 @@ session — collect promptly, since uncollected payloads do not survive restart
 - **Never use agy for irreversible production changes or unowned background servers/watchers.** Delegations are bounded; timeout/cancellation kills the full process tree rather than releasing unowned work. The managed exception is `background=true`, whose runs stay timeout-owned, cancellable, lock-serialized, and die with the session.
 - Reuse `conversation_id` or `continue=true` for multi-step plan → implement → review.
 - Use `agent` only when the user requests a configured custom agent; call `agy_agents` first when the exact name is unknown. Recorded agent identity is restored on resume.
-- Keep `context=none` (default) unless the task depends on prior Pi discussion; prefer `summary` over `recent` to minimize disclosure. Context handoff excludes system prompts, thinking, tool arguments/results, images, and custom messages.
+- Keep `context=none` (default) unless the task depends on prior Pi discussion; prefer `summary` over `recent` to minimize disclosure — `summary` is also more prompt-cache friendly (stable prefix vs. a sliding 40KB tail). Resumed turns (`conversation_id`/`continue`) automatically cap `recent` to `summary` since agy already holds server-side history. Context handoff excludes system prompts, thinking, tool arguments/results, images, and custom messages.
 - Use `flash-medium` by default, `flash-low` for trivial/high-volume work, and `flash-high` for difficult agentic work.
 - Escalate within the Gemini quota group to `pro-low` or `pro-high` only when needed.
 - Use `sonnet` for normal Claude-group coding/review; reserve `opus` for the hardest architecture or root-cause work.
