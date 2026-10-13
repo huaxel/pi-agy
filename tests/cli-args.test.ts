@@ -64,7 +64,15 @@ describe("buildAgyArgs", () => {
       dir: "/tmp",
       timeout_ms: 1_500,
     });
-    assert.ok(hasFlagPair(args, "--print-timeout", "7s"));
+    assert.ok(hasFlagPair(args, "--print-timeout", "30s"));
+  });
+
+  it("buckets the print timeout so similar budgets share identical argv", () => {
+    const base = { prompt: "test", mode: "plan" as const, dir: "/tmp" };
+    const a = buildAgyArgs({ ...base, timeout_ms: 60_000 });
+    const b = buildAgyArgs({ ...base, timeout_ms: 61_000 });
+    assert.ok(hasFlagPair(a, "--print-timeout", "90s"));
+    assert.ok(hasFlagPair(b, "--print-timeout", "90s"));
   });
 
   it("passes a normalized custom agent as a distinct argv value", () => {

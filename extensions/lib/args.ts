@@ -13,6 +13,10 @@ import type { AgyModel, AgyOptions } from "./cli.js";
 // fires. Keep that timeout behind Pi's hard parent deadline (and its 2s kill
 // escalation) so a timed-out partial response can never be reported as success.
 const PRINT_TIMEOUT_BUFFER_MS = 5_000;
+// Bucket the print timeout so near-identical calls produce byte-identical
+// argv. Always rounded up, so the timeout never fires earlier than the
+// unbucketed value it replaces (Pi's hard kill still governs the run).
+const PRINT_TIMEOUT_BUCKET_S = 30;
 
 // Static fallback for when `agy models` output is unavailable. The live
 // catalog (updated during preflight) overrides these per alias.
@@ -63,7 +67,8 @@ export function buildAgyArgs(options: AgyOptions): string[] {
 
   const model = resolveAgyModelId(options.model, options.tier);
   const agent = normalizeAgyAgentName(options.agent);
-  const timeoutSec = Math.ceil((options.timeout_ms + PRINT_TIMEOUT_BUFFER_MS) / 1000);
+  const unbucketedSec = Math.ceil((options.timeout_ms + PRINT_TIMEOUT_BUFFER_MS) / 1000);
+  const timeoutSec = Math.ceil(unbucketedSec / PRINT_TIMEOUT_BUCKET_S) * PRINT_TIMEOUT_BUCKET_S;
   const mode = options.mode ?? "accept-edits";
   const writes = mode === "accept-edits";
   const skipPermissions = options.skipPermissions ?? true;
