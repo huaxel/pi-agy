@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 
 import { resetPreflightCache, runPreflight } from "../extensions/lib/preflight.js";
+import { readFakeAgyArgs, withFakeAgy } from "./helpers.js";
 
 /**
  * Fake agy with a stateful `models` probe: sleeps past the 10s preflight
@@ -58,6 +59,36 @@ describe("preflight cold-start retry", () => {
         /timed out/,
       );
     });
+  });
+
+  it("caches per directory: warm repeats skip probes, new dirs probe fresh", async () => {
+    const modelsOutput = "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n";
+    await withFakeAgy(
+      "{}",
+      async (bin) => {
+        resetPreflightCache();
+        const dirA = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preflight-a-"));
+        const dirB = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preflight-b-"));
+        const invocations = async () => (await readFakeAgyArgs(bin)).length;
+        await runPreflight(dirA, undefined, 60_000);
+        const cold = await invocations();
+        assert.ok(cold > 0, "expected cold preflight to spawn probes");
+        await runPreflight(dirA, undefined, 60_000);
+        assert.equal(await invocations(), cold, "same directory should hit the cache");
+        await runPreflight(dirB, undefined, 60_000);
+        assert.ok(
+          (await invocations()) > cold,
+          "a new directory must not reuse another directory's snapshot",
+        );
+      },
+      0,
+      0,
+      "",
+      "",
+      "{}",
+      0,
+      modelsOutput,
+    );
   });
 
   it("keeps the health retry inside the remaining timeout budget", async () => {

@@ -1,3 +1,5 @@
+import * as path from "node:path";
+
 import {
   checkAgyConnectivity,
   checkAgyHealth,
@@ -8,9 +10,32 @@ import {
 const TTL_MS = 5 * 60 * 1000;
 const USAGE_TTL_MS = 60 * 1000;
 const USAGE_FAILURE_TTL_MS = 5 * 1000;
-let cachedAt = 0;
-let cachedUsageAt = 0;
-let cachedUsage: AgyUsageSnapshot | undefined;
+
+interface PreflightEntry {
+  healthAt: number;
+  usageAt: number;
+  usage?: AgyUsageSnapshot;
+}
+
+// Per-directory: health/quota answers depend on the working directory, so a
+// single global entry would serve dir B dir A's snapshot. Bounded so long
+// sessions across many checkouts cannot grow the map without limit.
+const MAX_CACHED_DIRS = 32;
+const entries = new Map<string, PreflightEntry>();
+
+function entryFor(cwd: string): PreflightEntry {
+  const key = path.resolve(cwd);
+  let entry = entries.get(key);
+  if (!entry) {
+    entry = { healthAt: 0, usageAt: 0, usage: undefined };
+    entries.set(key, entry);
+    if (entries.size > MAX_CACHED_DIRS) {
+      const oldest = entries.keys().next();
+      if (!oldest.done) entries.delete(oldest.value);
+    }
+  }
+  return entry;
+}
 
 /** Run cached health/model checks and a shorter-lived model quota refresh. */
 export async function runPreflight(
@@ -18,11 +43,13 @@ export async function runPreflight(
   signal?: AbortSignal,
   timeoutMs?: number,
 ): Promise<AgyUsageSnapshot | undefined> {
+  const entry = entryFor(cwd);
   const now = Date.now();
-  const healthFresh = cachedAt > 0 && now - cachedAt < TTL_MS;
-  const usageTtl = cachedUsage?.error || !cachedUsage ? USAGE_FAILURE_TTL_MS : USAGE_TTL_MS;
-  const usageFresh = cachedUsageAt > 0 && now - cachedUsageAt < usageTtl;
-  if (healthFresh && usageFresh) return cachedUsage;
+  const healthFresh = entry.healthAt > 0 && now - entry.healthAt < TTL_MS;
+  const usageTtl =
+    entry.usage?.error || !entry.usage ? USAGE_FAILURE_TTL_MS : USAGE_TTL_MS;
+  const usageFresh = entry.usageAt > 0 && now - entry.usageAt < usageTtl;
+  if (healthFresh && usageFresh) return entry.usage;
   if (timeoutMs !== undefined && timeoutMs <= 0) {
     throw new Error("agy timed out before preflight");
   }
@@ -30,14 +57,16 @@ export async function runPreflight(
   const health = healthFresh
     ? Promise.resolve()
     : runHealthWithRetry(cwd, signal, timeoutMs).then(() => undefined);
-  const usage = usageFresh ? Promise.resolve(cachedUsage) : checkAgyUsage(cwd, signal, timeoutMs);
+  const usage = usageFresh
+    ? Promise.resolve(entry.usage)
+    : checkAgyUsage(cwd, signal, timeoutMs);
   const [, refreshedUsage] = await Promise.all([health, usage]);
-  if (!healthFresh) cachedAt = Date.now();
+  if (!healthFresh) entry.healthAt = Date.now();
   if (!usageFresh) {
-    cachedUsage = refreshedUsage;
-    cachedUsageAt = Date.now();
+    entry.usage = refreshedUsage;
+    entry.usageAt = Date.now();
   }
-  return cachedUsage;
+  return entry.usage;
 }
 
 /**
@@ -73,7 +102,5 @@ async function runHealthWithRetry(
 
 /** Test helper — reset the in-process cache. */
 export function resetPreflightCache(): void {
-  cachedAt = 0;
-  cachedUsageAt = 0;
-  cachedUsage = undefined;
+  entries.clear();
 }
