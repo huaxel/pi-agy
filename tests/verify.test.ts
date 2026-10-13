@@ -28,7 +28,7 @@ import { registerAgyCommand } from "../extensions/commands.js";
 import { executeAgyTask } from "../extensions/lib/execute.js";
 import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withDirLock } from "../extensions/lib/lock.js";
-import { detectVerifyCommand } from "../extensions/lib/verify.js";
+import { detectVerifyCommand, resetVerifyDetectionCache } from "../extensions/lib/verify.js";
 import { summarizeGitDiff } from "../extensions/lib/postflight.js";
 import { loadAgyConfig, resetDefaultModelCache, resolveDefaultModel } from "../extensions/lib/config.js";
 import {
@@ -107,6 +107,24 @@ describe("detectVerifyCommand", () => {
       await detectVerifyCommand(tmp, { justAvailable: async () => false }),
       "npm test",
     );
+  });
+
+  it("caches detections per directory until reset", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
+    resetVerifyDetectionCache();
+    await writeFile(
+      path.join(tmp, "package.json"),
+      JSON.stringify({ scripts: { test: "node --test" } }),
+    );
+    assert.equal(await detectVerifyCommand(tmp), "npm test");
+    // Changed on disk but served stale from the cache.
+    await writeFile(
+      path.join(tmp, "package.json"),
+      JSON.stringify({ scripts: { ci: "node --test" } }),
+    );
+    assert.equal(await detectVerifyCommand(tmp), "npm test");
+    resetVerifyDetectionCache();
+    assert.equal(await detectVerifyCommand(tmp), "npm run ci");
   });
 
   it("detects uv run pytest for Python projects", async () => {

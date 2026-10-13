@@ -15,6 +15,19 @@ export interface VerifyDetectionDeps {
   justAvailable?: () => Promise<boolean>;
 }
 
+// Detection walks up to the repo boundary reading several marker files per
+// level on every accept-edits run. Cache per starting directory with a short
+// TTL: project config rarely changes mid-session, and a stale hit only
+// reuses an equivalent verify loop for under a minute. Bypassed when the
+// test hook overrides the `just` probe so tests never poison each other.
+const VERIFY_CACHE_TTL_MS = 60_000;
+const verifyCache = new Map<string, { at: number; command: string | null }>();
+
+/** Test helper — drop cached verify-command detections. */
+export function resetVerifyDetectionCache(): void {
+  verifyCache.clear();
+}
+
 /**
  * Detect a local verification command for accept-edits verify-loop injection.
  * The upward walk stops at the repository boundary (a directory containing
@@ -25,7 +38,23 @@ export async function detectVerifyCommand(
   cwd: string,
   deps: VerifyDetectionDeps = {},
 ): Promise<string | null> {
-  let current = path.resolve(cwd);
+  const key = path.resolve(cwd);
+  if (deps.justAvailable === undefined) {
+    const hit = verifyCache.get(key);
+    if (hit && Date.now() - hit.at < VERIFY_CACHE_TTL_MS) return hit.command;
+  }
+  const command = await detectVerifyCommandUncached(key, deps);
+  if (deps.justAvailable === undefined) {
+    verifyCache.set(key, { at: Date.now(), command });
+  }
+  return command;
+}
+
+async function detectVerifyCommandUncached(
+  startDir: string,
+  deps: VerifyDetectionDeps,
+): Promise<string | null> {
+  let current = startDir;
   while (true) {
     const command = await detectVerifyCommandAt(current, deps);
     if (command) return command;
