@@ -1,5 +1,17 @@
 export type AgyContextMode = "none" | "summary" | "recent";
 
+/**
+ * Cap the handoff for resumed turns. A resumed agy conversation already
+ * holds server-side history, so re-sending the full Pi handoff duplicates
+ * tokens every turn and churns the prompt suffix past the cache prefix.
+ * Downgrading recent to summary keeps durable summaries (prefix-stable)
+ * plus the latest messages covering Pi-side developments since the last
+ * turn. Fresh calls are untouched.
+ */
+export function effectiveResumeContextMode(mode: AgyContextMode, isResume: boolean): AgyContextMode {
+  return isResume && mode === "recent" ? "summary" : mode;
+}
+
 export const SUMMARY_CONTEXT_MAX_CHARS = 12_000;
 export const RECENT_CONTEXT_MAX_CHARS = 40_000;
 

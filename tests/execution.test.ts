@@ -38,6 +38,7 @@ import {
   parseStreamLine,
 } from "../extensions/lib/stream.js";
 import { parseJsonResponse } from "../extensions/lib/parse.js";
+import { SUMMARY_CONTEXT_MAX_CHARS } from "../extensions/lib/context.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
 import { hasFlagPair, readFakeAgyArgs, withFakeAgy } from "./helpers.js";
@@ -313,6 +314,68 @@ describe("extension registration", () => {
         assert.ok(!recordedInvocation.includes("TOOL_SECRET"));
         assert.equal(result.details.context_mode, "recent");
         assert.ok(result.details.context_chars > 0);
+      } finally {
+        if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousDir;
+      }
+    });
+  });
+
+  it("caps recent context to summary when resuming a conversation", async () => {
+    type ExecuteTool = { execute: (...args: any[]) => Promise<any> };
+    let executeTool: ExecuteTool | undefined;
+    const fakePi = {
+      registerCommand: () => {},
+      registerTool: (tool: { name: string; execute?: (...args: any[]) => Promise<any> }) => {
+        if (tool.name === "agy_execute" && tool.execute) executeTool = tool as ExecuteTool;
+      },
+    };
+    piAgyExtension(fakePi as unknown as ExtensionAPI);
+    const raw =
+      JSON.stringify({ event: "result", result: { response: "resumed", status: "SUCCESS" } }) +
+      "\n";
+
+    await withFakeAgy(raw, async (bin) => {
+      resetPreflightCache();
+      const workDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-resume-ctx-work-"));
+      const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-resume-ctx-agent-"));
+      const previousDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      try {
+        const entries = Array.from({ length: 6 }, (_, index) => ({
+          type: "message",
+          message: { role: "user", content: `resume-marker-${index}` },
+        }));
+        const result = await executeTool!.execute(
+          "context-resume-1",
+          {
+            prompt: "Continue the approved change",
+            model: "flash-medium",
+            mode: "plan",
+            context: "recent",
+            conversation_id: "conv-resume-1",
+            timeout_ms: 60_000,
+          },
+          undefined,
+          undefined,
+          {
+            cwd: workDir,
+            hasUI: false,
+            sessionManager: { buildContextEntries: () => entries },
+          },
+        );
+
+        const invocations = await readFakeAgyArgs(bin);
+        const printArgs = invocations.find(
+          (argv) => argv.includes("-p") && !argv.includes("/usage"),
+        )!;
+        const recordedInvocation = printArgs.join("\n");
+        // Summary keeps the latest messages: the tail survives, the head is cut.
+        assert.match(recordedInvocation, /resume-marker-5/);
+        assert.ok(!recordedInvocation.includes("resume-marker-0"));
+        assert.equal(result.details.context_mode, "summary");
+        assert.ok(result.details.context_chars > 0);
+        assert.ok(result.details.context_chars <= SUMMARY_CONTEXT_MAX_CHARS);
       } finally {
         if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = previousDir;

@@ -9,7 +9,11 @@ import {
   resolveAgyModelId,
   type AgyModel,
 } from "./lib/cli.js";
-import { buildAgyContextFromEntries, type AgyContextMode } from "./lib/context.js";
+import {
+  buildAgyContextFromEntries,
+  effectiveResumeContextMode,
+  type AgyContextMode,
+} from "./lib/context.js";
 import { runAgyDoctor } from "./lib/doctor.js";
 import { executeAgyTask } from "./lib/execute.js";
 import { describeWhen, truncate } from "./lib/output.js";
@@ -391,7 +395,11 @@ async function executeConfirmedRun(
 ): Promise<void> {
   const cwd = ctx.cwd;
   await ctx.waitForIdle();
-  const contextMode = run.context ?? "none";
+  const requestedContextMode = run.context ?? "none";
+  const contextMode = effectiveResumeContextMode(
+    requestedContextMode,
+    Boolean(run.conversation_id || run.continue),
+  );
   const contextText =
     contextMode === "none"
       ? undefined

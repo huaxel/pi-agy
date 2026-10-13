@@ -24,7 +24,11 @@ import {
   resolveAgyModelId,
   type AgyModel,
 } from "./lib/cli.js";
-import { buildAgyContextFromEntries, type AgyContextMode } from "./lib/context.js";
+import {
+  buildAgyContextFromEntries,
+  effectiveResumeContextMode,
+  type AgyContextMode,
+} from "./lib/context.js";
 import { describePreRunDirt } from "./lib/postflight.js";
 import { registerAgyCommand } from "./commands.js";
 import { buildAcceptEditsConfirm } from "./lib/confirm.js";
@@ -354,10 +358,17 @@ export default function piAgyExtension(pi: ExtensionAPI) {
           // Ignore malformed legacy session metadata.
         }
       }
+      const isResume = Boolean(
+        params.conversation_id || params.continue || params.new_session === false,
+      );
+      const effectiveContextMode = effectiveResumeContextMode(contextMode, isResume);
       const contextText =
-        contextMode === "none"
+        effectiveContextMode === "none"
           ? undefined
-          : buildAgyContextFromEntries(ctx.sessionManager.buildContextEntries(), contextMode);
+          : buildAgyContextFromEntries(
+              ctx.sessionManager.buildContextEntries(),
+              effectiveContextMode,
+            );
       const executionOptions = {
         prompt: params.prompt,
         model,
@@ -372,7 +383,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
         continue: params.continue,
         new_session: params.new_session,
         stream: params.stream ?? true,
-        context: contextMode,
+        context: effectiveContextMode,
         context_text: contextText,
       };
       validateAgyExecutionOptions(executionOptions);
@@ -391,7 +402,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
           agent,
           cwd,
           prompt: params.prompt,
-          contextMode,
+          contextMode: effectiveContextMode,
           contextText,
           dirt,
         });

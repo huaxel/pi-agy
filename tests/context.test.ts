@@ -5,6 +5,7 @@ import { buildAgyPrompt } from "../extensions/lib/cli.js";
 import {
   buildAgyContext,
   buildAgyContextFromEntries,
+  effectiveResumeContextMode,
   RECENT_CONTEXT_MAX_CHARS,
   SUMMARY_CONTEXT_MAX_CHARS,
 } from "../extensions/lib/context.js";
@@ -117,6 +118,13 @@ describe("Pi context handoff", () => {
     assert.ok(prompt.includes("USER:\nEarlier discussion"));
     assert.ok(!prompt.includes(JSON.stringify("USER:\nEarlier discussion")));
     assert.ok(prompt.lastIndexOf("Implement only the approved change") < prompt.indexOf("Reference Pi context"));
+  });
+
+  it("caps recent to summary on resume and leaves fresh calls alone", () => {
+    assert.equal(effectiveResumeContextMode("recent", true), "summary");
+    assert.equal(effectiveResumeContextMode("summary", true), "summary");
+    assert.equal(effectiveResumeContextMode("none", true), "none");
+    assert.equal(effectiveResumeContextMode("recent", false), "recent");
   });
 
   it("keeps a stable cache prefix across context and verify-command changes", () => {
