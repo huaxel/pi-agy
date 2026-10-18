@@ -3,15 +3,11 @@
  *
  * Each Pi turn runs on a persistent agy driver process (see
  * provider-driver.ts) with the transcript rendered as text. Response text
- * streams back into Pi's TUI; agy's own tool activity surfaces as thinking
- * events (`[agy tool: …]`) for visibility.
- *
- * Architectural wall (Phase 1): agy runs its OWN closed tool loop against
- * the working directory. Pi's read/write/edit/bash tools never fire for
- * these turns, so Pi's inline diff review does not engage — edits already
- * landed on disk. Full Pi-tool bridging (MCP bridge + approval gates) is
- * Phase 2; until then, prefer `agy_execute` delegation from a trusted Pi
- * model when you need Pi-owned tool execution and diff review.
+ * streams into Pi's TUI, and agy's tool activity appears as thinking events
+ * (`[agy tool: …]`). By default, a loopback MCP bridge parks agy's Pi-tool
+ * calls for execution by Pi, so its normal permissions, approvals, and diff
+ * review apply. The bridge is separate from agy's own tools and can be disabled
+ * with `providerBridge: false`.
  */
 
 import { randomBytes } from "node:crypto";

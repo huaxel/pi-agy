@@ -55,12 +55,19 @@ agy_tasks action=cancel handle=<handle>
 ```
 
 Background runs (`background=true`) return a task handle immediately instead
-of blocking the turn. Poll with `agy_tasks status`, collect the terminal
+of blocking the turn; they keep the same `timeout_ms` deadline and cannot be
+steered while running. Poll with `agy_tasks status`, collect the terminal
 result with `agy_tasks collect` (which frees the record), and cancel strays
-with `agy_tasks cancel`. Runs keep their `timeout_ms` deadline, serialize on
-the per-directory lock, record sessions on completion, and die with the Pi
-session — collect promptly, since uncollected payloads do not survive restart
-(conversations stay resumable via `agy_history`).
+with `agy_tasks cancel`. Runs serialize on the per-directory lock, record
+sessions on completion, and die with the Pi session — collect promptly, since
+uncollected payloads do not survive restart (conversations stay resumable via
+`agy_history`).
+
+When a task may need live steering and Herdr is available, run interactive
+`agy` in a Herdr pane instead. A prompt sent while AGY is busy queues; use
+Ctrl+C to interrupt the current command before redirecting it. Herdr-run AGY
+does not take pi-agy's per-directory lock, so use a separate worktree if it
+could overlap with Pi-managed AGY work.
 
 ## Modes
 

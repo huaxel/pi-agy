@@ -228,7 +228,7 @@ export default function piAgyExtension(pi: ExtensionAPI) {
       "Keep agy_execute context=none unless the delegated task depends on prior Pi discussion; use summary before recent to minimize disclosure.",
       "Use agy_usage before choosing a model when quota availability matters; agy_execute also refreshes and returns a quota snapshot.",
       "Batch related work, prefer digest output for non-write calls, and avoid parallel agy_execute calls within one shared-quota group or directory.",
-      "Use background=true for long runs that should not block the turn; poll with agy_tasks status and collect the result when done.",
+      "Use background=true for independent runs that need no steering; it keeps the same timeout. For live intervention, use interactive agy in a Herdr pane if available; Ctrl+C interrupts its current command before redirection.",
       "Collect background results promptly: uncollected payloads die with the session (conversations stay resumable), and cancel strays with agy_tasks cancel.",
       "Always review the git diff and run just ci (or the project gate) after agy_execute with mode=accept-edits.",
       "Never use agy for irreversible production changes.",
