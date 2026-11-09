@@ -1,110 +1,20 @@
 ---
 name: agy-delegate
-description: >
-  Delegate bulk implementation, scaffolding, repetitive refactors, and
-  exhaustive test generation to the Antigravity CLI (agy).
-argument-hint: "prompt=\"...\" [model=flash-low|flash-medium|flash-high|pro-low|pro-high|sonnet|opus|gpt-oss] [agent=name] [mode=plan|accept-edits|sandbox]"
+description: Optional, quota-limited Antigravity delegation for substantial work
+argument-hint: 'prompt="..." [model=...] [mode=plan|accept-edits|sandbox]'
 license: MIT
 ---
-
 # agy-delegate
 
-Use the `agy_usage` tool to inspect model-specific quota and reset times when
-availability matters, then use `agy_execute` to offload large scaffolding,
-repetitive refactors, or exhaustive test generation via the Antigravity CLI.
+Use agy sparingly; your current tools and agent are the default.
 
-## Prerequisites
+- Use `agy_execute` when the user asks for agy, or when a substantial task has a clear advantage worth its quota cost. If the user has not authorized that spend, ask first. Never launch agy through a Herdr pane.
+- Prefer one focused run; avoid duplicate or parallel calls. Continue only genuinely unfinished work with `conversation_id` or `continue=true`.
+- Use `mode=accept-edits` for scoped implementation and `mode=plan` only when exploration without edits is useful. Do not add separate planning or cross-model review runs by default; reserve them for user requests or material risk. After edits, inspect `git diff` and run the project check (usually `just ci`).
+- Keep `context=none` unless prior discussion is needed; prefer `summary` to `recent`. Check `agy_usage` only when quota availability affects a decision.
+- Use `background=true` only for long runs; collect results with `agy_tasks collect` and cancel abandoned runs. Use `agy_agents` only when the user asks for a configured custom agent.
+- Never delegate irreversible production changes.
 
-1. Install the Antigravity CLI (a Go binary, not pipx):
+When a task may need live steering and Herdr is available, run interactive `agy` in a Herdr pane instead. A prompt sent while AGY is busy queues; use Ctrl+C to interrupt the current command before redirecting it. Herdr-run AGY does not take pi-agy's per-directory lock, so use a separate worktree if it could overlap with Pi-managed AGY work.
 
-   ```bash
-   curl -fsSL https://antigravity.google/cli/install.sh | bash
-   ```
-
-2. Authenticate in a terminal (one-time):
-
-   ```bash
-   agy
-   ```
-
-3. Verify the CLI works:
-
-   ```bash
-   agy --version
-   agy models
-   ```
-
-## Tool usage
-
-```
-agy_execute prompt="Refactor all snake_case variables to camelCase in src/models/"
-agy_execute prompt="Generate exhaustive unit tests for src/auth/" model=flash-low
-agy_execute prompt="Plan the migration to ESM" model=sonnet mode=plan digest=true
-agy_execute prompt="Review our earlier API decision" model=sonnet mode=plan context=summary
-agy_execute prompt="Implement the approved plan" conversation_id=<id> mode=accept-edits
-agy_execute prompt="Adversarial review the diff" model=opus effort=high mode=plan
-agy_agents
-agy_execute prompt="Investigate the crash" agent=gsd-debugger mode=plan
-agy_history
-agy_usage
-agy_execute prompt="Migrate the build to ESM" mode=plan background=true
-agy_tasks action=list
-agy_tasks action=status handle=<handle>
-agy_tasks action=collect handle=<handle>
-agy_tasks action=cancel handle=<handle>
-```
-
-Background runs (`background=true`) return a task handle immediately instead
-of blocking the turn; they keep the same `timeout_ms` deadline and cannot be
-steered while running. Poll with `agy_tasks status`, collect the terminal
-result with `agy_tasks collect` (which frees the record), and cancel strays
-with `agy_tasks cancel`. Runs serialize on the per-directory lock, record
-sessions on completion, and die with the Pi session — collect promptly, since
-uncollected payloads do not survive restart (conversations stay resumable via
-`agy_history`).
-
-When a task may need live steering and Herdr is available, run interactive
-`agy` in a Herdr pane instead. A prompt sent while AGY is busy queues; use
-Ctrl+C to interrupt the current command before redirecting it. Herdr-run AGY
-does not take pi-agy's per-directory lock, so use a separate worktree if it
-could overlap with Pi-managed AGY work.
-
-## Modes
-
-| Mode | Purpose |
-|------|---------|
-| `plan` | Exploration and planning — no edits |
-| `accept-edits` (default) | Implementation — agy applies edits directly |
-| `sandbox` | Preview changes without applying |
-
-## Rules
-
-- **Default to `mode=plan`** for exploration; escalate to `accept-edits` only for scoped batches.
-- **Always review the `git diff`** after agy runs with `accept-edits`.
-- **Run `just ci`** (or the project gate) after write modes in this repo.
-- **Never use agy for irreversible production changes or unowned background servers/watchers.** Delegations are bounded; timeout/cancellation kills the full process tree rather than releasing unowned work. The managed exception is `background=true`, whose runs stay timeout-owned, cancellable, lock-serialized, and die with the session.
-- Reuse `conversation_id` or `continue=true` for multi-step plan → implement → review.
-- Use `agent` only when the user requests a configured custom agent; call `agy_agents` first when the exact name is unknown. Recorded agent identity is restored on resume.
-- Keep `context=none` (default) unless the task depends on prior Pi discussion; prefer `summary` over `recent` to minimize disclosure — `summary` is also more prompt-cache friendly (stable prefix vs. a sliding 40KB tail). Resumed turns (`conversation_id`/`continue`) automatically cap `recent` to `summary` since agy already holds server-side history. Context handoff excludes system prompts, thinking, tool arguments/results, images, and custom messages.
-- Use `flash-medium` by default, `flash-low` for trivial/high-volume work, and `flash-high` for difficult agentic work.
-- Escalate within the Gemini quota group to `pro-low` or `pro-high` only when needed.
-- Use `sonnet` for normal Claude-group coding/review; reserve `opus` for the hardest architecture or root-cause work.
-- Use `gpt-oss` when an open-model alternative is specifically desired.
-- Set `effort` only for `gpt-oss`; Claude thinking models reject `--effort`, and Gemini aliases encode effort in the model id.
-- For consequential work, have one family produce and the opposite family review with `mode=plan`; do not spend both groups on trivial tasks.
-- Batch related work, avoid parallel calls within one shared-quota group or directory, and use `digest=true` (default) for non-write tasks.
-
-## Enhancements over upstream pi-agy
-
-- **Quota discovery** — `agy_usage` and `/agy usage` report model-specific remaining quota and reset times; executions refresh quota snapshots, automatically fall back when an implicit default is exhausted, and return machine-readable `quota_status` as well.
-- **Custom-agent selection** — `agy_agents` and `/agy agents` list configured agents without inference; `agent` / `agent=name` passes a validated `--agent` and persists its identity with resumable conversations.
-- **Streaming progress and receipts** — live tool steps via `stream-json` and Pi `onUpdate`; direct `/agy` runs persist bounded, expandable TUI-only receipts without feeding them to the primary model.
-- **Observed subagents** — native subagent stream steps produce bounded progress and a capped per-run roster in result details/receipts. `active at last event` is diagnostic history, never a claim of live lifecycle control.
-- **Conversation continuity** — `conversation_id`, `continue`, session store under `$PI_CODING_AGENT_DIR/agy-sessions.json` (or `~/.pi/agent/agy-sessions.json` by default) with one-line task summaries; runs that time out or are cancelled are recorded too and stay resumable, and the `agy_history` tool lets agents list past conversations.
-- **Optional Pi context handoff** — `context=summary|recent` sends bounded text-only history while excluding system prompts, thinking, tool calls/results, images, and custom messages; default is `none`.
-- **Repo-aware verify** — prefers `just ci` when a justfile defines `ci:`.
-- **Diff summary** — accept-edits results append newly-dirty files only; pre-existing dirt is listed separately, never misattributed.
-- **Per-directory lock** — serializes concurrent agy calls on the same tree across Pi processes (symlink-aware).
-- **Cancellation** — abort/timeout kills the full agy process tree, and streamed records plus responses are size-bounded; a fully delivered result survives cancellation or timeout, and the conversation stays resumable.
-- **Background tasks** — `agy_execute background=true` detaches with a task handle; `agy_tasks` polls, collects, and cancels. Timeout-owned, lock-serialized, session-recorded, reaped on shutdown.
-- **Antigravity provider** — `antigravity/*` models in Pi's `/model` picker with live catalog discovery, a persistent stream-json driver, and a localhost MCP bridge: read-only Pi context plus mutating Pi tools via parked calls and real shadow `toolCall` turns (normal permissions and review apply). Toggle with `/agy bridge on|off`; attached images are staged as files agy can open.
+For tool parameters and current behavior, rely on the `agy_execute` and related tool descriptions; consult the package README for setup and configuration.
