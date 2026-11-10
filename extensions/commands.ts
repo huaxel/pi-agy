@@ -1,65 +1,27 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import {
-  checkAgyUsage,
-  formatAgyUsage,
-  inspectAgyAgents,
+  inspectAgyModels,
   isAgyModel,
   normalizeAgyAgentName,
   resolveAgyModelId,
-  type AgyModel,
 } from "./lib/cli.js";
-import {
-  buildAgyContextFromEntries,
-  effectiveResumeContextMode,
-  type AgyContextMode,
-} from "./lib/context.js";
-import { runAgyDoctor } from "./lib/doctor.js";
-import { executeAgyTask } from "./lib/execute.js";
-import { describeWhen, truncate } from "./lib/output.js";
-import { describePreRunDirt } from "./lib/postflight.js";
-import {
-  AGY_RUN_ENTRY_TYPE,
-  renderAgyRunReceipt,
-  type AgyRunReceipt,
-} from "./lib/render.js";
-import { getHistory, getSession } from "./lib/sessions.js";
+import { truncate } from "./lib/output.js";
+import { AGY_RUN_ENTRY_TYPE, renderAgyRunReceipt } from "./lib/render.js";
+import { getSession } from "./lib/sessions.js";
 
-import { DEFAULT_TIMEOUT_MS, MODEL_ALIASES, MODEL_KEYS, MODE_KEYS, parseAgyCommandArgs } from "./lib/command-args.js";
+import { MODEL_ALIASES, MODEL_KEYS, MODE_KEYS, parseAgyCommandArgs } from "./lib/command-args.js";
+import { executeConfirmedRun, MODE_OPTIONS, optionKey, runSessionsPicker, type InteractiveRun } from "./command-run.js";
+import { showAgents, showBridge, showDoctor, showUsage } from "./command-info.js";
 import { buildAcceptEditsConfirm } from "./lib/confirm.js";
-import { loadAgyConfig, saveAgyConfig } from "./lib/config.js";
-import { describeProviderBridges, resetProviderBridges } from "./lib/provider.js";
 
-const MODEL_OPTIONS = [
-  "flash — fast, cheap (Gemini Flash medium)",
-  "flash-low — trivial / high-volume",
-  "flash-high — harder agentic work",
-  "pro — deep reasoning (Gemini Pro high)",
-  "pro-low — pro, lighter reasoning",
-  "pro-high — max Gemini reasoning",
-  "sonnet — Claude default (review/code)",
-  "opus — Claude hard problems",
-  "gpt-oss — open-model alternative",
-];
-
-const MODE_OPTIONS = [
-  "accept-edits — writes files (default)",
-  "plan — exploration, no edits",
-  "sandbox — isolated preview",
-];
+function modelOptions(): string[] {
+  return Object.keys(MODEL_ALIASES).map((alias) =>
+    `${alias} — ${resolveAgyModelId(MODEL_ALIASES[alias])}`,
+  );
+}
 
 export { parseAgyCommandArgs, type AgyCommandArgs } from "./lib/command-args.js";
-
-interface InteractiveRun {
-  mode: "plan" | "accept-edits" | "sandbox";
-  model: AgyModel;
-  agent?: string;
-  prompt: string;
-  conversation_id?: string;
-  continue?: boolean;
-  timeout_ms?: number;
-  context?: AgyContextMode;
-}
 
 /**
  * Register the human-callable `/agy` command. Missing parts are filled with
@@ -204,7 +166,14 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
         }
       }
       if (!model) {
-        const pick = await ctx.ui.select("agy model", MODEL_OPTIONS);
+        // Refresh once when opening the picker so labels show the concrete IDs
+        // exposed by this account, while retaining the stable alias interface.
+        try {
+          await inspectAgyModels(ctx.cwd, ctx.signal);
+        } catch {
+          // Keep the picker usable with the built-in fallback aliases.
+        }
+        const pick = await ctx.ui.select("agy model", modelOptions());
         if (!pick) {
           ctx.ui.notify("agy: cancelled", "info");
           return;
@@ -233,278 +202,4 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       });
     },
   });
-}
-
-/** `/agy doctor` — diagnose the CLI and local integration without inference. */
-async function showDoctor(ctx: ExtensionCommandContext): Promise<void> {
-  try {
-    await ctx.waitForIdle();
-    ctx.ui.setStatus("agy", "agy: running diagnostics…");
-    const report = await runAgyDoctor(ctx.cwd, ctx.signal);
-    const type = report.status === "error" ? "error" : report.status === "warn" ? "warning" : "info";
-    ctx.ui.notify(report.text, type);
-  } catch (error) {
-    if (ctx.signal?.aborted) {
-      ctx.ui.notify("agy: doctor cancelled", "info");
-    } else {
-      const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(`agy doctor failed: ${message}`, "error");
-    }
-  } finally {
-    ctx.ui.setStatus("agy", undefined);
-  }
-}
-
-/** `/agy agents` — list configured custom agents without inference. */
-async function showAgents(ctx: ExtensionCommandContext): Promise<void> {
-  try {
-    await ctx.waitForIdle();
-    ctx.ui.setStatus("agy", "agy: discovering custom agents…");
-    const agents = await inspectAgyAgents(ctx.cwd, ctx.signal);
-    ctx.ui.notify(
-      agents.length ? `configured agy agents:\n${agents.map((agent) => `- ${agent}`).join("\n")}` : "No custom agy agents are configured.",
-      "info",
-    );
-  } catch (error) {
-    if (ctx.signal?.aborted) ctx.ui.notify("agy: agent discovery cancelled", "info");
-    else {
-      const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(`agy agent discovery failed: ${message}`, "error");
-    }
-  } finally {
-    ctx.ui.setStatus("agy", undefined);
-  }
-}
-
-/** `/agy usage` — show model quotas without starting an agent turn. */
-async function showUsage(
-  ctx: ExtensionCommandContext,
-  model?: AgyModel,
-): Promise<void> {
-  try {
-    await ctx.waitForIdle();
-    const snapshot = await checkAgyUsage(ctx.cwd, ctx.signal);
-    const report = formatAgyUsage(snapshot, model ? resolveAgyModelId(model) : undefined);
-    ctx.ui.notify(report ?? "agy quota information is unavailable in this CLI version", report ? "info" : "warning");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    ctx.ui.notify(`agy usage check failed: ${message}`, "error");
-  }
-}
-
-/** `/agy bridge [on|off|status]` — inspect or toggle the provider MCP bridge. */
-async function showBridge(ctx: ExtensionCommandContext, arg?: string): Promise<void> {
-  const sub = (arg ?? "status").toLowerCase();
-  if (sub !== "on" && sub !== "off" && sub !== "status") {
-    ctx.ui.notify("agy: bridge takes on, off, or no argument (status)", "error");
-    return;
-  }
-  try {
-    await ctx.waitForIdle();
-    if (sub === "on" || sub === "off") {
-      ctx.ui.setStatus("agy", `agy: turning the provider bridge ${sub}…`);
-      await saveAgyConfig({ providerBridge: sub === "on" });
-      // Drop memoized servers so the next provider turn re-resolves;
-      // drivers recycle on the bridge-dir change by themselves.
-      await resetProviderBridges();
-      ctx.ui.notify(
-        sub === "on"
-          ? "Provider bridge on: agy turns get Pi tools via localhost MCP (takes effect on the next turn)."
-          : "Provider bridge off: agy turns run plain (takes effect on the next turn).",
-        "info",
-      );
-      return;
-    }
-    const config = await loadAgyConfig().catch(() => ({ providerBridge: true as const }));
-    const enabled = config.providerBridge !== false;
-    const bridges = describeProviderBridges();
-    const running = bridges.filter((bridge) => bridge.running);
-    const lines = [
-      `Provider bridge: ${enabled ? "on" : "off"} (agy-config.json${enabled ? "" : " — set providerBridge or run /agy bridge on"})`,
-      running.length > 0
-        ? `running servers (${running.length}):\n${running.map((bridge) => `- ${bridge.dir} · ${bridge.toolCount ?? 0} tools`).join("\n")}`
-        : "no bridge servers running (one starts on the next provider turn)",
-    ];
-    ctx.ui.notify(lines.join("\n"), "info");
-  } catch (error) {
-    if (ctx.signal?.aborted) ctx.ui.notify("agy: bridge check cancelled", "info");
-    else {
-      const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(`agy bridge failed: ${message}`, "error");
-    }
-  } finally {
-    ctx.ui.setStatus("agy", undefined);
-  }
-}
-
-/** `/agy sessions` — pick a recorded conversation and resume it with a follow-up. */
-async function runSessionsPicker(
-  pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-): Promise<void> {
-  const history = await getHistory(ctx.cwd);
-  if (history.length === 0) {
-    ctx.ui.notify("agy: no recorded conversations for this directory", "info");
-    return;
-  }
-
-  const options = history.map((entry, index) => {
-    const id = entry.conversation_id.slice(0, 8);
-    const model = entry.model ?? "unknown model";
-    const agent = entry.agent ? ` · agent ${entry.agent}` : "";
-    const summary = entry.summary ? `${entry.summary.slice(0, 50)} · ` : "";
-    return `${index + 1}. ${summary}${model}${agent} · ${describeWhen(entry.updated_at)} · ${id}…`;
-  });
-  const pick = await ctx.ui.select("resume agy conversation", options);
-  if (!pick) {
-    ctx.ui.notify("agy: cancelled", "info");
-    return;
-  }
-  const entry = history[options.indexOf(pick)];
-  if (!entry) {
-    ctx.ui.notify("agy: cancelled", "info");
-    return;
-  }
-
-  const modePick = await ctx.ui.select("agy mode", MODE_OPTIONS);
-  if (!modePick) {
-    ctx.ui.notify("agy: cancelled", "info");
-    return;
-  }
-  const mode = optionKey(modePick) as InteractiveRun["mode"];
-
-  const text = await ctx.ui.editor("agy follow-up task", "");
-  if (!text?.trim()) {
-    ctx.ui.notify("agy: cancelled (empty task)", "info");
-    return;
-  }
-
-  await executeConfirmedRun(pi, ctx, {
-    mode,
-    model: isAgyModel(entry.model) ? entry.model : "flash-medium",
-    agent: entry.agent,
-    prompt: text.trim(),
-    conversation_id: entry.conversation_id,
-  });
-}
-
-async function executeConfirmedRun(
-  pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-  run: InteractiveRun,
-): Promise<void> {
-  const cwd = ctx.cwd;
-  await ctx.waitForIdle();
-  const requestedContextMode = run.context ?? "none";
-  const contextMode = effectiveResumeContextMode(
-    requestedContextMode,
-    Boolean(run.conversation_id || run.continue),
-  );
-  const contextText =
-    contextMode === "none"
-      ? undefined
-      : buildAgyContextFromEntries(ctx.sessionManager.buildContextEntries(), contextMode);
-
-  if (run.mode === "accept-edits") {
-    const dirt = await describePreRunDirt(cwd, ctx.signal).catch(() => null);
-    const { title, body } = buildAcceptEditsConfirm({
-      modelLabel: `${run.model} (${resolveAgyModelId(run.model)})`,
-      agent: run.agent,
-      cwd,
-      prompt: run.prompt,
-      contextMode,
-      contextText,
-      dirt,
-    });
-    const ok = await ctx.ui.confirm(title, body);
-    if (!ok) {
-      ctx.ui.notify("agy: cancelled", "info");
-      return;
-    }
-  }
-
-  // Execute directly so the confirmed parameters cannot be changed by
-  // a second LLM turn and the command works even when tools are limited.
-  const status = createStatusThrottler(ctx);
-  try {
-    status(`starting (${run.model} · ${run.mode}${run.agent ? ` · agent ${run.agent}` : ""})`);
-    const result = await executeAgyTask(
-      {
-        prompt: run.prompt,
-        model: run.model,
-        agent: run.agent,
-        mode: run.mode,
-        dir: cwd,
-        timeout_ms: run.timeout_ms ?? DEFAULT_TIMEOUT_MS,
-        conversation_id: run.conversation_id,
-        continue: run.continue,
-        new_session: run.conversation_id || run.continue ? false : true,
-        stream: true,
-        context: contextMode,
-        context_text: contextText,
-      },
-      ctx.signal,
-      (progress) => status(progress),
-    );
-    status(undefined);
-    const text = truncate(result.text || "(empty response)");
-    if (typeof pi.appendEntry === "function") {
-      pi.appendEntry(AGY_RUN_ENTRY_TYPE, {
-        task: truncate(run.prompt, 500),
-        text,
-        details: result.details,
-        completed_at: new Date().toISOString(),
-      } satisfies AgyRunReceipt);
-    } else {
-      // Compatibility fallback for stripped-down hosts and test harnesses.
-      ctx.ui.notify(truncate(text, 4000), "info");
-    }
-  } catch (error) {
-    status(undefined);
-    if (ctx.signal?.aborted) {
-      ctx.ui.notify("agy: cancelled", "info");
-    } else {
-      const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(`agy failed: ${message}`, "error");
-    }
-  }
-}
-
-/** Coalesce status-bar updates so per-token deltas do not churn the TUI. */
-function createStatusThrottler(ctx: ExtensionCommandContext, intervalMs = 300) {
-  let lastEmit = 0;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let pending: string | undefined;
-
-  const emit = (text: string) => {
-    lastEmit = Date.now();
-    ctx.ui.setStatus("agy", text.slice(0, 200));
-  };
-
-  return (text: string | undefined): void => {
-    if (text === undefined) {
-      if (timer !== undefined) clearTimeout(timer);
-      timer = undefined;
-      pending = undefined;
-      ctx.ui.setStatus("agy", undefined);
-      return;
-    }
-    const now = Date.now();
-    if (now - lastEmit >= intervalMs) {
-      emit(text);
-      return;
-    }
-    pending = text;
-    if (timer === undefined) {
-      timer = setTimeout(() => {
-        timer = undefined;
-        if (pending !== undefined) emit(pending);
-        pending = undefined;
-      }, intervalMs - (now - lastEmit));
-    }
-  };
-}
-
-function optionKey(option: string): string {
-  return option.split(" — ")[0];
 }
