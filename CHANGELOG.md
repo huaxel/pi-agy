@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.9
+
+- Rewrite the README as a concise overview of agy task delegation and the Antigravity provider, retaining installation, configuration, and development essentials.
+
 ## 0.7.8
 
 - Improve agy provider cache behavior: stabilize prompt prefixes, cap recent resume context, key preflight and verification caches by working directory, and bucket print timeouts for identical arguments.
