@@ -1,0 +1,61 @@
+{
+  "worker": "luna-plan-003-tool-catalog",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 94433,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-003-30db2pyi/worktree",
+  "session": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/003/session.jsonl",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/003/worker-revision2-events.log",
+  "plan": "003",
+  "scope": [
+    "extensions/index.ts",
+    "extensions/lib/provider.ts",
+    "tests/provider.test.ts"
+  ],
+  "state": "approved-with-009",
+  "revision": 2,
+  "deadline_minutes": 45,
+  "prior_pids": [
+    58794,
+    69530
+  ],
+  "prior_logs": [
+    "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/003/worker-events.log",
+    "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/003/worker-revision1-events.log"
+  ],
+  "verdict": "APPROVE with009",
+  "executorStatus": "STOPPED",
+  "pendingWorkOrQuestions": false,
+  "evidence": "plans/evidence/003-tool-catalog-review.md",
+  "patch": "plans/patches/003-tool-catalog.patch",
+  "reviewerChecks": {
+    "node": "22.23.4",
+    "focused": {
+      "total": 5,
+      "pass": 5
+    },
+    "tests": [
+      {
+        "total": 310,
+        "pass": 309,
+        "fail": 1,
+        "case": "preflight health retry deadline"
+      },
+      {
+        "total": 310,
+        "pass": 309,
+        "fail": 1,
+        "case": "observed conversation id timeout"
+      }
+    ],
+    "typecheck": 0,
+    "pack": 0
+  },
+  "appliedToOriginal": false,
+  "blocker": "Final independent full project gate failed on two different timing-sensitive existing cases; revision budget exhausted",
+  "reviewVerdict": "APPROVE with approved009 test fixture prerequisite",
+  "verificationFollowup": "plans/evidence/009-timing-followup-review.md",
+  "verificationWorktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+  "verificationDependency": "plans/patches/009-timing-tests.patch",
+  "historicalVerdict": "BLOCK",
+  "finalReviewerChecks": "plans/execution/009-followup/independent-checks.json"
+}

@@ -1,0 +1,44 @@
+{
+  "worker": "luna-plan-009-timing",
+  "plan": "009",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 32571,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-ltd59ai2/timing",
+  "integration_worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-ltd59ai2/catalog-integration",
+  "session": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/009/session.jsonl",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/009/worker-revision2-events.log",
+  "state": "blocked",
+  "revision": 2,
+  "startedAt": "2026-11-11T10:54:38.593209+00:00",
+  "scope": [
+    "tests/preflight.test.ts",
+    "tests/execution.test.ts",
+    "tests/helpers.ts",
+    "tests/timing-helpers.ts"
+  ],
+  "input_patch": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/patches/003-tool-catalog.patch",
+  "prior_pids": [
+    70614,
+    9840
+  ],
+  "prior_logs": [
+    "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/009/worker-events.log",
+    "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/009/worker-revision1-events.log"
+  ],
+  "revisionStartedAt": "2026-11-11T11:27:21.893896+00:00",
+  "reviewVerdict": "BLOCK",
+  "workerExit": "provider error: {\"detail\":\"Bad Request\"}",
+  "reviewReport": "plans/evidence/009-timing-verification-review.md",
+  "proposalPatch": "plans/patches/009-timing-tests-partial.patch",
+  "proposalPatchSha256": "52aa5802eaf92e65aebb2ac561b7027e348a7048231dff3266efa594dc00abfb",
+  "reviewedAt": "2026-11-11T11:41:56.387916+00:00",
+  "checks": {
+    "focused": "6/6; exit 0",
+    "full_tests": "307/308; exit 1; provider-driver abort/respawn count",
+    "typecheck": "exit 2; tests/execution.test.ts:1177 undefined controller",
+    "pack": "exit 0; 42 entries",
+    "cleanup_control": "silent cleanup expiry reproduced",
+    "latest_integration": "not matching final timing files; no final matching gate"
+  },
+  "pendingQuestions": false
+}

@@ -72,16 +72,131 @@ describe("process tree kill", () => {
       );
       // The whole process group must be gone, not just the leader.
       assert.throws(() => process.kill(-child.pid!, 0), /ESRCH/);
+      assert.doesNotThrow(() => killProcessTree(child));
     } finally {
       killProcessTree(child);
     }
   });
 
-  it("is a no-op on an already-exited child", () => {
+  it("kills a SIGTERM-resistant descendant after the leader exits", async () => {
+    if (process.platform === "win32") return;
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-resistant-tree-"));
+    const ready = path.join(dir, "ready");
+    const heartbeat = path.join(dir, "heartbeat");
+    const childCode = `const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(${JSON.stringify(ready)}, "ready"); setInterval(() => fs.appendFileSync(${JSON.stringify(heartbeat)}, "x"), 25); setTimeout(() => process.exit(0), 30000);`;
+    const parentCode = `const { spawn } = require("node:child_process"); spawn(process.execPath, ["-e", ${JSON.stringify(childCode)}], { stdio: "ignore" }); process.on("SIGTERM", () => process.exit(0)); setTimeout(() => process.exit(0), 30000);`;
+    const child = spawn(process.execPath, ["-e", parentCode], {
+      detached: true,
+      stdio: "ignore",
+    });
+    const readyDeadline = Date.now() + 5000;
+    try {
+      while (Date.now() < readyDeadline) {
+        try {
+          await statFile(ready);
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      await statFile(ready);
+      killProcessTree(child);
+      await new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const onClose = () => {
+          if (timer) clearTimeout(timer);
+          child.removeListener("close", onClose);
+          resolve();
+        };
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve();
+          return;
+        }
+        timer = setTimeout(() => {
+          child.removeListener("close", onClose);
+          reject(new Error("leader did not exit"));
+        }, 5000);
+        child.once("close", onClose);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2300));
+      const sizeAfterDeadline = (await statFile(heartbeat)).size;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(
+        (await statFile(heartbeat)).size,
+        sizeAfterDeadline,
+        "descendant kept running after tree kill",
+      );
+      assert.doesNotThrow(() => killProcessTree(child));
+    } finally {
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch (error) {
+        assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+      }
+    }
+  });
+
+  it("escalates a live group after its leader already exited", async () => {
+    if (process.platform === "win32") return;
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-exited-leader-"));
+    const ready = path.join(dir, "ready");
+    const heartbeat = path.join(dir, "heartbeat");
+    const childCode = `const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(${JSON.stringify(ready)}, "ready"); setInterval(() => fs.appendFileSync(${JSON.stringify(heartbeat)}, "x"), 25); setTimeout(() => process.exit(0), 30000);`;
+    const parentCode = `const fs = require("node:fs"); const { spawn } = require("node:child_process"); spawn(process.execPath, ["-e", ${JSON.stringify(childCode)}], { stdio: "ignore" }); const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(ready)})) { clearInterval(timer); process.exit(0); } }, 10); setTimeout(() => process.exit(0), 30000);`;
+    const child = spawn(process.execPath, ["-e", parentCode], {
+      detached: true,
+      stdio: "ignore",
+    });
+    const readyDeadline = Date.now() + 5000;
+    try {
+      while (Date.now() < readyDeadline) {
+        try {
+          await statFile(ready);
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      await statFile(ready);
+      const leaderDeadline = Date.now() + 5000;
+      while (child.exitCode === null && child.signalCode === null && Date.now() < leaderDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.notEqual(child.exitCode, null, "leader did not exit");
+      const heartbeatDeadline = Date.now() + 5000;
+      while (Date.now() < heartbeatDeadline) {
+        try {
+          if ((await statFile(heartbeat)).size > 0) break;
+        } catch {
+          // The writer has not emitted its first heartbeat yet.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const initialSize = (await statFile(heartbeat)).size;
+      assert.ok(initialSize > 0, "descendant heartbeat never started");
+      killProcessTree(child);
+      await new Promise((resolve) => setTimeout(resolve, 2300));
+      const sizeAtEscalation = (await statFile(heartbeat)).size;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(
+        (await statFile(heartbeat)).size,
+        sizeAtEscalation,
+        "descendant kept running after leader exit",
+      );
+    } finally {
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch (error) {
+        assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+      }
+    }
+  });
+
+  it("is a no-op on an already-exited child without a process group", () => {
     const fakeChild = {
       exitCode: 0,
       signalCode: null,
-      pid: 123456,
+      pid: undefined,
       kill: () => true,
     } as unknown as import("node:child_process").ChildProcess;
     assert.doesNotThrow(() => killProcessTree(fakeChild));

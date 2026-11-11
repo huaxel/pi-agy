@@ -1,0 +1,43 @@
+{
+  "worker": "luna-plan-006",
+  "plan": "006",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 83688,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-006-yxx758z7/worktree",
+  "prerequisitePatches": {
+    "002-process-tree.patch": "deb20c39f771cb0c0edc0980a917b4715918b1848be494c9a01585ea6e634040",
+    "003-tool-catalog.patch": "1783ab890124a146b8dfe643154fb98659c4a83053ed6d93bbeb15477c1d3c91",
+    "004-bridge-sessions.patch": "feb6758d7a0c10be745dc4d2dba18a37287837f4b2d76d3df8f9b832175ad9ff",
+    "009-timing-tests.patch": "98a0d48a971e19cb4c6528ff89530cbc7f92f6d34c9baffd91139982aa013f51",
+    "005-terminal-response.patch": "7f9ad39134970ae7f5b47a71be3d9fffa7bac5f25f52a9371b71b6cc0364852b"
+  },
+  "previousAcceptedTree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-005-35y4ci17/worktree",
+  "session": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/006/session.jsonl",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/006/review1-events.log",
+  "scope": [
+    "extensions/lib/provider-driver.ts",
+    "tests/provider-driver.test.ts"
+  ],
+  "state": "approved",
+  "reviewRound": 1,
+  "startedAt": "2026-11-11T14:11:55.407685+00:00",
+  "priorPid": 64419,
+  "priorLog": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/006/worker-events.log",
+  "revisionStartedAt": "2026-11-11T14:20:16.317205+00:00",
+  "reviewVerdict": "APPROVE",
+  "reviewReport": "plans/evidence/006-cancelled-resume-review.md",
+  "independentChecks": "plans/execution/006/independent-checks.json",
+  "proposalPatch": "plans/patches/006-cancelled-resume.patch",
+  "proposalPatchSha256": "d4d6ac20d4527a0263354a8d5b282d6007aab656ae4fd377a9abe2a34fa82ba2",
+  "workerExit": "COMPLETE; native stop",
+  "pendingQuestions": false,
+  "reviewedAt": "2026-11-11T14:26:33.773875+00:00",
+  "checks": {
+    "combinedPrerequisite": "executor327/327, typecheck and pack pass",
+    "named": "independent3/3",
+    "driver": "independent19/19",
+    "consumer": "independent40/40",
+    "designBaseline": "independent51/51",
+    "fullCombined": "independent330/330; typecheck and pack exit0"
+  }
+}

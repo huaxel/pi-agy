@@ -86,13 +86,11 @@ function registerAgyProvider(pi: ExtensionAPI): void {
         streamSimple(
           { id: model.id },
           context.messages as unknown as ProviderTranscriptMessage[],
-          options
-            ? {
-                signal: options.signal,
-                reasoning: options.reasoning,
-                tools: getCurrentTools(context.messages) as unknown as ProviderToolSource[],
-              }
-            : undefined,
+          {
+            signal: options?.signal,
+            reasoning: options?.reasoning,
+            tools: getCurrentTools(context.messages) as unknown as ProviderToolSource[],
+          },
         ) as unknown as AssistantMessageEventStream,
     });
   };

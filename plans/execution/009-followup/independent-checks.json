@@ -1,0 +1,278 @@
+{
+  "sourceHashes": {
+    "tests/execution.test.ts": "bc9cc891d4cbc9f7ebd91cba04264f7953b8a2979360a465fbb9931900c86f1e",
+    "tests/preflight.test.ts": "c3d2341b82817c368c3f658900e134a2b00249575a55036a5d05053178604496",
+    "tests/provider-driver.test.ts": "2601d79a51e0303484da08a99e1b47f5225ae6f97a8924e996d33307862f22ac",
+    "tests/timing-helpers.ts": "4897c9aaf7926f512fec9e575369e0f463356db7f6aa17755d5cf0a513be8098"
+  },
+  "checks": [
+    {
+      "label": "focused-1",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "--test-name-pattern=health retry|does not spawn a retry|persists the conversation|reports an observed id|does not claim a conversation|watchdog|cleanup|abort kills the child",
+        "tests/preflight.test.ts",
+        "tests/execution.test.ts",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 8",
+        "# pass 8",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "focused-2",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "--test-name-pattern=health retry|does not spawn a retry|persists the conversation|reports an observed id|does not claim a conversation|watchdog|cleanup|abort kills the child",
+        "tests/preflight.test.ts",
+        "tests/execution.test.ts",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 8",
+        "# pass 8",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "focused-3",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "--test-name-pattern=health retry|does not spawn a retry|persists the conversation|reports an observed id|does not claim a conversation|watchdog|cleanup|abort kills the child",
+        "tests/preflight.test.ts",
+        "tests/execution.test.ts",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 8",
+        "# pass 8",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "focused-4",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "--test-name-pattern=health retry|does not spawn a retry|persists the conversation|reports an observed id|does not claim a conversation|watchdog|cleanup|abort kills the child",
+        "tests/preflight.test.ts",
+        "tests/execution.test.ts",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 8",
+        "# pass 8",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "focused-5",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "--test-name-pattern=health retry|does not spawn a retry|persists the conversation|reports an observed id|does not claim a conversation|watchdog|cleanup|abort kills the child",
+        "tests/preflight.test.ts",
+        "tests/execution.test.ts",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 8",
+        "# pass 8",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "affected",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "tests/preflight.test.ts",
+        "tests/execution.test.ts",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 66",
+        "# pass 66",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "base-tests",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 309",
+        "# pass 309",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "base-typecheck",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "exit": 0,
+      "counts": []
+    },
+    {
+      "label": "base-pack",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+      "command": [
+        "npm",
+        "run",
+        "pack:check"
+      ],
+      "exit": 0,
+      "counts": []
+    },
+    {
+      "label": "catalog-consumers",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "tests/provider.test.ts",
+        "tests/provider-driver.test.ts",
+        "tests/execution.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 97",
+        "# pass 97",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "gate-1-tests",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 314",
+        "# pass 314",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "gate-1-typecheck",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "exit": 0,
+      "counts": []
+    },
+    {
+      "label": "gate-1-pack",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+      "command": [
+        "npm",
+        "run",
+        "pack:check"
+      ],
+      "exit": 0,
+      "counts": []
+    },
+    {
+      "label": "gate-2-tests",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 314",
+        "# pass 314",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "gate-2-typecheck",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "exit": 0,
+      "counts": []
+    },
+    {
+      "label": "gate-2-pack",
+      "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+      "command": [
+        "npm",
+        "run",
+        "pack:check"
+      ],
+      "exit": 0,
+      "counts": []
+    }
+  ],
+  "catalogPatchExact": true,
+  "baseIntegrationTimingEqual": true
+}

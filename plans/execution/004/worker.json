@@ -1,0 +1,54 @@
+{
+  "worker": "luna-plan-004-bridge-sessions",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 22114,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-004-sab5hisb/worktree",
+  "session": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/004/session.jsonl",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/004/worker-revision2-events.log",
+  "plan": "004",
+  "scope": [
+    "extensions/lib/provider-mcp.ts",
+    "tests/provider-mcp.test.ts"
+  ],
+  "state": "complete",
+  "revision": 2,
+  "deadline_minutes": 45,
+  "prior_pids": [
+    58816,
+    92282
+  ],
+  "prior_logs": [
+    "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/004/worker-events.log",
+    "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/004/worker-revision1-events.log"
+  ],
+  "verdict": "APPROVE",
+  "executorStatus": "COMPLETE",
+  "pendingWorkOrQuestions": false,
+  "evidence": "plans/evidence/004-bridge-sessions-review.md",
+  "patch": "plans/patches/004-bridge-sessions.patch",
+  "reviewerChecks": {
+    "node": "22.23.4",
+    "tests": {
+      "total": 311,
+      "pass": 311,
+      "fail": 0
+    },
+    "focused": {
+      "total": 21,
+      "pass": 21
+    },
+    "consumers": {
+      "total": 46,
+      "pass": 46
+    },
+    "probes": 0,
+    "typecheck": 0,
+    "pack": 0
+  },
+  "appliedToOriginal": false,
+  "remainingRisks": [
+    "Some lifecycle edge cases are in the separate review probe script, not npm test",
+    "SDK/Zod advisory reachability remains partly unresolved",
+    "Combined patches and Linux CI not verified"
+  ]
+}

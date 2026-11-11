@@ -43,13 +43,17 @@ export function appendBounded(chunks: Buffer[], total: number, data: Buffer): nu
  * modifying files after Pi reported cancellation.
  */
 export function killProcessTree(child: ChildProcess): void {
+  const groupPid = process.platform !== "win32" && child.pid ? -child.pid : undefined;
   try {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    if (child.pid && process.platform !== "win32") {
+    // A leader can exit while a descendant remains in its process group.
+    // Leader lifecycle is therefore not evidence that the group is gone.
+    if (!groupPid && (child.exitCode !== null || child.signalCode !== null)) return;
+    if (groupPid !== undefined) {
       try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch {
-        child.kill("SIGTERM");
+        process.kill(groupPid, "SIGTERM");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+        throw error;
       }
     } else {
       child.kill("SIGTERM");
@@ -59,15 +63,13 @@ export function killProcessTree(child: ChildProcess): void {
   }
   const escalate = setTimeout(() => {
     try {
-      if (child.exitCode === null && child.signalCode === null) {
-        if (child.pid && process.platform !== "win32") {
-          try {
-            process.kill(-child.pid, "SIGKILL");
-            return;
-          } catch {
-            // Fall through to direct kill.
-          }
+      if (groupPid !== undefined) {
+        try {
+          process.kill(groupPid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
         }
+      } else if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGKILL");
       }
     } catch {

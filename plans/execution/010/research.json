@@ -1,0 +1,11 @@
+{
+  "scope": "user-authorized remediation planning only",
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-006-yxx758z7/worktree",
+  "checkedAt": "2026-11-11T15:06:58.328456+00:00",
+  "auditPath": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-006-yxx758z7/worktree/.pi/security-010/audit.json",
+  "auditExit": 1,
+  "manifestHashes": {
+    "package.json": "71482c497155318a3254e645daa0e2456a73e8fa749b485693060031462b2344",
+    "package-lock.json": "3b1191b639bc509d09b13f9d6356a9d4df76a1f17001e0e85aad221832479d27"
+  }
+}

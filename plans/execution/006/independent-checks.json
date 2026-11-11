@@ -1,0 +1,134 @@
+{
+  "sourceHashes": {
+    "extensions/index.ts": "7d5823a320edb9b5ab05e10cd97c0089f1612ba879f7d303f677e0aa932f6a98",
+    "extensions/lib/provider.ts": "6ea80779507d3b313bee125ba02ca9af75b812a6b2c637c49b1dd7ef111fbf7a",
+    "tests/provider.test.ts": "35eca7cdc9dfcde2bbd9c6f630445f466fdc24c3cee4abcef0a5cd9b31d26c0b",
+    "tests/execution.test.ts": "bc9cc891d4cbc9f7ebd91cba04264f7953b8a2979360a465fbb9931900c86f1e",
+    "tests/preflight.test.ts": "c3d2341b82817c368c3f658900e134a2b00249575a55036a5d05053178604496",
+    "tests/timing-helpers.ts": "4897c9aaf7926f512fec9e575369e0f463356db7f6aa17755d5cf0a513be8098",
+    "extensions/lib/spawn.ts": "c1b1a51555aa753942ea1055e4316c7931a752e719927cf6b79038381d1bfdae",
+    "tests/regression.test.ts": "d24edcb0fdbe7839f07cb7eafb688021dbad8929e6e1b9892b762cb1d0e8d23f",
+    "extensions/lib/provider-mcp.ts": "4371e746cf83b8f62cdedc5ba95a5f1a4bea2e67a482f89e9266eafc72e49a40",
+    "tests/provider-mcp.test.ts": "1a27bb8482e86e20e3c83d2e9ca166c9d1dae1309ded4c5291c89f57b19a51ab",
+    "extensions/lib/provider-driver.ts": "5ee2fe27c8d5f6194524d356ed24db45204441033ffcd0bdd917c66cfaa6d757",
+    "tests/provider-driver.test.ts": "e74beace6588088149983af5c0fc8c14bb683d059288492b9a6fc3f3dd823287"
+  },
+  "scope": [
+    "extensions/lib/provider-driver.ts",
+    "tests/provider-driver.test.ts"
+  ],
+  "prerequisitesUnchanged": true,
+  "incrementalPatchSha256": "d4d6ac20d4527a0263354a8d5b282d6007aab656ae4fd377a9abe2a34fa82ba2",
+  "checks": [
+    {
+      "label": "named",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "--test-name-pattern=provider cancelled resume settlement",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 3",
+        "# pass 3",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "driver",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 19",
+        "# pass 19",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "consumer",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "tests/provider.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 40",
+        "# pass 40",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "design-baseline",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "tests/doctor.test.ts",
+        "tests/provider-mcp.test.ts",
+        "tests/stream.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 51",
+        "# pass 51",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "tests",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 330",
+        "# pass 330",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "exit": 0,
+      "counts": []
+    },
+    {
+      "label": "pack",
+      "command": [
+        "npm",
+        "run",
+        "pack:check"
+      ],
+      "exit": 0,
+      "counts": []
+    }
+  ]
+}

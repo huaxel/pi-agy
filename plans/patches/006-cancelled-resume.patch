@@ -1,0 +1,187 @@
+--- a/extensions/lib/provider-driver.ts
++++ b/extensions/lib/provider-driver.ts
+@@ -253,29 +253,32 @@
+       throw new Error("agy provider driver has no suspended turn");
+     }
+     if (!this.child) throw new Error("agy provider turn lost its process while suspended");
+-    turn.suspended = false;
+-    this.clearSuspendedTimer(turn);
+-    if (options?.onText) turn.onText = options.onText;
+-    if (options?.onActivity) turn.onActivity = options.onActivity;
+-    if (options?.timeoutMs !== undefined) turn.timeoutMs = options.timeoutMs;
+-    if (turn.onAbort) {
+-      turn.signal.removeEventListener("abort", turn.onAbort);
+-      turn.onAbort = undefined;
+-    }
+-    if (options?.signal) {
+-      turn.signal = options.signal;
+-      const onAbort = (): void => {
+-        if (turn.settled) return;
+-        this.killChild();
+-        if (turn.text) this.settleDone(turn, { aborted: true });
+-        else this.settleError(turn, new Error("agy provider turn was cancelled"));
+-      };
+-      turn.onAbort = onAbort;
+-      options.signal.addEventListener("abort", onAbort, { once: true });
+-      if (options.signal.aborted) onAbort();
+-    }
+     return new Promise<DriverTurnEnd>((resolve, reject) => {
++      // Install the phase waiter before registering an abort listener: an
++      // already-aborted signal may settle synchronously.
+       turn.phase = { resolve, reject };
++      turn.suspended = false;
++      this.clearSuspendedTimer(turn);
++      if (options?.onText) turn.onText = options.onText;
++      if (options?.onActivity) turn.onActivity = options.onActivity;
++      if (options?.timeoutMs !== undefined) turn.timeoutMs = options.timeoutMs;
++      if (turn.onAbort) {
++        turn.signal.removeEventListener("abort", turn.onAbort);
++        turn.onAbort = undefined;
++      }
++      if (options?.signal) {
++        turn.signal = options.signal;
++        const onAbort = (): void => {
++          if (turn.settled) return;
++          this.killChild();
++          if (turn.text) this.settleDone(turn, { aborted: true });
++          else this.settleError(turn, new Error("agy provider turn was cancelled"));
++        };
++        turn.onAbort = onAbort;
++        options.signal.addEventListener("abort", onAbort, { once: true });
++        if (options.signal.aborted) onAbort();
++      }
++      if (turn.settled) return;
+       turn.timer = setTimeout(() => {
+         // A resumed timeout kills the hung child like a fresh one: never
+         // leave it running to be reused.
+--- a/tests/provider-driver.test.ts
++++ b/tests/provider-driver.test.ts
+@@ -4,7 +4,7 @@
+ import * as path from "node:path";
+ import { afterEach, describe, it } from "node:test";
+ 
+-import { awaitWithWatchdog } from "./timing-helpers.js";
++import { awaitWithWatchdog, nativeSetTimeout } from "./timing-helpers.js";
+ import {
+   AgyProviderDriver,
+   type DriverTurnEnd,
+@@ -40,7 +40,7 @@
+ /**
+  * Persistent fake agy: stays alive across stdin lines, answering every turn
+  * with a result envelope. Behavior scripts via control files:
+- * mode=normal|hang|crash, response=text, status=SUCCESS|FAILED.
++ * mode=normal|hang|crash|ready-empty|ready-text, response=text, status=SUCCESS|FAILED.
+  */
+ async function withPersistentFakeAgy<T>(fn: (controls: FakeControls) => Promise<T>): Promise<T> {
+   const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-driver-bin-"));
+@@ -66,7 +66,11 @@
+ while IFS= read -r _line; do
+   n=$((n + 1))
+   printf '%s\\n' '{"event":"init","init":{"model":"fake"}}'
+-  if [ "$mode" = "hang" ]; then continue; fi
++  if [ "$mode" = "hang" ] || [ "$mode" = "ready-empty" ]; then continue; fi
++  if [ "$mode" = "ready-text" ]; then
++    printf '%s\\n' "{\\"event\\":\\"step_update\\",\\"step_update\\":{\\"step_type\\":\\"agent_response\\",\\"text_delta\\":\\"live-$n \\"}}"
++    continue
++  fi
+   if [ "$mode" = "slow" ]; then sleep 2; fi
+   printf '%s\\n' "{\\"event\\":\\"step_update\\",\\"step_update\\":{\\"step_type\\":\\"agent_response\\",\\"text_delta\\":\\"live-$n \\"}}"
+   text=$(cat "$dir/response" 2>/dev/null || echo "turn-response")
+@@ -115,6 +119,97 @@
+   return end.outcome;
+ }
+ 
++describe("provider cancelled resume settlement", () => {
++  it("rejects an empty pre-aborted resume promptly", async () => {
++    await withPersistentFakeAgy(async (controls) => {
++      await controls.setMode("ready-empty");
++      const driver = track(new AgyProviderDriver());
++      const dir = await tempDir();
++      let ready!: () => void;
++      const readySignal = new Promise<void>((resolve) => { ready = resolve; });
++      const pending = driver.turn(
++        { ...profile, dir },
++        turnOptions({ onActivity: (label: string) => label === "agy: session started (fake)" && ready() }),
++      );
++      void pending.catch(() => undefined);
++      await awaitWithWatchdog(readySignal, "empty resume readiness");
++      assert.equal(driver.notifyPark({ callId: "empty", toolName: "read", args: {} }), true);
++      const parked = await pending;
++      assert.equal(parked.kind, "parked");
++      const resumed = driver.continueTurn({ signal: AbortSignal.abort(), timeoutMs: 100 });
++      await assert.rejects(awaitWithWatchdog(resumed, "empty pre-aborted resume"), /cancelled/);
++    });
++  });
++
++  it("ignores an obsolete previous-phase signal after rebinding", async () => {
++    await withPersistentFakeAgy(async (controls) => {
++      await controls.setMode("ready-text");
++      const driver = track(new AgyProviderDriver());
++      const dir = await tempDir();
++      const oldSignal = new AbortController();
++      let firstText!: () => void;
++      const firstReady = new Promise<void>((resolve) => { firstText = resolve; });
++      const pending = driver.turn(
++        { ...profile, dir },
++        turnOptions({ signal: oldSignal.signal, onText: () => firstText() }),
++      );
++      void pending.catch(() => undefined);
++      await awaitWithWatchdog(firstReady, "initial text readiness");
++      assert.equal(driver.notifyPark({ callId: "stale", toolName: "read", args: {} }), true);
++      await pending;
++      const newSignal = new AbortController();
++      const resumed = driver.continueTurn({ signal: newSignal.signal });
++      oldSignal.abort();
++      assert.equal(driver.snapshot().state, "running");
++      newSignal.abort();
++      const end = await awaitWithWatchdog(resumed, "rebinding cancellation");
++      assert.equal(expectDone(end).aborted, true);
++    });
++  });
++
++  it("settles partial text for a pre-aborted resume and keeps later turns usable", async () => {
++    await withPersistentFakeAgy(async (controls) => {
++      await controls.setMode("ready-text");
++      const driver = track(new AgyProviderDriver());
++      const dir = await tempDir();
++      let textReady!: () => void;
++      const text = new Promise<void>((resolve) => { textReady = resolve; });
++      const pending = driver.turn(
++        { ...profile, dir },
++        turnOptions({ onText: () => textReady() }),
++      );
++      void pending.catch(() => undefined);
++      await awaitWithWatchdog(text, "partial resume text readiness");
++      assert.equal(driver.notifyPark({ callId: "partial", toolName: "read", args: {} }), true);
++      await pending;
++      const resumed = driver.continueTurn({ signal: AbortSignal.abort(), timeoutMs: 100 });
++      const partial = await awaitWithWatchdog(resumed, "partial pre-aborted resume");
++      assert.equal(partial.kind, "done");
++      if (partial.kind !== "done") throw new Error("expected partial completion");
++      assert.equal(partial.outcome.aborted, true);
++      assert.equal(partial.outcome.text, "live-1 ");
++      await controls.setMode("normal");
++      const next = await awaitWithWatchdog(driver.turn({ ...profile, dir }, turnOptions()), "post-cancel fresh turn");
++      const nextOutcome = expectDone(next);
++      assert.equal(nextOutcome.text, "turn-response");
++      const nextConversationId = nextOutcome.conversationId;
++      const nextPid = driver.snapshot().pid;
++      assert.equal(driver.snapshot().state, "idle");
++      assert.ok(nextPid !== undefined);
++      assert.equal(await controls.spawnCount(), 2);
++      await awaitWithWatchdog(new Promise<void>((resolve) => nativeSetTimeout(resolve, 150)), "cancelled resume late-timeout observation", 500);
++      assert.equal(driver.snapshot().state, "idle");
++      assert.equal(driver.snapshot().pid, nextPid);
++      const reused = await awaitWithWatchdog(
++        driver.turn({ ...profile, dir }, turnOptions({ resumeConversationId: nextConversationId })),
++        "bound conversation reuse after late timeout",
++      );
++      assert.equal(expectDone(reused).text, "turn-response");
++      assert.equal(await controls.spawnCount(), 2);
++    });
++  });
++});
++
+ describe("persistent provider driver", () => {
+   it("reuses one process when resuming the bound conversation", async () => {
+     await withPersistentFakeAgy(async (controls) => {

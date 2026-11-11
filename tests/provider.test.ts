@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import {
   createAgyStreamSimple,
@@ -14,10 +15,10 @@ import {
   type ProviderTurnResult,
   type ProviderTurnRunner,
 } from "../extensions/lib/provider.js";
-import { mkdtemp } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import piAgyExtension from "../extensions/index.js";
 import { withDirLock } from "../extensions/lib/lock.js";
 import { AGY_PROVIDER_ID, closeProviderDrivers } from "../extensions/lib/provider.js";
@@ -313,6 +314,211 @@ describe("provider streamSimple", () => {
   });
 });
 
+describe("provider terminal response reconciliation", () => {
+  it("replaces streamed prefixes and corrected drafts with the terminal answer", async () => {
+    await withIsolatedAgentDir(async () => {
+      for (const [draft, terminal] of [["prefix ", "prefix plus terminal"], ["draft text", "corrected final"]]) {
+        const factory = createRecordingFactory();
+        const streamSimple = createAgyStreamSimple(factory, {
+          entries: [...FALLBACK_PROVIDER_MODELS],
+          runner: makeStaticRunner(async ({ callbacks }) => {
+            callbacks?.onText?.(draft);
+            return { text: terminal, truncated: false, activity: [] };
+          }),
+        });
+        const start = factory.events.length;
+        streamSimple({ id: "gemini-3-8-flash" }, [userMessage("answer")], {});
+        await waitForStreamEnd(factory, start);
+        const textEnd = factory.events.find((event) => event.type === "text_end") as { content: string };
+        const done = factory.events.find((event) => event.type === "done") as {
+          message: { content: Array<{ type: string; text?: string }> };
+        };
+        assert.equal(textEnd.content, terminal);
+        assert.equal(done.message.content.find((block) => block.type === "text")?.text, terminal);
+      }
+    });
+  });
+
+  it("uses activity or empty fallback instead of a stale live draft", async () => {
+    await withIsolatedAgentDir(async () => {
+      for (const activity of [["terminal activity"], []]) {
+        const factory = createRecordingFactory();
+        const streamSimple = createAgyStreamSimple(factory, {
+          entries: [...FALLBACK_PROVIDER_MODELS],
+          runner: makeStaticRunner(async ({ callbacks }) => {
+            callbacks?.onText?.("stale live draft");
+            return { text: "", truncated: false, activity };
+          }),
+        });
+        const start = factory.events.length;
+        streamSimple({ id: "gemini-3-8-flash" }, [userMessage("answer")], {});
+        await waitForStreamEnd(factory, start);
+        const expected = activity.length > 0 ? activity.join("\n") : "(agy returned no text)";
+        const textEnd = factory.events.find((event) => event.type === "text_end") as { content: string };
+        const done = factory.events.find((event) => event.type === "done") as {
+          message: { content: Array<{ type: string; text?: string }> };
+        };
+        assert.equal(textEnd.content, expected);
+        assert.equal(done.message.content.find((block) => block.type === "text")?.text, expected);
+        assert.doesNotMatch(textEnd.content, /stale live draft/);
+      }
+    });
+  });
+
+  it("keeps terminal annotations and stop reasons identical for live and no-live results", async () => {
+    const cases = [
+      { name: "truncated", truncated: true, expected: "stop", note: "[truncated: agy response exceeded the provider cap]" },
+      { name: "denied", deniedActions: [{ action: "write" }], expected: "stop", note: "[warning: agy reported 1 denied action(s) alongside this response]" },
+      { name: "aborted", aborted: true, expected: "aborted", note: "[note: turn cancelled — response is partial]" },
+      { name: "timed out", timedOut: true, expected: "length", note: "[note: turn timed out — response is partial]" },
+      { name: "aborted precedence", aborted: true, timedOut: true, expected: "aborted", note: "[note: turn cancelled — response is partial]" },
+    ];
+    await withIsolatedAgentDir(async () => {
+      for (const live of [false, true]) {
+        for (const testCase of cases) {
+          const factory = createRecordingFactory();
+          const streamSimple = createAgyStreamSimple(factory, {
+            entries: [...FALLBACK_PROVIDER_MODELS],
+            runner: makeStaticRunner(async ({ callbacks }) => {
+              if (live) callbacks?.onText?.("provisional draft");
+              return { text: "terminal answer", truncated: false, activity: [], ...testCase };
+            }),
+          });
+          const start = factory.events.length;
+          streamSimple({ id: "gemini-3-8-flash" }, [userMessage(testCase.name)], {});
+          await waitForStreamEnd(factory, start);
+          const textEnd = factory.events.find((event) => event.type === "text_end") as { content: string };
+          const done = factory.events.find((event) => event.type === "done") as {
+            reason: string;
+            message: { stopReason: string; content: Array<{ type: string; text?: string }> };
+          };
+          const expected = `terminal answer\n\n${testCase.note}`;
+          assert.equal(textEnd.content, expected);
+          assert.equal(done.message.content.find((block) => block.type === "text")?.text, expected);
+          assert.equal(done.reason, testCase.expected);
+          assert.equal(done.message.stopReason, testCase.expected);
+        }
+      }
+    });
+  });
+
+  it("reconciles through the real pi-ai async iterable and result", async () => {
+    await withIsolatedAgentDir(async () => {
+      const { createAssistantMessageEventStream } = await import("@earendil-works/pi-ai");
+      for (const [liveText, terminalText] of [["live draft", "authoritative terminal"], ["same answer", "same answer"]]) {
+        const controller = new AbortController();
+        const streamSimple = createAgyStreamSimple(
+          {
+            createStream: () => {
+              const real = createAssistantMessageEventStream();
+              const push = (real.push as (event: unknown) => void).bind(real);
+              return Object.assign(real, { push: (event: Record<string, unknown>) => push(event) });
+            },
+            getSystemPrompt: () => "",
+          },
+          {
+            entries: [...FALLBACK_PROVIDER_MODELS],
+            runner: makeStaticRunner(async ({ callbacks }) => {
+              callbacks?.onText?.(liveText);
+              return { text: terminalText, truncated: false, activity: [] };
+            }),
+          },
+        );
+        const stream = streamSimple({ id: "gemini-3-8-flash" }, [userMessage("answer")], { signal: controller.signal });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const operation = (async () => {
+            const events: Array<{ type: string; contentIndex?: number; content?: string; message?: { content: Array<{ type: string; text?: string }> } }> = [];
+            for await (const event of stream as unknown as AsyncIterable<typeof events[number]>) events.push(event);
+            const result = await (stream as unknown as { result(): Promise<{ content: Array<{ type: string; text?: string }> }> }).result();
+            return { events, result };
+          })();
+          const guard = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("timed out waiting for real provider stream")), 1_000);
+          });
+          const { events, result } = await Promise.race([operation, guard]);
+          const starts = events.filter((event) => event.type === "text_start");
+          const ends = events.filter((event) => event.type === "text_end");
+          assert.equal(starts.length, 1);
+          assert.equal(ends.length, 1);
+          assert.equal(starts[0].contentIndex, ends[0].contentIndex);
+          assert.equal(ends[0].content, terminalText);
+          const done = events.find((event) => event.type === "done");
+          assert.equal(done?.message?.content.find((block) => block.type === "text")?.text, terminalText);
+          assert.equal(result.content.find((block) => block.type === "text")?.text, terminalText);
+        } catch (error) {
+          controller.abort();
+          throw error;
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }
+    });
+  });
+});
+
+async function waitForStreamEnd(factory: { events: Array<Record<string, unknown>> }, start: number): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!factory.events.slice(start).some((event) => event.type === "__end")) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for provider stream");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+const ordinaryTool = { name: "read_file", description: "Read a file", parameters: { type: "object", properties: {} } };
+const secondTool = { name: "write_file", description: "Write a file", parameters: { type: "object", properties: {} } };
+const selfDelegationTool = { name: "askantigravity", description: "Delegate", parameters: { type: "object", properties: {} } };
+
+async function bridgedToolCatalogs(
+  invocations: Array<typeof ordinaryTool[] | undefined>,
+  depsTools?: typeof ordinaryTool[],
+): Promise<Array<Array<{ name: string; piName: string }>>> {
+  const factory = createRecordingFactory();
+  const captured: Array<Array<{ name: string; piName: string }>> = [];
+  const streamSimple = createAgyStreamSimple(factory, {
+    entries: [...FALLBACK_PROVIDER_MODELS],
+    tools: depsTools,
+    runner: makeStaticRunner(async (request) => {
+      captured.push(request.bridgedTools.map(({ name, piName }) => ({ name, piName })));
+      return { text: "ok", truncated: false, activity: [] };
+    }),
+  });
+  for (const tools of invocations) {
+    const start = factory.events.length;
+    streamSimple({ id: "gemini-3-8-flash" }, [userMessage("inspect")], tools === undefined ? undefined : { tools });
+    await waitForStreamEnd(factory, start);
+  }
+  return captured;
+}
+
+describe("provider active tool catalog", () => {
+  it("uses invocation tools, refreshes them on consecutive fresh turns, and honors an explicit empty catalog", async () => {
+    await withIsolatedAgentDir(async () => {
+      assert.deepEqual(await bridgedToolCatalogs([[ordinaryTool], [secondTool], []], [ordinaryTool]), [
+        [{ name: "read_file", piName: "read_file" }],
+        [{ name: "write_file", piName: "write_file" }],
+        [],
+      ]);
+    });
+  });
+
+  it("retains dependency tools when invocation tools are omitted", async () => {
+    await withIsolatedAgentDir(async () => {
+      assert.deepEqual(await bridgedToolCatalogs([undefined], [ordinaryTool]), [
+        [{ name: "read_file", piName: "read_file" }],
+      ]);
+    });
+  });
+
+  it("excludes the agy self-delegation tool while retaining ordinary tools", async () => {
+    await withIsolatedAgentDir(async () => {
+      assert.deepEqual(await bridgedToolCatalogs([[selfDelegationTool, ordinaryTool]]), [
+        [{ name: "read_file", piName: "read_file" }],
+      ]);
+    });
+  });
+});
+
 describe("provider tool round-trip", () => {
   it("emits a shadow toolUse on park and resumes on toolResult", async () => {
     await withIsolatedAgentDir(async () => {
@@ -320,16 +526,20 @@ describe("provider tool round-trip", () => {
     const deliveries: Array<{ callId: string; text: string; isError: boolean }> = [];
     let resumes = 0;
     const runner: ProviderTurnRunner = {
-      run: async () => ({
-        kind: "parked" as const,
-        park: { callId: "park-1", toolName: "read", args: { path: "/tmp/x" } },
-      }),
-      resume: async (got) => {
+      run: async ({ callbacks }) => {
+        callbacks?.onText?.("pre-tool commentary");
+        return {
+          kind: "parked" as const,
+          park: { callId: "park-1", toolName: "read", args: { path: "/tmp/x" } },
+        };
+      },
+      resume: async (got, callbacks) => {
         resumes += 1;
         deliveries.push(...got);
+        callbacks?.onText?.("resumed draft");
         return {
           kind: "done" as const,
-          result: { text: "file says hi", truncated: false, conversationId: "conv-r", activity: [] },
+          result: { text: "authoritative resumed answer", truncated: false, conversationId: "conv-r", activity: [] },
         };
       },
       cancel: () => {},
@@ -339,15 +549,20 @@ describe("provider tool round-trip", () => {
       runner,
       tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
     });
+    const parkedStart = factory.events.length;
     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("read the file")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForStreamEnd(factory, parkedStart);
     const parkedTypes = factory.events.map((event) => event.type);
     assert.ok(parkedTypes.includes("toolcall_start"));
     assert.ok(parkedTypes.includes("toolcall_end"));
     const parkedDone = factory.events.find((event) => event.type === "done") as unknown as {
       reason: string;
-      message: { stopReason: string; content: Array<{ type: string; id: string; name: string }> };
+      message: { stopReason: string; content: Array<{ type: string; id: string; name: string; text?: string }> };
     };
+    const parkedContentSnapshot = structuredClone(parkedDone.message.content);
+    assert.equal(parkedDone.message.content.find((block) => block.type === "text")?.text, "pre-tool commentary");
+    const parkedToolCall = parkedDone.message.content.find((block) => block.type === "toolCall");
+    assert.ok(parkedToolCall);
     assert.equal(parkedDone.reason, "toolUse");
     assert.equal(parkedDone.message.stopReason, "toolUse");
     const toolCall = parkedDone.message.content.find((block) => block.type === "toolCall");
@@ -356,6 +571,7 @@ describe("provider tool round-trip", () => {
 
     // Next Pi turn delivers the tool result: the suspended turn resumes on
     // the same handler instance.
+    const resumeStart = factory.events.length;
     streamSimple(
       { id: "gemini-3-8-flash" },
       [
@@ -366,17 +582,27 @@ describe("provider tool round-trip", () => {
       ],
       {},
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForStreamEnd(factory, resumeStart);
     assert.equal(resumes, 1);
+    assert.deepEqual(parkedDone.message.content, parkedContentSnapshot);
+    const resumedEvents = factory.events.slice(resumeStart);
+    const resumedTextEnd = resumedEvents.find((event) => event.type === "text_end") as { content: string };
+    assert.equal(resumedTextEnd.content, "authoritative resumed answer");
+    assert.doesNotMatch(resumedTextEnd.content, /pre-tool commentary|resumed draft/);
     // Deliveries carry the bridge park id (what agy waits on), matched via
     // the shadow toolCall id (what Pi's transcript carries).
     assert.deepEqual(deliveries, [{ callId: "park-1", text: "file says hi", isError: false }]);
     const dones = factory.events.filter((event) => event.type === "done") as unknown as Array<{
       reason: string;
+      message?: { content: Array<{ type: string; text?: string }> };
     }>;
     assert.deepEqual(
       dones.map((done) => done.reason),
       ["toolUse", "stop"],
+    );
+    assert.equal(
+      dones[1].message?.content.find((block) => block.type === "text")?.text,
+      "authoritative resumed answer",
     );
     });
   });
@@ -669,6 +895,150 @@ describe("provider status", () => {
     assert.equal(status.suspended[0].toolName, "read");
     assert.ok(status.suspended[0].toolCallId.length > 0);
     });
+  });
+});
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function withFakePersistentAgy<T>(assertionFile: string, fn: (workspace: string) => Promise<T>): Promise<T> {
+  const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-registration-bin-"));
+  const clientUrl = import.meta.resolve("@modelcontextprotocol/sdk/client/index.js");
+  const transportUrl = import.meta.resolve("@modelcontextprotocol/sdk/client/streamableHttp.js");
+  const script = `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const { Client } = await import(${JSON.stringify(clientUrl)});
+const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
+const args = process.argv.slice(2);
+if (args.includes("models")) { console.log("fake-model"); process.exit(0); }
+const dirs = args.flatMap((arg, index) => arg === "--add-dir" ? [args[index + 1]] : []);
+const configDir = dirs.find((dir) => { try { return readFileSync(dir + "/.agents/mcp_config.json", "utf8"); } catch { return false; } });
+if (!configDir) throw new Error("bridge config not found");
+const config = JSON.parse(readFileSync(configDir + "/.agents/mcp_config.json", "utf8"));
+const server = config.mcpServers["pi-agy-tools"];
+const client = new Client({ name: "catalog-test", version: "1" }, { capabilities: {} });
+const transport = new StreamableHTTPClientTransport(new URL(server.serverUrl), { requestInit: { headers: server.headers } });
+await client.connect(transport);
+const listed = await client.listTools();
+writeFileSync(${JSON.stringify(assertionFile)}, JSON.stringify(listed.tools.map((tool) => tool.name)));
+await client.close();
+const expiry = setTimeout(() => process.exit(0), 5000);
+expiry.unref();
+const input = createInterface({ input: process.stdin });
+for await (const _line of input) {
+  console.log(JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "ok", conversation_id: "catalog-test" } }));
+}
+`;
+  const fake = path.join(bin, "agy");
+  await writeFile(fake, script);
+  await chmod(fake, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "pi-agy-registration-workspace-"));
+  try {
+    return await fn(workspace);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+}
+
+const registrationReadTool = {
+  name: "read_file",
+  description: "Read a file",
+  parameters: Type.Object({ path: Type.String() }),
+};
+const registrationWriteTool = {
+  name: "write_file",
+  description: "Write a file",
+  parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+};
+const registrationSelfTool = {
+  name: "askantigravity",
+  description: "Delegate to agy",
+  parameters: Type.Object({ prompt: Type.String() }),
+};
+
+type CapturedProviderStream = { result: () => Promise<{ stopReason?: string }> };
+type CapturedProvider = {
+  streamSimple?: (
+    model: { id: string },
+    context: { messages: ProviderTranscriptMessage[] },
+    options?: object,
+  ) => CapturedProviderStream;
+};
+
+async function runRegisteredCatalogScenario(withOptions: boolean): Promise<string[]> {
+  const privateRoot = await mkdtemp(path.join(os.tmpdir(), "pi-agy-registration-"));
+  const assertionFile = path.join(privateRoot, "listed-tools.json");
+  try {
+    return await withFakePersistentAgy(assertionFile, async (workspace) => {
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(workspace);
+        return await withIsolatedAgentDir(async () => {
+          const providers: CapturedProvider[] = [];
+          const fakePi = {
+            registerCommand: () => {},
+            registerTool: () => {},
+            registerProvider: (_name: string, config: CapturedProvider) => providers.push(config),
+          };
+          piAgyExtension(fakePi as unknown as ExtensionAPI);
+          const provider = providers[0];
+          assert.ok(provider?.streamSimple);
+          type RegistrationTranscriptMessage = ProviderTranscriptMessage & {
+            timestamp: number;
+            toolsAdded?: object[];
+            toolsRemoved?: Array<{ name: string }>;
+          };
+          const messages: RegistrationTranscriptMessage[] = [
+            { role: "system", content: "test", timestamp: 0, toolsAdded: [registrationReadTool, registrationWriteTool, registrationSelfTool] },
+            { role: "user", content: "inspect", timestamp: 1 },
+            { role: "system", content: "", timestamp: 2, toolsRemoved: [{ name: registrationWriteTool.name }] },
+          ];
+          try {
+            const stream = provider!.streamSimple!({ id: "gemini-3-8-flash" }, { messages }, withOptions ? {} : undefined);
+            const completed = await withTimeout(stream.result(), 3_000);
+            assert.equal(completed.stopReason, "stop");
+          } finally {
+            await closeProviderDrivers();
+          }
+          return JSON.parse(await readFile(assertionFile, "utf8")) as string[];
+        });
+      } finally {
+        process.chdir(previousCwd);
+      }
+    });
+  } finally {
+    await rm(privateRoot, { recursive: true, force: true });
+  }
+}
+
+describe("provider registration active tool catalog", () => {
+  it("advertises transcript tools without stream options and omits removed/self-delegation tools", async () => {
+    const names = await runRegisteredCatalogScenario(false);
+    assert.ok(names.includes("read_file"));
+    assert.ok(!names.includes("write_file"));
+    assert.ok(!names.includes("askantigravity"));
+  });
+
+  it("advertises the same active catalog when stream options are supplied", async () => {
+    const names = await runRegisteredCatalogScenario(true);
+    assert.ok(names.includes("read_file"));
+    assert.ok(!names.includes("write_file"));
+    assert.ok(!names.includes("askantigravity"));
   });
 });
 

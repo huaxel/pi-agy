@@ -1,0 +1,32 @@
+[
+  {
+    "hostVersion": "0.87.1",
+    "base": "node_modules/@earendil-works/pi-coding-agent",
+    "bundleMarkers": [
+      {
+        "file": "dist/bundle/chunks/chunk-OJP47DM6.js",
+        "marker": "parseCommaParts(post)",
+        "offset": 1885819,
+        "context": "p.length-1]+=\"{\"+body+\"}\";let postParts=parseCommaParts(post);return post.length&&(p[p.length-1]+=postParts.shift(),p.push.apply(p,postParts)),parts.push.apply(parts,p),parts}functi"
+      },
+      {
+        "file": "dist/bundle/chunks/chunk-OJP47DM6.js",
+        "marker": "function parseCommaParts(",
+        "offset": 1885618,
+        "context": "tern,\",\").replace(escPeriodPattern,\".\")}function parseCommaParts(str2){if(!str2)return[\"\"];let parts=[],m2=balanced(\"{\",\"}\",str2);if(!m2)return str2.split(\",\");let{pre,body,post}=m2,p=p"
+      }
+    ]
+  },
+  {
+    "hostVersion": "1.5.2",
+    "base": "/Users/juanbenjumea/dotfiles/pi/agent/install/releases/1.5.2/node_modules/@earendil-works/pi-coding-agent",
+    "bundleMarkers": [
+      {
+        "file": "dist/bundle/chunks/chunk-VEJDBY3O.js",
+        "marker": "function parseCommaParts(",
+        "offset": 1265226,
+        "context": "<items.length;i++)target.push(items[i])}function parseCommaParts(str2){let parts=[],carry=\"\";for(;;){let m=balanced(\"{\",\"}\",str2);if(!m){let tail=str2.split(\",\");return tail[0]=carry+ta"
+      }
+    ]
+  }
+]

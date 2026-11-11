@@ -1,0 +1,317 @@
+--- a/extensions/lib/provider.ts
++++ b/extensions/lib/provider.ts
+@@ -776,27 +776,20 @@
+           const thinking = (output.content[thinkingIndex] as { thinking: string }).thinking;
+           stream.push({ type: "thinking_end", contentIndex: thinkingIndex, content: thinking, partial: output });
+         }
+-        if (textIndex === -1) {
+-          // No live deltas arrived: the terminal response (if any) is the
+-          // answer — never answer empty when agy produced text.
+-          const index = ensureText();
+-          const fallback =
+-            result.text ||
+-            (result.activity.length > 0 ? result.activity.join("\n") : "(agy returned no text)");
+-          (output.content[index] as { text: string }).text = fallback;
+-          stream.push({ type: "text_end", contentIndex: index, content: fallback, partial: output });
+-        } else {
+-          const block = output.content[textIndex];
+-          let finalText = (block as { text: string }).text;
+-          if (result.truncated) finalText += "\n\n[truncated: agy response exceeded the provider cap]";
+-          if (result.deniedActions && result.deniedActions.length > 0) {
+-            finalText += `\n\n[warning: agy reported ${result.deniedActions.length} denied action(s) alongside this response]`;
+-          }
+-          if (result.aborted) finalText += "\n\n[note: turn cancelled — response is partial]";
+-          else if (result.timedOut) finalText += "\n\n[note: turn timed out — response is partial]";
+-          (block as { text: string }).text = finalText;
+-          stream.push({ type: "text_end", contentIndex: textIndex, content: finalText, partial: output });
++        const index = textIndex === -1 ? ensureText() : textIndex;
++        const block = output.content[index] as { text: string };
++        // The terminal result is authoritative; activity and the empty-result
++        // fallback supply content only when that result has no answer.
++        let finalText = result.text ||
++          (result.activity.length > 0 ? result.activity.join("\n") : "(agy returned no text)");
++        if (result.truncated) finalText += "\n\n[truncated: agy response exceeded the provider cap]";
++        if (result.deniedActions && result.deniedActions.length > 0) {
++          finalText += `\n\n[warning: agy reported ${result.deniedActions.length} denied action(s) alongside this response]`;
+         }
++        if (result.aborted) finalText += "\n\n[note: turn cancelled — response is partial]";
++        else if (result.timedOut) finalText += "\n\n[note: turn timed out — response is partial]";
++        block.text = finalText;
++        stream.push({ type: "text_end", contentIndex: index, content: finalText, partial: output });
+ 
+         output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+         // Partial turns must never masquerade as clean stops: surface the
+--- a/extensions/lib/provider-driver.ts
++++ b/extensions/lib/provider-driver.ts
+@@ -562,7 +562,11 @@
+     }
+     // The terminal response is authoritative when present (identical final
+     // text to the per-turn runner); streamed deltas already reached the UI.
+-    const text = result.response_complete && result.response ? result.response : turn.text;
++    let text = result.response_complete && result.response ? result.response : turn.text;
++    if (text.length > MAX_TURN_TEXT_CHARS) {
++      text = text.slice(0, MAX_TURN_TEXT_CHARS);
++      turn.truncated = true;
++    }
+     this.settleDone(turn, { text });
+   }
+ 
+--- a/tests/provider.test.ts
++++ b/tests/provider.test.ts
+@@ -313,7 +313,150 @@
+     });
+   });
+ });
++
++describe("provider terminal response reconciliation", () => {
++  it("replaces streamed prefixes and corrected drafts with the terminal answer", async () => {
++    await withIsolatedAgentDir(async () => {
++      for (const [draft, terminal] of [["prefix ", "prefix plus terminal"], ["draft text", "corrected final"]]) {
++        const factory = createRecordingFactory();
++        const streamSimple = createAgyStreamSimple(factory, {
++          entries: [...FALLBACK_PROVIDER_MODELS],
++          runner: makeStaticRunner(async ({ callbacks }) => {
++            callbacks?.onText?.(draft);
++            return { text: terminal, truncated: false, activity: [] };
++          }),
++        });
++        const start = factory.events.length;
++        streamSimple({ id: "gemini-3-8-flash" }, [userMessage("answer")], {});
++        await waitForStreamEnd(factory, start);
++        const textEnd = factory.events.find((event) => event.type === "text_end") as { content: string };
++        const done = factory.events.find((event) => event.type === "done") as {
++          message: { content: Array<{ type: string; text?: string }> };
++        };
++        assert.equal(textEnd.content, terminal);
++        assert.equal(done.message.content.find((block) => block.type === "text")?.text, terminal);
++      }
++    });
++  });
++
++  it("uses activity or empty fallback instead of a stale live draft", async () => {
++    await withIsolatedAgentDir(async () => {
++      for (const activity of [["terminal activity"], []]) {
++        const factory = createRecordingFactory();
++        const streamSimple = createAgyStreamSimple(factory, {
++          entries: [...FALLBACK_PROVIDER_MODELS],
++          runner: makeStaticRunner(async ({ callbacks }) => {
++            callbacks?.onText?.("stale live draft");
++            return { text: "", truncated: false, activity };
++          }),
++        });
++        const start = factory.events.length;
++        streamSimple({ id: "gemini-3-8-flash" }, [userMessage("answer")], {});
++        await waitForStreamEnd(factory, start);
++        const expected = activity.length > 0 ? activity.join("\n") : "(agy returned no text)";
++        const textEnd = factory.events.find((event) => event.type === "text_end") as { content: string };
++        const done = factory.events.find((event) => event.type === "done") as {
++          message: { content: Array<{ type: string; text?: string }> };
++        };
++        assert.equal(textEnd.content, expected);
++        assert.equal(done.message.content.find((block) => block.type === "text")?.text, expected);
++        assert.doesNotMatch(textEnd.content, /stale live draft/);
++      }
++    });
++  });
+ 
++  it("keeps terminal annotations and stop reasons identical for live and no-live results", async () => {
++    const cases = [
++      { name: "truncated", truncated: true, expected: "stop", note: "[truncated: agy response exceeded the provider cap]" },
++      { name: "denied", deniedActions: [{ action: "write" }], expected: "stop", note: "[warning: agy reported 1 denied action(s) alongside this response]" },
++      { name: "aborted", aborted: true, expected: "aborted", note: "[note: turn cancelled — response is partial]" },
++      { name: "timed out", timedOut: true, expected: "length", note: "[note: turn timed out — response is partial]" },
++      { name: "aborted precedence", aborted: true, timedOut: true, expected: "aborted", note: "[note: turn cancelled — response is partial]" },
++    ];
++    await withIsolatedAgentDir(async () => {
++      for (const live of [false, true]) {
++        for (const testCase of cases) {
++          const factory = createRecordingFactory();
++          const streamSimple = createAgyStreamSimple(factory, {
++            entries: [...FALLBACK_PROVIDER_MODELS],
++            runner: makeStaticRunner(async ({ callbacks }) => {
++              if (live) callbacks?.onText?.("provisional draft");
++              return { text: "terminal answer", truncated: false, activity: [], ...testCase };
++            }),
++          });
++          const start = factory.events.length;
++          streamSimple({ id: "gemini-3-8-flash" }, [userMessage(testCase.name)], {});
++          await waitForStreamEnd(factory, start);
++          const textEnd = factory.events.find((event) => event.type === "text_end") as { content: string };
++          const done = factory.events.find((event) => event.type === "done") as {
++            reason: string;
++            message: { stopReason: string; content: Array<{ type: string; text?: string }> };
++          };
++          const expected = `terminal answer\n\n${testCase.note}`;
++          assert.equal(textEnd.content, expected);
++          assert.equal(done.message.content.find((block) => block.type === "text")?.text, expected);
++          assert.equal(done.reason, testCase.expected);
++          assert.equal(done.message.stopReason, testCase.expected);
++        }
++      }
++    });
++  });
++
++  it("reconciles through the real pi-ai async iterable and result", async () => {
++    await withIsolatedAgentDir(async () => {
++      const { createAssistantMessageEventStream } = await import("@earendil-works/pi-ai");
++      for (const [liveText, terminalText] of [["live draft", "authoritative terminal"], ["same answer", "same answer"]]) {
++        const controller = new AbortController();
++        const streamSimple = createAgyStreamSimple(
++          {
++            createStream: () => {
++              const real = createAssistantMessageEventStream();
++              const push = (real.push as (event: unknown) => void).bind(real);
++              return Object.assign(real, { push: (event: Record<string, unknown>) => push(event) });
++            },
++            getSystemPrompt: () => "",
++          },
++          {
++            entries: [...FALLBACK_PROVIDER_MODELS],
++            runner: makeStaticRunner(async ({ callbacks }) => {
++              callbacks?.onText?.(liveText);
++              return { text: terminalText, truncated: false, activity: [] };
++            }),
++          },
++        );
++        const stream = streamSimple({ id: "gemini-3-8-flash" }, [userMessage("answer")], { signal: controller.signal });
++        let timer: ReturnType<typeof setTimeout> | undefined;
++        try {
++          const operation = (async () => {
++            const events: Array<{ type: string; contentIndex?: number; content?: string; message?: { content: Array<{ type: string; text?: string }> } }> = [];
++            for await (const event of stream as unknown as AsyncIterable<typeof events[number]>) events.push(event);
++            const result = await (stream as unknown as { result(): Promise<{ content: Array<{ type: string; text?: string }> }> }).result();
++            return { events, result };
++          })();
++          const guard = new Promise<never>((_, reject) => {
++            timer = setTimeout(() => reject(new Error("timed out waiting for real provider stream")), 1_000);
++          });
++          const { events, result } = await Promise.race([operation, guard]);
++          const starts = events.filter((event) => event.type === "text_start");
++          const ends = events.filter((event) => event.type === "text_end");
++          assert.equal(starts.length, 1);
++          assert.equal(ends.length, 1);
++          assert.equal(starts[0].contentIndex, ends[0].contentIndex);
++          assert.equal(ends[0].content, terminalText);
++          const done = events.find((event) => event.type === "done");
++          assert.equal(done?.message?.content.find((block) => block.type === "text")?.text, terminalText);
++          assert.equal(result.content.find((block) => block.type === "text")?.text, terminalText);
++        } catch (error) {
++          controller.abort();
++          throw error;
++        } finally {
++          if (timer !== undefined) clearTimeout(timer);
++        }
++      }
++    });
++  });
++});
++
+ async function waitForStreamEnd(factory: { events: Array<Record<string, unknown>> }, start: number): Promise<void> {
+   const deadline = Date.now() + 1_000;
+   while (!factory.events.slice(start).some((event) => event.type === "__end")) {
+@@ -383,16 +526,20 @@
+     const deliveries: Array<{ callId: string; text: string; isError: boolean }> = [];
+     let resumes = 0;
+     const runner: ProviderTurnRunner = {
+-      run: async () => ({
+-        kind: "parked" as const,
+-        park: { callId: "park-1", toolName: "read", args: { path: "/tmp/x" } },
+-      }),
+-      resume: async (got) => {
++      run: async ({ callbacks }) => {
++        callbacks?.onText?.("pre-tool commentary");
++        return {
++          kind: "parked" as const,
++          park: { callId: "park-1", toolName: "read", args: { path: "/tmp/x" } },
++        };
++      },
++      resume: async (got, callbacks) => {
+         resumes += 1;
+         deliveries.push(...got);
++        callbacks?.onText?.("resumed draft");
+         return {
+           kind: "done" as const,
+-          result: { text: "file says hi", truncated: false, conversationId: "conv-r", activity: [] },
++          result: { text: "authoritative resumed answer", truncated: false, conversationId: "conv-r", activity: [] },
+         };
+       },
+       cancel: () => {},
+@@ -402,15 +549,20 @@
+       runner,
+       tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
+     });
++    const parkedStart = factory.events.length;
+     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("read the file")], {});
+-    await new Promise((resolve) => setTimeout(resolve, 50));
++    await waitForStreamEnd(factory, parkedStart);
+     const parkedTypes = factory.events.map((event) => event.type);
+     assert.ok(parkedTypes.includes("toolcall_start"));
+     assert.ok(parkedTypes.includes("toolcall_end"));
+     const parkedDone = factory.events.find((event) => event.type === "done") as unknown as {
+       reason: string;
+-      message: { stopReason: string; content: Array<{ type: string; id: string; name: string }> };
++      message: { stopReason: string; content: Array<{ type: string; id: string; name: string; text?: string }> };
+     };
++    const parkedContentSnapshot = structuredClone(parkedDone.message.content);
++    assert.equal(parkedDone.message.content.find((block) => block.type === "text")?.text, "pre-tool commentary");
++    const parkedToolCall = parkedDone.message.content.find((block) => block.type === "toolCall");
++    assert.ok(parkedToolCall);
+     assert.equal(parkedDone.reason, "toolUse");
+     assert.equal(parkedDone.message.stopReason, "toolUse");
+     const toolCall = parkedDone.message.content.find((block) => block.type === "toolCall");
+@@ -419,6 +571,7 @@
+ 
+     // Next Pi turn delivers the tool result: the suspended turn resumes on
+     // the same handler instance.
++    const resumeStart = factory.events.length;
+     streamSimple(
+       { id: "gemini-3-8-flash" },
+       [
+@@ -429,17 +582,27 @@
+       ],
+       {},
+     );
+-    await new Promise((resolve) => setTimeout(resolve, 50));
++    await waitForStreamEnd(factory, resumeStart);
+     assert.equal(resumes, 1);
++    assert.deepEqual(parkedDone.message.content, parkedContentSnapshot);
++    const resumedEvents = factory.events.slice(resumeStart);
++    const resumedTextEnd = resumedEvents.find((event) => event.type === "text_end") as { content: string };
++    assert.equal(resumedTextEnd.content, "authoritative resumed answer");
++    assert.doesNotMatch(resumedTextEnd.content, /pre-tool commentary|resumed draft/);
+     // Deliveries carry the bridge park id (what agy waits on), matched via
+     // the shadow toolCall id (what Pi's transcript carries).
+     assert.deepEqual(deliveries, [{ callId: "park-1", text: "file says hi", isError: false }]);
+     const dones = factory.events.filter((event) => event.type === "done") as unknown as Array<{
+       reason: string;
++      message?: { content: Array<{ type: string; text?: string }> };
+     }>;
+     assert.deepEqual(
+       dones.map((done) => done.reason),
+       ["toolUse", "stop"],
++    );
++    assert.equal(
++      dones[1].message?.content.find((block) => block.type === "text")?.text,
++      "authoritative resumed answer",
+     );
+     });
+   });
+--- a/tests/provider-driver.test.ts
++++ b/tests/provider-driver.test.ts
+@@ -218,6 +218,16 @@
+       // authoritative for the final text.
+       assert.deepEqual(seen, ["live-1 "]);
+       assert.equal(expectDone(outcome).text, "turn-response");
++    });
++  });
++
++  it("caps an oversized authoritative terminal response", async () => {
++    await withPersistentFakeAgy(async (controls) => {
++      await controls.setResponse("x".repeat(512_001));
++      const driver = track(new AgyProviderDriver());
++      const outcome = expectDone(await driver.turn({ ...profile, dir: await tempDir() }, turnOptions()));
++      assert.equal(outcome.text.length, 512_000);
++      assert.equal(outcome.truncated, true);
+     });
+   });
+ 

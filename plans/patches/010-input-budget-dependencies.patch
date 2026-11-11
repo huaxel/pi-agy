@@ -1,0 +1,455 @@
+--- a/README.md
++++ b/README.md
+@@ -43,6 +43,14 @@
+ 
+ Do not install `@estebanforge/pi-antigravity-bridge` alongside this package: both register the `antigravity` provider and `/agy` command.
+ 
++### Bridge input limits
++
++Authenticated bridge POSTs retain a **1 MiB UTF-8 body cap** and allow at most **10,000 object properties plus array elements** across the entire parsed JSON-RPC body, including metadata, with at most **64 container levels** (root container = level 1). Scalar string content counts toward bytes, not structural elements. Overly wide/deep requests return HTTP **413** before SDK validation, session allocation or tool parking; oversized byte streams retain the existing connection-close behavior. Authentication and localhost Host checks happen first, but authentication alone is not a complexity budget.
++
++The bridge uses the SDK's low-level `Server`, not the high-level `McpServer` tool validator, so it enforces these local structural limits rather than relying on `maxToolInputElements`. These are defensive input bounds, not a guarantee against all resource exhaustion.
++
++The SDK dependency floor is `^1.32.2`; the repository lock qualifies SDK 1.32.2, Zod 4.6.7 and body-parser 2.4.0. A library consumer resolves its own dependency graph: the SDK still permits older Zod through `^3.25 || ^4.0`, and overrides in this package would not enforce a consumer's resolutions. Audit the actual consumer tree; a patched repository lock is not a universal downstream security guarantee.
++
+ ## Configuration
+ 
+ Optional file: `$PI_CODING_AGENT_DIR/agy-config.json` (default `~/.pi/agent/agy-config.json`). For example:
+--- /dev/null
++++ b/extensions/lib/bridge-input-budget.ts
+@@ -0,0 +1,37 @@
++/** Limits for the complete parsed bridge request, including JSON-RPC metadata. */
++export const MAX_BRIDGE_INPUT_ELEMENTS = 10_000;
++export const MAX_BRIDGE_INPUT_DEPTH = 64;
++
++/**
++ * Bounds structure before SDK validation. Input must come from JSON.parse:
++ * this is not schema validation or a walker for arbitrary JS accessors/proxies.
++ * Count object properties and array slots; only containers contribute depth.
++ * The root container has depth 1. Strings remain subject to the byte reader.
++ */
++export function isBridgeInputWithinBudget(value: unknown): boolean {
++  if (value === null || typeof value !== "object") return true;
++  const pending: Array<{ node: object; depth: number }> = [{ node: value, depth: 1 }];
++  let elements = 0;
++  while (pending.length > 0) {
++    const { node, depth } = pending.pop()!;
++    const array = Array.isArray(node);
++    if (array) {
++      // Refuse wide arrays before reading or queuing any of their children.
++      elements += node.length;
++      if (elements > MAX_BRIDGE_INPUT_ELEMENTS) return false;
++    }
++    // Do not allocate Object.entries/values or flatten all descendants.
++    for (const key in node) {
++      if (!Object.hasOwn(node, key)) continue;
++      if (!array && ++elements > MAX_BRIDGE_INPUT_ELEMENTS) return false;
++      const child = (node as Record<string, unknown>)[key];
++      if (child !== null && typeof child === "object") {
++        if (depth >= MAX_BRIDGE_INPUT_DEPTH) return false;
++        // Every queued child is charged to an already-counted property/slot:
++        // the worklist cannot exceed the finite element budget.
++        pending.push({ node: child, depth: depth + 1 });
++      }
++    }
++  }
++  return true;
++}
+--- a/extensions/lib/provider-mcp.ts
++++ b/extensions/lib/provider-mcp.ts
+@@ -34,6 +34,7 @@
+ } from "@modelcontextprotocol/sdk/types.js";
+ 
+ import { getDefaultConfigPath } from "./config.js";
++import { isBridgeInputWithinBudget } from "./bridge-input-budget.js";
+ import { checkAgyUsage, formatAgyUsage } from "./cli.js";
+ import {
+   FALLBACK_PROVIDER_MODELS,
+@@ -817,6 +818,14 @@
+         res.writeHead(400).end();
+         return;
+       }
++      // The SDK receives a pre-parsed body, bypassing its own body reader.
++      // Bound structure before even resolving/allocating an MCP session.
++      if (!isBridgeInputWithinBudget(body)) {
++        res.writeHead(413, { "Content-Type": "application/json" }).end(JSON.stringify({
++          error: "Request structure exceeds bridge limits",
++        }));
++        return;
++      }
+       const resolved = await resolveTransport(req, body);
+       if (!resolved) {
+         res.writeHead(req.headers["mcp-session-id"] ? 404 : 503).end();
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,15 +1,15 @@
+ {
+   "name": "@juanbenjumea/pi-agy",
+-  "version": "0.7.6",
++  "version": "0.7.9",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "@juanbenjumea/pi-agy",
+-      "version": "0.7.6",
+-      "license": "MIT",
+-      "dependencies": {
+-        "@modelcontextprotocol/sdk": "^1.31.0"
++      "version": "0.7.9",
++      "license": "MIT",
++      "dependencies": {
++        "@modelcontextprotocol/sdk": "^1.32.2"
+       },
+       "devDependencies": {
+         "@earendil-works/pi-ai": "^0.87.1",
+@@ -2554,9 +2554,9 @@
+       }
+     },
+     "node_modules/@modelcontextprotocol/sdk": {
+-      "version": "1.31.0",
+-      "resolved": "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.31.0.tgz",
+-      "integrity": "sha512-UvTMgnNlnIBO/22ob2RcVGDlcvOslQs8T59+FTGdA0L27a39fdGF/EDETNtDVK4DZGpwomlsYpRdA8UXcVL/pw==",
++      "version": "1.32.2",
++      "resolved": "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.32.2.tgz",
++      "integrity": "sha512-SWsVtH/0vULSQStoZ6xxH2K09Li8fXYTMC64ZeogCdpZ3XSi1eCPOByV1OpuJxuI3OcmHhosDWYyii07tpPsLw==",
+       "license": "MIT",
+       "dependencies": {
+         "@hono/node-server": "^1.19.9 || ^2.0.5",
+@@ -2865,18 +2865,18 @@
+       }
+     },
+     "node_modules/body-parser": {
+-      "version": "2.3.0",
+-      "resolved": "https://registry.npmjs.org/body-parser/-/body-parser-2.3.0.tgz",
+-      "integrity": "sha512-2cGmJupaNgg+QUwVLAucDuWuoMZ6EX9iHDRswZ5lsNYEmwPaRknMPCLZz07yTzVq/83p4o/wzbDZbBrTvGGTIw==",
++      "version": "2.4.0",
++      "resolved": "https://registry.npmjs.org/body-parser/-/body-parser-2.4.0.tgz",
++      "integrity": "sha512-Ifk1KcLrxaGt1occQagQNFNNOqRt1LFuehEnHHzB8Z6cRgIxRU1TBaiIsUiCdA+gy5PL7Y1IX31DNKkRmxtXjQ==",
+       "license": "MIT",
+       "dependencies": {
+         "bytes": "^3.1.2",
+-        "content-type": "^2.0.0",
++        "content-type": "^2.1.0",
+         "debug": "^4.4.3",
+         "http-errors": "^2.0.1",
+-        "iconv-lite": "^0.7.2",
++        "iconv-lite": "^0.7.3",
+         "on-finished": "^2.4.1",
+-        "qs": "^6.15.2",
++        "qs": "^6.16.1",
+         "raw-body": "^3.0.2",
+         "type-is": "^2.1.0"
+       },
+@@ -4028,9 +4028,9 @@
+       }
+     },
+     "node_modules/qs": {
+-      "version": "6.16.0",
+-      "resolved": "https://registry.npmjs.org/qs/-/qs-6.16.0.tgz",
+-      "integrity": "sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA==",
++      "version": "6.17.1",
++      "resolved": "https://registry.npmjs.org/qs/-/qs-6.17.1.tgz",
++      "integrity": "sha512-jd3COkaKVgGUW+ZHyEHCG9bH7RoaaiWuMgzsIBjUMVjLAaWGWpoUAVwljVvBHxRu/2qEHnadLGZrkutYUBPQJA==",
+       "license": "BSD-3-Clause",
+       "dependencies": {
+         "es-define-property": "^1.0.1",
+@@ -4451,9 +4451,9 @@
+       }
+     },
+     "node_modules/zod": {
+-      "version": "4.6.5",
+-      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.5.tgz",
+-      "integrity": "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==",
++      "version": "4.6.7",
++      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz",
++      "integrity": "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==",
+       "license": "MIT",
+       "funding": {
+         "url": "https://github.com/sponsors/colinhacks"
+--- a/package.json
++++ b/package.json
+@@ -66,6 +66,6 @@
+     "node": ">=20.3.0"
+   },
+   "dependencies": {
+-    "@modelcontextprotocol/sdk": "^1.31.0"
++    "@modelcontextprotocol/sdk": "^1.32.2"
+   }
+ }
+--- /dev/null
++++ b/tests/bridge-input-budget.test.ts
+@@ -0,0 +1,117 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import {
++  isBridgeInputWithinBudget,
++  MAX_BRIDGE_INPUT_DEPTH,
++  MAX_BRIDGE_INPUT_ELEMENTS,
++} from "../extensions/lib/bridge-input-budget.js";
++
++function chain(depth: number, kind: "array" | "object" | "mixed"): unknown {
++  let value: unknown = null;
++  for (let i = 0; i < depth; i++) {
++    value = kind === "array" || (kind === "mixed" && i % 2 === 0) ? [value] : { child: value };
++  }
++  return value;
++}
++
++// Independent, intentionally recursive reference: only small generated trees,
++// never production request trees. Each child contributes one property/slot.
++function reference(value: unknown): { elements: number; depth: number; nodes: number } {
++  if (value === null || typeof value !== "object") return { elements: 0, depth: 0, nodes: 1 };
++  const children = Object.values(value).map(reference);
++  return {
++    elements: children.length + children.reduce((sum, child) => sum + child.elements, 0),
++    depth: 1 + Math.max(0, ...children.map((child) => child.depth)),
++    nodes: 1 + children.reduce((sum, child) => sum + child.nodes, 0),
++  };
++}
++
++describe("bridge input budget", () => {
++  it("keeps the approved fixed policy", () => {
++    assert.equal(MAX_BRIDGE_INPUT_ELEMENTS, 10_000);
++    assert.equal(MAX_BRIDGE_INPUT_DEPTH, 64);
++  });
++
++  it("does not count scalar content as structure", () => {
++    for (const value of [null, true, false, 0, -1, "", "€".repeat(180_000), [], {}]) {
++      assert.equal(isBridgeInputWithinBudget(value), true);
++    }
++  });
++
++  it("bounds array slots at exactly 10000", () => {
++    const value = Array(10_000).fill(null);
++    assert.equal(isBridgeInputWithinBudget(value), true);
++    value.push(null);
++    assert.equal(isBridgeInputWithinBudget(value), false);
++  });
++
++  it("bounds own object properties at exactly 10000", () => {
++    const value: Record<string, unknown> = Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [String(i), null]));
++    assert.equal(isBridgeInputWithinBudget(value), true);
++    value.extra = null;
++    assert.equal(isBridgeInputWithinBudget(value), false);
++  });
++
++  it("shares one budget across nested containers and wrapper properties", () => {
++    const left = Array(4999).fill(null);
++    const right = Array(4999).fill(null);
++    const value = { left, right }; // 2 properties + 9998 array slots
++    assert.equal(isBridgeInputWithinBudget(value), true);
++    right.push(null);
++    assert.equal(isBridgeInputWithinBudget(value), false);
++  });
++
++  it("counts empty containers toward depth but not as extra elements", () => {
++    for (const kind of ["array", "object", "mixed"] as const) {
++      assert.equal(isBridgeInputWithinBudget(chain(64, kind)), true, kind);
++      assert.equal(isBridgeInputWithinBudget(chain(65, kind)), false, kind);
++    }
++    let value: unknown = {};
++    for (let i = 1; i < 64; i++) value = [value];
++    assert.equal(isBridgeInputWithinBudget(value), true);
++    assert.equal(isBridgeInputWithinBudget([value]), false);
++  });
++
++  it("counts prototype-like and Unicode own keys from parsed JSON", () => {
++    const value = JSON.parse('{"__proto__":null,"constructor":null,"toString":null,"hasOwnProperty":null,"":null,"2":null,"é":null}') as Record<string, unknown>;
++    const padding = Array(9992).fill(null);
++    value.padding = padding; // 8 own keys + 9992 slots
++    assert.equal(isBridgeInputWithinBudget(value), true);
++    padding.push(null);
++    assert.equal(isBridgeInputWithinBudget(value), false);
++  });
++
++  it("agrees with a bounded mixed-tree oracle at both policy frontiers", () => {
++    const leaves = [null, 7, "✓", {}, []];
++    let cases = 0;
++    for (const kind of ["array", "object", "mixed"] as const) {
++      for (let width = 0; width <= 3; width++) {
++        for (let depth = 0; depth <= 7; depth++) {
++          for (const [leafIndex, leaf] of leaves.entries()) {
++            let shape: unknown = leaf;
++            for (let i = 0; i < depth; i++) {
++              const children = [shape, ...Array(width).fill(leaf)];
++              shape = kind === "array" || (kind === "mixed" && i % 2 === 0)
++                ? children
++                : Object.fromEntries(children.map((child, j) => [`key${j}`, child]));
++            }
++            const stats = reference(shape);
++            const label = `${kind}/width=${width}/depth=${depth}/leaf=${leafIndex}`;
++            assert.ok(stats.depth <= 8 && stats.nodes <= 100, `generator domain: ${label}`);
++            const padding = Array(10_000 - 2 - stats.elements).fill(null);
++            const boundary = { shape, padding };
++            assert.equal(isBridgeInputWithinBudget(boundary), true, `element boundary: ${label}`);
++            padding.push(null);
++            assert.equal(isBridgeInputWithinBudget(boundary), false, `element overflow: ${label}`);
++            let deep = shape;
++            for (let i = stats.depth; i < 64; i++) deep = [deep];
++            assert.equal(isBridgeInputWithinBudget(deep), true, `depth boundary: ${label}`);
++            assert.equal(isBridgeInputWithinBudget([deep]), false, `depth overflow: ${label}`);
++            cases++;
++          }
++        }
++      }
++    }
++    assert.equal(cases, 480);
++  });
++});
+--- a/tests/provider-mcp.test.ts
++++ b/tests/provider-mcp.test.ts
+@@ -5,6 +5,7 @@
+ import { afterEach, describe, it } from "node:test";
+ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
++import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+ 
+ import { BRIDGE_TOKEN_HEADER, startMcpBridge, type McpBridgeHandle } from "../extensions/lib/provider-mcp.js";
+ 
+@@ -302,6 +303,145 @@
+     });
+   });
+ 
++  it("rejects complex initialization before allocating an MCP session", async (t) => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startMcpBridge(dir, { sessionCap: 1 });
++      assert.ok(handle);
++      handles.push(handle);
++      const token = await readToken(handle.configDir);
++      const delegated = t.mock.method(StreamableHTTPServerTransport.prototype, "handleRequest");
++      // Valid metadata with benign values: not a constrained-array error amplifier.
++      const body = JSON.stringify({
++        jsonrpc: "2.0", id: 1, method: "initialize",
++        params: {
++          protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "raw", version: "1" },
++          _meta: { padding: Array(10_000).fill(null) },
++        },
++      });
++      assert.ok(Buffer.byteLength(body) < 1024 * 1024);
++      const response = await fetch(handle.url, {
++        method: "POST",
++        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", [BRIDGE_TOKEN_HEADER]: token },
++        body, signal: AbortSignal.timeout(10_000),
++      });
++      await response.arrayBuffer();
++      assert.equal(response.status, 413);
++      assert.equal(delegated.mock.callCount(), 0, "refused input must not reach the SDK transport");
++      // No pending/session slot was consumed before the refusal.
++      const fresh = await connectClient(handle.url, token);
++      try {
++        assert.equal((await fresh.listTools()).tools.length, 5);
++      } finally {
++        await fresh.close();
++      }
++    });
++  });
++
++  it("bounds complete tool requests while preserving strings and session recovery", async () => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startBridge(dir);
++      handle.setTools([{ name: "budget_probe", piName: "budget_probe", description: "Safe marker", inputSchema: { type: "object" } }]);
++      let calls = 0;
++      handle.setParkHandler((park) => {
++        calls++;
++        return handle.completePark(park.callId, { text: "budget-ok", isError: false });
++      });
++      const token = await readToken(handle.configDir);
++      const transport = new StreamableHTTPClientTransport(new URL(handle.url), {
++        requestInit: { headers: { [BRIDGE_TOKEN_HEADER]: token } },
++      });
++      const client = new Client({ name: "budget-client", version: "1" }, { capabilities: {} });
++      await client.connect(transport);
++      assert.ok(transport.sessionId);
++      const headers = {
++        "content-type": "application/json", accept: "application/json, text/event-stream",
++        [BRIDGE_TOKEN_HEADER]: token, "mcp-session-id": transport.sessionId,
++      };
++      let id = 10;
++      const call = async (args: Record<string, unknown>): Promise<{ status: number; text: string }> => {
++        const body = JSON.stringify({ jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "budget_probe", arguments: args } });
++        assert.ok(Buffer.byteLength(body) < 1024 * 1024, "all structural cases fit the byte limit");
++        const response = await fetch(handle.url, { method: "POST", headers, body, signal: AbortSignal.timeout(10_000) });
++        return { status: response.status, text: await response.text() };
++      };
++      try {
++        // 4 envelope keys + 2 params keys + 1 arguments key + 9993 slots.
++        const items = Array(9993).fill(null);
++        const exact = await call({ items });
++        assert.equal(exact.status, 200);
++        assert.match(exact.text, /budget-ok/);
++        assert.equal(calls, 1);
++        items.push(null);
++        const wide = await call({ items });
++        assert.equal(wide.status, 413);
++        assert.equal(wide.text, '{"error":"Request structure exceeds bridge limits"}');
++        assert.equal(calls, 1, "over-budget input must not park a tool");
++        let nested: unknown = null;
++        for (let i = 0; i < 61; i++) nested = [nested];
++        // Envelope/params/arguments are the first 3 container levels.
++        assert.equal((await call({ nested })).status, 200);
++        assert.equal(calls, 2);
++        assert.equal((await call({ nested: [nested] })).status, 413);
++        assert.equal(calls, 2, "over-depth input must not park a tool");
++        const largeString = await call({ content: "€".repeat(180_000) });
++        assert.equal(largeString.status, 200);
++        assert.match(largeString.text, /budget-ok/);
++        assert.equal(calls, 3);
++        assert.equal((await client.listTools()).tools.length, 6);
++        assert.match(JSON.stringify(await client.callTool({ name: "budget_probe", arguments: {} })), /budget-ok/);
++        assert.equal(calls, 4);
++        const deleted = await fetch(handle.url, { method: "DELETE", headers, signal: AbortSignal.timeout(10_000) });
++        assert.equal(deleted.status, 200);
++        await deleted.arrayBuffer();
++      } finally {
++        await client.close();
++      }
++      const [freshA, freshB] = await Promise.all([connectClient(handle.url, token), connectClient(handle.url, token)]);
++      try {
++        assert.equal((await freshA.listTools()).tools.length, 6);
++        assert.equal((await freshB.listTools()).tools.length, 6);
++      } finally {
++        await Promise.all([freshA.close(), freshB.close()]);
++      }
++    });
++  });
++
++  it("checks authentication and Host before structure and keeps malformed JSON at 400", async (t) => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startBridge(dir);
++      const token = await readToken(handle.configDir);
++      const delegated = t.mock.method(StreamableHTTPServerTransport.prototype, "handleRequest");
++      const body = JSON.stringify({ padding: Array(10_000).fill(null) });
++      const unsigned = await fetch(handle.url, {
++        method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(10_000),
++      });
++      await unsigned.arrayBuffer();
++      assert.equal(unsigned.status, 403);
++      const { request } = await import("node:http");
++      const target = new URL(handle.url);
++      const foreignHost = await new Promise<number>((resolve, reject) => {
++        const req = request({
++          host: "127.0.0.1", port: Number(target.port), path: target.pathname, method: "POST",
++          headers: { host: "foreign.invalid:80", "content-type": "application/json", [BRIDGE_TOKEN_HEADER]: token },
++          signal: AbortSignal.timeout(10_000),
++        }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
++        req.on("error", reject);
++        req.end(body);
++      });
++      assert.equal(foreignHost, 403);
++      const malformed = await fetch(handle.url, {
++        method: "POST", headers: { "content-type": "application/json", [BRIDGE_TOKEN_HEADER]: token },
++        body: "not-json", signal: AbortSignal.timeout(10_000),
++      });
++      await malformed.arrayBuffer();
++      assert.equal(malformed.status, 400);
++      assert.equal(delegated.mock.callCount(), 0);
++    });
++  });
++
+   it("rejects oversized bodies", async () => {
+     await withIsolatedAgentDir(async () => {
+       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));

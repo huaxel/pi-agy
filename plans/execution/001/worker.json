@@ -1,0 +1,38 @@
+{
+  "worker": "luna-baseline-001",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 51214,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-001.9lr2PJ/worktree",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/001/worker-events.log",
+  "plan": "001",
+  "state": "complete",
+  "original_pid": 29833,
+  "revision_log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/001/worker-revision2-events.log",
+  "verification_worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-baseline.vTbjT8/checkout",
+  "revision1_pid": 47839,
+  "verdict": "APPROVE",
+  "revisions": 2,
+  "evidence": "plans/evidence/001-dependency-baseline.md",
+  "reviewerVerification": {
+    "node": "22.23.4",
+    "npm": "10.9.9",
+    "tests": {
+      "total": 305,
+      "pass": 305,
+      "fail": 0
+    },
+    "typecheck": 0,
+    "pack": 0,
+    "auditExit": 1,
+    "auditPackageEntries": {
+      "high": 3,
+      "moderate": 5
+    },
+    "platform": "macOS"
+  },
+  "remainingRisks": [
+    "SDK/Zod validation-memory reachability unresolved",
+    "Linux CI fresh install not executed"
+  ],
+  "pendingWorkOrQuestions": false
+}

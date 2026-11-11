@@ -1,0 +1,23 @@
+{
+  "checks": {
+    "all-74-files-match-reviewed-stack": true,
+    "installed-dependency-tree-preserved": true,
+    "head-unchanged-no-commit": true,
+    "staging-empty": true,
+    "diff-whitespace-clean": true,
+    "exactly-reviewed-tracked-changes": true,
+    "three-reviewed-new-source-files": true,
+    "resolutions:exit0": true,
+    "full-test:exit0": true,
+    "typecheck:exit0": true,
+    "pack-check:exit0": true,
+    "341-tests-no-failures-or-skips": true,
+    "no-missing-required-package-paths": true
+  },
+  "dependencyFingerprintAfterVerification": {
+    "sha256": "69b05c838d84c021afebbbc1562c39909c31bc413d9df7dbe1d7b4aa2dc5a143",
+    "entries": 33428
+  },
+  "installedLockDriftCount": 36,
+  "qualification": "original gate used preserved installed graph; clean locked-install proof belongs to isolated010"
+}

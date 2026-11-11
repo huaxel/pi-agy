@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 
 import { resetPreflightCache, runPreflight } from "../extensions/lib/preflight.js";
 import { readFakeAgyArgs, withFakeAgy } from "./helpers.js";
+import { awaitNativeTurn, awaitWithWatchdog, withTimingFakeAgy, type FakeChild } from "./timing-helpers.js";
 
 /**
  * Fake agy with a stateful `models` probe: sleeps past the 10s preflight
@@ -92,18 +93,106 @@ describe("preflight cold-start retry", () => {
   });
 
   it("keeps the health retry inside the remaining timeout budget", async () => {
-    await withSlowModelsFake(10, async () => {
+    resetPreflightCache();
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preflight-"));
+    let modelAttempts = 0;
+    let firstAttempt!: () => void;
+    let secondAttempt!: () => void;
+    let firstClosed!: () => void;
+    let firstChild: FakeChild | undefined;
+    let secondChild: FakeChild | undefined;
+    const first = new Promise<void>((resolve) => { firstAttempt = resolve; });
+    const second = new Promise<void>((resolve) => { secondAttempt = resolve; });
+    const closed = new Promise<void>((resolve) => { firstClosed = resolve; });
+    mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000 });
+    try {
+      await withTimingFakeAgy({
+        hangModels: true,
+        onSpawn: (args, child) => {
+          if (args[0] !== "models") return;
+          modelAttempts++;
+          if (modelAttempts === 1) firstChild = child;
+          if (modelAttempts === 2) secondChild = child;
+          if (modelAttempts === 1) firstAttempt();
+          if (modelAttempts === 2) secondAttempt();
+        },
+        onClose: (args) => {
+          if (args[0] === "models" && modelAttempts === 1) firstClosed();
+        },
+      }, async (_children, signal, track) => {
+        const pending = track(runPreflight(dir, signal, 12_000));
+        let settled = false;
+        const outcome = pending.then(
+          () => { settled = true; return { status: "fulfilled" as const }; },
+          (error: unknown) => { settled = true; return { status: "rejected" as const, error }; },
+        );
+        await awaitWithWatchdog(first, "first preflight attempt");
+        assert.equal(firstChild?.killRequested, false);
+        mock.timers.tick(10_000);
+        assert.equal(firstChild?.killRequested, true);
+        await awaitWithWatchdog(closed, "first preflight close");
+        await awaitWithWatchdog(second, "retry preflight attempt");
+        mock.timers.tick(1_999);
+        await awaitNativeTurn("preflight pending-state turn");
+        assert.equal(Date.now(), 12_999);
+        assert.equal(secondChild?.killRequested, false);
+        assert.equal(settled, false, "runPreflight must still be pending at 11,999ms");
+        mock.timers.tick(1);
+        assert.equal(secondChild?.killRequested, true);
+        const final = await awaitWithWatchdog(outcome, "preflight completion");
+        assert.equal(final.status, "rejected");
+        if (final.status === "rejected") assert.match(String(final.error), /timed out/i);
+        assert.equal(modelAttempts, 2, "the remaining 1ms expires the one retry without a third attempt");
+      });
+    } finally {
+      mock.timers.reset();
       resetPreflightCache();
-      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preflight-"));
-      const started = Date.now();
-      await assert.rejects(
-        runPreflight(dir, undefined, 12_000),
-        /timed out/,
-      );
-      assert.ok(
-        Date.now() - started < 15_000,
-        "health retry exceeded the overall preflight timeout",
-      );
-    });
+    }
+  });
+
+  it("does not spawn a retry after deadline-timeout cleanup consumes the remainder", async () => {
+    resetPreflightCache();
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preflight-exhausted-"));
+    let modelAttempts = 0;
+    let firstAttempt!: () => void;
+    let firstChild: FakeChild | undefined;
+    const first = new Promise<void>((resolve) => { firstAttempt = resolve; });
+    mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000 });
+    try {
+      await withTimingFakeAgy({
+        hangModels: true,
+        killCloseDelayMs: 2_000,
+        onSpawn: (args, child) => {
+          if (args[0] === "models") {
+            firstChild = child;
+            modelAttempts++;
+            firstAttempt();
+          }
+        },
+      }, async (_children, signal, track) => {
+        const pending = track(runPreflight(dir, signal, 12_000));
+        let settled = false;
+        const outcome = pending.then(
+          () => { settled = true; return { status: "fulfilled" as const }; },
+          (error: unknown) => { settled = true; return { status: "rejected" as const, error }; },
+        );
+        await awaitWithWatchdog(first, "first exhausted attempt");
+        assert.equal(firstChild?.killRequested, false);
+        mock.timers.tick(10_000);
+        assert.equal(firstChild?.killRequested, true);
+        mock.timers.tick(1_999);
+        await awaitNativeTurn("exhausted preflight pending turn");
+        assert.equal(modelAttempts, 1, "delayed close must not create a retry before deadline");
+        assert.equal(settled, false, "cleanup delay must leave the preflight pending before deadline");
+        mock.timers.tick(1);
+        const final = await awaitWithWatchdog(outcome, "exhausted preflight");
+        assert.equal(final.status, "rejected");
+        if (final.status === "rejected") assert.match(String(final.error), /timed out/i);
+        assert.equal(modelAttempts, 1, "an exhausted deadline must spawn no second probe");
+      });
+    } finally {
+      mock.timers.reset();
+      resetPreflightCache();
+    }
   });
 });

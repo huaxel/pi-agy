@@ -1,0 +1,25 @@
+{
+  "id": "GHSA-g3hv-75wg-m249",
+  "severity": "medium",
+  "summary": "minimatch has potential denial of service via globparts amplification",
+  "vulnerabilities": [
+    {
+      "package": {
+        "ecosystem": "npm",
+        "name": "minimatch"
+      },
+      "vulnerable_version_range": ">= 7.0.0, < 11.0.1",
+      "first_patched_version": "11.0.1",
+      "vulnerable_functions": []
+    }
+  ],
+  "references": [
+    "https://github.com/isaacs/minimatch/security/advisories/GHSA-g3hv-75wg-m249",
+    "https://nvd.nist.gov/vuln/detail/CVE-2026-118764",
+    "https://github.com/isaacs/minimatch/commit/77a0f5c4b80bdc641c3c930a1d9edf5ad2db57f8",
+    "https://github.com/isaacs/minimatch/releases/tag/v11.0.1",
+    "https://github.com/isaacs/minimatch/commit/297b6c1a01f2410b3ba1ebed14ba222d0c3c1033",
+    "https://github.com/isaacs/minimatch/commit/fd0b3ab9cbc5bf1aff1c99f1f46e413c2b3340da",
+    "https://github.com/advisories/GHSA-g3hv-75wg-m249"
+  ]
+}

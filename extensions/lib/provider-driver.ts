@@ -253,29 +253,32 @@ export class AgyProviderDriver {
       throw new Error("agy provider driver has no suspended turn");
     }
     if (!this.child) throw new Error("agy provider turn lost its process while suspended");
-    turn.suspended = false;
-    this.clearSuspendedTimer(turn);
-    if (options?.onText) turn.onText = options.onText;
-    if (options?.onActivity) turn.onActivity = options.onActivity;
-    if (options?.timeoutMs !== undefined) turn.timeoutMs = options.timeoutMs;
-    if (turn.onAbort) {
-      turn.signal.removeEventListener("abort", turn.onAbort);
-      turn.onAbort = undefined;
-    }
-    if (options?.signal) {
-      turn.signal = options.signal;
-      const onAbort = (): void => {
-        if (turn.settled) return;
-        this.killChild();
-        if (turn.text) this.settleDone(turn, { aborted: true });
-        else this.settleError(turn, new Error("agy provider turn was cancelled"));
-      };
-      turn.onAbort = onAbort;
-      options.signal.addEventListener("abort", onAbort, { once: true });
-      if (options.signal.aborted) onAbort();
-    }
     return new Promise<DriverTurnEnd>((resolve, reject) => {
+      // Install the phase waiter before registering an abort listener: an
+      // already-aborted signal may settle synchronously.
       turn.phase = { resolve, reject };
+      turn.suspended = false;
+      this.clearSuspendedTimer(turn);
+      if (options?.onText) turn.onText = options.onText;
+      if (options?.onActivity) turn.onActivity = options.onActivity;
+      if (options?.timeoutMs !== undefined) turn.timeoutMs = options.timeoutMs;
+      if (turn.onAbort) {
+        turn.signal.removeEventListener("abort", turn.onAbort);
+        turn.onAbort = undefined;
+      }
+      if (options?.signal) {
+        turn.signal = options.signal;
+        const onAbort = (): void => {
+          if (turn.settled) return;
+          this.killChild();
+          if (turn.text) this.settleDone(turn, { aborted: true });
+          else this.settleError(turn, new Error("agy provider turn was cancelled"));
+        };
+        turn.onAbort = onAbort;
+        options.signal.addEventListener("abort", onAbort, { once: true });
+        if (options.signal.aborted) onAbort();
+      }
+      if (turn.settled) return;
       turn.timer = setTimeout(() => {
         // A resumed timeout kills the hung child like a fresh one: never
         // leave it running to be reused.
@@ -562,7 +565,11 @@ export class AgyProviderDriver {
     }
     // The terminal response is authoritative when present (identical final
     // text to the per-turn runner); streamed deltas already reached the UI.
-    const text = result.response_complete && result.response ? result.response : turn.text;
+    let text = result.response_complete && result.response ? result.response : turn.text;
+    if (text.length > MAX_TURN_TEXT_CHARS) {
+      text = text.slice(0, MAX_TURN_TEXT_CHARS);
+      turn.truncated = true;
+    }
     this.settleDone(turn, { text });
   }
 

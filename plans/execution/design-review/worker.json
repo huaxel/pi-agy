@@ -1,0 +1,41 @@
+{
+  "worker": "luna-design-review",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 24558,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-006-yxx758z7/worktree",
+  "session": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/design-review/session.jsonl",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/design-review/final-review-events.log",
+  "output": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-006-yxx758z7/worktree/.pi/design-review.md",
+  "state": "approved",
+  "startedAt": "2026-11-11T14:42:31.520133+00:00",
+  "role": "read-only design critic; only ignored review output writable",
+  "workerExit": "COMPLETE; native stop",
+  "verdicts": {
+    "007": "APPROVE",
+    "008": "APPROVE"
+  },
+  "reviewArchive": "plans/evidence/007-008-independent-design-review.md",
+  "reportHashes": {
+    "plans/evidence/007-bridge-diagnostics-design.md": "1d61670eef0d2454f1c83cb11c99dbfde79303d9c2be3678c4848e5b7cb81c8e",
+    "plans/evidence/008-provider-usage-design.md": "aa7388332438739e859e59d3557d34bad81e24f8bd4ccd1db605e49145d489bf"
+  },
+  "reviewedAt": "2026-11-11T15:00:43.970967+00:00",
+  "sourceUnchanged": true,
+  "baselineReused": "plans/execution/006/independent-checks.json",
+  "conditionalArithmetic": {
+    "parks": [
+      0,
+      0
+    ],
+    "terminal": 125,
+    "nativeTotalDelta": 75,
+    "previousPiTotal": 420,
+    "newPiTotal": 545,
+    "semanticsVerified": false
+  },
+  "pendingQuestions": false,
+  "priorPid": 13944,
+  "priorLog": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/design-review/worker-events.log",
+  "recheckStartedAt": "2026-11-11T14:56:50.226511+00:00",
+  "finalRecheck": "APPROVE007; prior008approval confirmed"
+}

@@ -1,0 +1,42 @@
+{
+  "worker": "luna-plan-002-process-tree",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 85640,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-002-d6w16nm9/worktree",
+  "session": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/002/session.jsonl",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/002/worker-revision1-events.log",
+  "plan": "002",
+  "scope": [
+    "extensions/lib/spawn.ts",
+    "tests/regression.test.ts"
+  ],
+  "state": "complete",
+  "revision": 1,
+  "deadline_minutes": 45,
+  "prior_pids": [
+    58771
+  ],
+  "prior_logs": [
+    "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/002/worker-events.log"
+  ],
+  "verdict": "APPROVE",
+  "executorStatus": "STOPPED",
+  "pendingWorkOrQuestions": false,
+  "evidence": "plans/evidence/002-process-tree-review.md",
+  "patch": "plans/patches/002-process-tree.patch",
+  "reviewerChecks": {
+    "node": "22.23.4",
+    "tests": {
+      "total": 307,
+      "pass": 307,
+      "fail": 0
+    },
+    "focused": {
+      "total": 6,
+      "pass": 6
+    },
+    "typecheck": 0,
+    "pack": 0
+  },
+  "appliedToOriginal": false
+}

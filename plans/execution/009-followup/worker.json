@@ -1,0 +1,36 @@
+{
+  "worker": "luna-009-followup",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 59086,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/timing",
+  "integration_worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+  "session": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/009-followup/session.jsonl",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/009-followup/review1-events.log",
+  "state": "approved",
+  "reviewRound": 1,
+  "startedAt": "2026-11-11T13:09:56.833938+00:00",
+  "scope": [
+    "tests/execution.test.ts",
+    "tests/preflight.test.ts",
+    "tests/timing-helpers.ts",
+    "tests/provider-driver.test.ts"
+  ],
+  "inputPatch": "plans/patches/009-timing-tests-partial.patch",
+  "userAuthorization": "Explicit ask_user selection: Start fresh Pi/Luna worker",
+  "priorPid": 17672,
+  "priorLog": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/009-followup/worker-events.log",
+  "revisionStartedAt": "2026-11-11T13:20:25.704666+00:00",
+  "reviewVerdict": "APPROVE",
+  "reviewReport": "plans/evidence/009-timing-followup-review.md",
+  "proposalPatch": "plans/patches/009-timing-tests.patch",
+  "proposalPatchSha256": "98a0d48a971e19cb4c6528ff89530cbc7f92f6d34c9baffd91139982aa013f51",
+  "independentChecks": "plans/execution/009-followup/independent-checks.json",
+  "reviewedAt": "2026-11-11T13:30:27.942644+00:00",
+  "pendingQuestions": false,
+  "workerExit": "COMPLETE; native stop",
+  "gate": {
+    "base": "309/309; typecheck and pack exit0",
+    "exact003plus009": "314/314 twice consecutively; typecheck and pack exit0",
+    "focused": "8/8 five runs; affected66/66; consumers97/97"
+  }
+}

@@ -1,0 +1,512 @@
+diff --git a/extensions/lib/provider-mcp.ts b/extensions/lib/provider-mcp.ts
+index 83597bd..98ba617 100644
+--- a/extensions/lib/provider-mcp.ts
++++ b/extensions/lib/provider-mcp.ts
+@@ -217,6 +217,8 @@ interface CatalogCache {
+ 
+ export interface StartMcpBridgeOptions {
+   escalateAfterMs?: number;
++  sessionCap?: number;
++  sessionIdleMs?: number;
+ }
+ 
+ /**
+@@ -230,12 +232,6 @@ export async function startMcpBridge(
+   const token = randomBytes(32).toString("hex");
+   const escalateAfterMs = options?.escalateAfterMs ?? DEFAULT_PARK_ESCALATE_MS;
+   let catalogCache: CatalogCache | undefined;
+-
+-  const mcp = new McpServer(
+-    { name: "pi-agy-bridge", version: "1" },
+-    { capabilities: { tools: {} } },
+-  );
+-
+   let bridgedTools: BridgeToolDef[] = [];
+   let parkHandler: BridgeParkHandler | undefined;
+   const parks = new Map<string, (result: BridgeToolResult) => void>();
+@@ -244,7 +240,25 @@ export async function startMcpBridge(
+     { name: string; state: "running" | "done" | "failed"; result?: BridgeToolResult; reason?: string }
+   >();
+ 
+-  mcp.setRequestHandler(ListToolsRequestSchema, () => {
++  interface BridgeSession {
++    transport: StreamableHTTPServerTransport;
++    mcp: McpServer;
++    last: number;
++    active: number;
++    parks: number;
++    closing: boolean;
++  }
++  const sessions = new Map<string, BridgeSession>();
++  const pendingSessions = new Set<BridgeSession>();
++  const parkOwners = new Map<string, BridgeSession>();
++
++  const createMcpServer = (session: BridgeSession): McpServer => {
++    const mcp = new McpServer(
++      { name: "pi-agy-bridge", version: "1" },
++      { capabilities: { tools: {} } },
++    );
++
++    mcp.setRequestHandler(ListToolsRequestSchema, () => {
+     const skills = scanSkills(dir);
+     return {
+       tools: [
+@@ -410,8 +424,10 @@ export async function startMcpBridge(
+         }
+         let escalateTimer: NodeJS.Timeout | undefined;
+         let didEscalate = false;
++        let settled = false;
+         const parked = await new Promise<BridgeToolResult | undefined>((resolve) => {
+           parks.set(callId, (res) => {
++            settled = true;
+             if (escalateTimer) clearTimeout(escalateTimer);
+             if (didEscalate) {
+               const record = escalations.get(callId);
+@@ -423,6 +439,8 @@ export async function startMcpBridge(
+               resolve(res);
+             }
+           });
++          session.parks += 1;
++          parkOwners.set(callId, session);
+           let accepted = false;
+           try {
+             accepted = handler({ callId, toolName: bridged.piName, args: callArgs });
+@@ -431,9 +449,14 @@ export async function startMcpBridge(
+           }
+           if (!accepted) {
+             parks.delete(callId);
++            if (parkOwners.get(callId) === session) {
++              parkOwners.delete(callId);
++              session.parks = Math.max(0, session.parks - 1);
++            }
+             resolve(undefined);
+             return;
+           }
++          if (settled) return;
+           // Early-ack escalation: if the tool runs longer than escalateAfterMs,
+           // settle the MCP request with STILL RUNNING so agy avoids its 180s timeout.
+           escalateTimer = setTimeout(() => {
+@@ -467,18 +490,100 @@ export async function startMcpBridge(
+     }
+   });
+ 
+-  // Stateful: one transport serves many agy sessions, routed by the
+-  // session id header. The default (no generator) is stateless and rejects
+-  // any second request on the same transport.
+-  const transport = new StreamableHTTPServerTransport({
+-    sessionIdGenerator: () => randomUUID(),
+-  });
++    return mcp;
++  };
++
++  let stopping = false;
++  const sessionCap = Number.isFinite(options?.sessionCap) && (options?.sessionCap ?? 16) > 0 ? Math.floor(options?.sessionCap ?? 16) : 16;
++  const sessionIdleMs = Number.isFinite(options?.sessionIdleMs) && (options?.sessionIdleMs ?? 300_000) > 0 ? options?.sessionIdleMs ?? 300_000 : 300_000;
++  const closeSession = async (id: string, session: BridgeSession) => {
++    if (sessions.get(id) !== session) return;
++    sessions.delete(id);
++    session.closing = true;
++    for (const [callId, owner] of parkOwners) {
++      if (owner !== session) continue;
++      parkOwners.delete(callId);
++      session.parks = Math.max(0, session.parks - 1);
++      const resolve = parks.get(callId);
++      parks.delete(callId);
++      resolve?.({ text: "MCP session closed.", isError: true });
++      const escalation = escalations.get(callId);
++      if (escalation?.state === "running") {
++        escalation.state = "failed";
++        escalation.reason = "MCP session closed.";
++      }
++    }
++    await session.transport.close().catch(() => undefined);
++    await session.mcp.close().catch(() => undefined);
++  };
++  const sweep = setInterval(() => {
++    const now = Date.now();
++    for (const [id, session] of sessions) {
++      if (session.active === 0 && session.parks === 0 && now - session.last >= sessionIdleMs) void closeSession(id, session);
++    }
++  }, Math.max(50, Math.min(sessionIdleMs, 60_000)));
++  sweep.unref();
++
+   const configDir = allocateBridgeConfigDir();
+   // Filled after bind; the request handler validates Host against it
+   // (defense-in-depth against DNS rebinding past the loopback bind).
+   const bound = { port: 0 };
+   const http = createServer((req, res) => {
+-    void handleBridgeRequest(req, res, transport, token, bound.port).catch(() => {
++    void handleBridgeRequest(req, res, token, bound.port, async (request, body) => {
++      const requested = request.headers["mcp-session-id"];
++      if (typeof requested === "string") {
++        const session = sessions.get(requested);
++        if (!session) return undefined;
++        session.last = Date.now();
++        session.active += 1;
++        return { transport: session.transport, session };
++      }
++      if (!body || typeof body !== "object" || (body as { method?: string }).method !== "initialize") return undefined;
++      if (stopping || sessions.size + pendingSessions.size >= sessionCap) return undefined;
++      let removeSession = (): void => undefined;
++      let session!: BridgeSession;
++      const transport = new StreamableHTTPServerTransport({
++        sessionIdGenerator: () => randomUUID(),
++        onsessioninitialized: (id) => {
++          pendingSessions.delete(session);
++          if (!stopping && !session.closing) sessions.set(id, session);
++        },
++        onsessionclosed: () => removeSession(),
++      });
++      session = { transport, mcp: undefined as never, last: Date.now(), active: 1, parks: 0, closing: false };
++      session.mcp = createMcpServer(session);
++      pendingSessions.add(session);
++      removeSession = () => {
++        const id = session.transport.sessionId;
++        if (id) void closeSession(id, session);
++        else {
++          pendingSessions.delete(session);
++          session.closing = true;
++          void session.transport.close().catch(() => undefined);
++          void session.mcp.close().catch(() => undefined);
++        }
++      };
++      session.transport.onclose = removeSession;
++      try {
++        await session.mcp.connect(session.transport);
++        return { transport: session.transport, session };
++      } catch {
++        await session.transport.close().catch(() => undefined);
++        await session.mcp.close().catch(() => undefined);
++        return undefined;
++      }
++    }, (session) => {
++      const id = session.transport.sessionId;
++      if (id && sessions.get(id) === session) return;
++      pendingSessions.delete(session);
++      if (id && !session.closing && !stopping) {
++        sessions.set(id, session);
++      } else if (!session.closing) {
++        session.closing = true;
++        void session.transport.close().catch(() => undefined);
++        void session.mcp.close().catch(() => undefined);
++      }
++    }).catch(() => {
+       // handleBridgeRequest guards every response path; this is unreachable
+       // belt-and-braces so a client error can never crash Pi.
+       if (!res.headersSent) {
+@@ -512,9 +617,14 @@ export async function startMcpBridge(
+       }
+     }
+     if (parks.size === 0) return;
+-    const pending = [...parks.values()];
++    const pending = [...parks.entries()];
+     parks.clear();
+-    for (const resolve of pending) {
++    for (const [callId, resolve] of pending) {
++      const owner = parkOwners.get(callId);
++      if (owner) {
++        parkOwners.delete(callId);
++        owner.parks = Math.max(0, owner.parks - 1);
++      }
+       try {
+         resolve({ text: message, isError: true });
+       } catch {
+@@ -524,6 +634,12 @@ export async function startMcpBridge(
+   };
+ 
+   const completePark = (callId: string, result: BridgeToolResult): boolean => {
++    const owner = parkOwners.get(callId);
++    if (owner) {
++      parkOwners.delete(callId);
++      owner.parks = Math.max(0, owner.parks - 1);
++      owner.last = Date.now();
++    }
+     const esc = escalations.get(callId);
+     if (esc && esc.state === "running") {
+       esc.state = "done";
+@@ -543,17 +659,16 @@ export async function startMcpBridge(
+   };
+ 
+   const stop = async (): Promise<void> => {
++    stopping = true;
+     failAllParks("Pi tool bridge stopped.");
+-    try {
+-      await transport.close();
+-    } catch {
+-      // Best effort.
+-    }
+-    try {
+-      await mcp.close();
+-    } catch {
+-      // Best effort.
++    clearInterval(sweep);
++    await Promise.all([...sessions].map(([id, session]) => closeSession(id, session)));
++    for (const session of pendingSessions) {
++      session.closing = true;
++      await session.transport.close().catch(() => undefined);
++      await session.mcp.close().catch(() => undefined);
+     }
++    pendingSessions.clear();
+     // close() alone waits out keep-alive/SSE sockets; destroy them and
+     // bound the wait so session shutdown can never hang on a lingerer.
+     try {
+@@ -584,7 +699,6 @@ export async function startMcpBridge(
+     const address = http.address();
+     const port = typeof address === "object" && address ? address.port : 0;
+     if (!port) throw new Error("bridge bound no port");
+-    await mcp.connect(transport);
+     await writeBridgeConfig(configDir, port, token);
+     bound.port = port;
+     return {
+@@ -654,9 +768,10 @@ async function readBody(req: IncomingMessage): Promise<{ body?: unknown; tooLarg
+ async function handleBridgeRequest(
+   req: IncomingMessage,
+   res: ServerResponse,
+-  transport: StreamableHTTPServerTransport,
+   token: string,
+   port: number,
++  resolveTransport: (req: IncomingMessage, body?: unknown) => Promise<{ transport: StreamableHTTPServerTransport; session: { transport: StreamableHTTPServerTransport; mcp: McpServer; last: number; active: number; parks: number; closing: boolean } } | undefined>,
++  registerSession: (session: { transport: StreamableHTTPServerTransport; mcp: McpServer; last: number; active: number; parks: number; closing: boolean }) => void,
+ ): Promise<void> {
+   try {
+     const url = new URL(req.url ?? "/", "http://127.0.0.1");
+@@ -702,10 +817,32 @@ async function handleBridgeRequest(
+         res.writeHead(400).end();
+         return;
+       }
+-      await transport.handleRequest(req, res, body);
++      const resolved = await resolveTransport(req, body);
++      if (!resolved) {
++        res.writeHead(req.headers["mcp-session-id"] ? 404 : 503).end();
++        return;
++      }
++      try {
++        await resolved.transport.handleRequest(req, res, body);
++      } finally {
++        resolved.session.active -= 1;
++        resolved.session.last = Date.now();
++        const id = resolved.transport.sessionId;
++        registerSession(resolved.session as { transport: StreamableHTTPServerTransport; mcp: McpServer; last: number; active: number; parks: number; closing: boolean });
++      }
++      return;
++    }
++    const resolved = await resolveTransport(req);
++    if (!resolved) {
++      res.writeHead(req.headers["mcp-session-id"] ? 404 : 400).end();
+       return;
+     }
+-    await transport.handleRequest(req, res);
++    try {
++      await resolved.transport.handleRequest(req, res);
++    } finally {
++      resolved.session.active -= 1;
++      resolved.session.last = Date.now();
++    }
+   } catch {
+     if (!res.headersSent) {
+       try {
+diff --git a/tests/provider-mcp.test.ts b/tests/provider-mcp.test.ts
+index ffe0217..2b7acd3 100644
+--- a/tests/provider-mcp.test.ts
++++ b/tests/provider-mcp.test.ts
+@@ -92,6 +92,181 @@ describe("MCP bridge", () => {
+     });
+   });
+ 
++  it("accepts fresh clients after an earlier MCP initialization", async () => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startBridge(dir);
++      const token = await readToken(handle.configDir);
++      const clientA = await connectClient(handle.url, token);
++      try {
++        assert.equal((await clientA.listTools()).tools.length, 5);
++      } finally {
++        await clientA.close();
++      }
++      const clientB = await connectClient(handle.url, token);
++      try {
++        assert.equal((await clientB.listTools()).tools.length, 5);
++        const sessions = (await clientB.callTool({ name: "agy_sessions_list", arguments: { dir } })) as {
++          content: Array<{ text: string }>;
++        };
++        assert.match(sessions.content[0].text, /No agy conversations recorded/);
++      } finally {
++        await clientB.close();
++      }
++
++      const [clientC, clientD] = await Promise.all([
++        connectClient(handle.url, token),
++        connectClient(handle.url, token),
++      ]);
++      try {
++        assert.equal((await clientC.listTools()).tools.length, 5);
++        assert.equal((await clientD.listTools()).tools.length, 5);
++      } finally {
++        await Promise.all([clientC.close(), clientD.close()]);
++      }
++    });
++  });
++
++  it("bounds sessions and reclaims idle slots", async () => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: 50 });
++      assert.ok(handle);
++      handles.push(handle);
++      const token = await readToken(handle.configDir);
++      const malformed = await fetch(handle.url, {
++        method: "POST",
++        headers: { "content-type": "application/json", [BRIDGE_TOKEN_HEADER]: token },
++        body: "not-json",
++      });
++      assert.equal(malformed.status, 400);
++      await malformed.arrayBuffer();
++      const unknown = await fetch(handle.url, {
++        method: "POST",
++        headers: { "content-type": "application/json", [BRIDGE_TOKEN_HEADER]: token, "mcp-session-id": "unknown" },
++        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
++      });
++      assert.equal(unknown.status, 404);
++      await unknown.arrayBuffer();
++      const clientA = await connectClient(handle.url, token);
++      await assert.rejects(connectClient(handle.url, token), /503|Service Unavailable|Streamable HTTP error/);
++      await clientA.close();
++      await new Promise((resolve) => setTimeout(resolve, 100));
++      const clientB = await connectClient(handle.url, token);
++      try {
++        assert.equal((await clientB.listTools()).tools.length, 5);
++      } finally {
++        await clientB.close();
++      }
++    });
++  });
++
++  it("reuses a capped slot after explicit MCP termination", async () => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startMcpBridge(dir, { sessionCap: 1 });
++      assert.ok(handle);
++      handles.push(handle);
++      const token = await readToken(handle.configDir);
++      const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", [BRIDGE_TOKEN_HEADER]: token };
++      const initBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "raw", version: "1" } } });
++      const first = await fetch(handle.url, { method: "POST", headers, body: initBody });
++      assert.equal(first.status, 200);
++      const sessionId = first.headers.get("mcp-session-id");
++      assert.ok(sessionId);
++      await first.arrayBuffer();
++      const terminated = await fetch(handle.url, { method: "DELETE", headers: { [BRIDGE_TOKEN_HEADER]: token, "mcp-session-id": sessionId } });
++      assert.equal(terminated.status, 200);
++      await terminated.arrayBuffer();
++      const second = await fetch(handle.url, { method: "POST", headers, body: initBody });
++      assert.equal(second.status, 200);
++      await second.arrayBuffer();
++    });
++  });
++
++  it("serializes concurrent initialization at the session cap", async () => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startMcpBridge(dir, { sessionCap: 1 });
++      assert.ok(handle);
++      handles.push(handle);
++      const token = await readToken(handle.configDir);
++      const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
++      const responses = await Promise.all(Array.from({ length: 4 }, () => fetch(handle.url, {
++        method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", [BRIDGE_TOKEN_HEADER]: token }, body,
++      })));
++      const statuses = responses.map((response) => response.status).sort((a, b) => a - b);
++      await Promise.all(responses.map((response) => response.arrayBuffer()));
++      assert.deepEqual(statuses, [200, 503, 503, 503]);
++    });
++  });
++
++  it("releases synchronous completed parks before accepting the callback", async () => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: 60, escalateAfterMs: 10 });
++      assert.ok(handle);
++      handles.push(handle);
++      handle.setTools([{ name: "instant", piName: "instant", description: "Instant", inputSchema: { type: "object" } }]);
++      let completed = false;
++      handle.setParkHandler((park) => {
++        completed = handle.completePark(park.callId, { text: "instant", isError: false });
++        return true;
++      });
++      const token = await readToken(handle.configDir);
++      const client = await connectClient(handle.url, token);
++      try {
++        const result = (await client.callTool({ name: "instant", arguments: {} })) as { content: Array<{ text: string }> };
++        assert.equal(completed, true);
++        assert.equal(result.content[0].text, "instant");
++      } finally {
++        await client.close();
++      }
++      await new Promise((resolve) => setTimeout(resolve, 150));
++      const fresh = await connectClient(handle.url, token);
++      await fresh.close();
++    });
++  });
++
++  it("keeps a raw HTTP escalated park alive past idle expiry", async () => {
++    await withIsolatedAgentDir(async () => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
++      const handle = await startMcpBridge(dir, { sessionIdleMs: 60, escalateAfterMs: 10 });
++      assert.ok(handle);
++      handles.push(handle);
++      handle.setTools([{ name: "slow", piName: "slow", description: "Slow", inputSchema: { type: "object" } }]);
++      let parked: { callId: string } | undefined;
++      handle.setParkHandler((park) => {
++        parked = park;
++        return true;
++      });
++      const token = await readToken(handle.configDir);
++      const baseHeaders = { "content-type": "application/json", accept: "application/json, text/event-stream", [BRIDGE_TOKEN_HEADER]: token };
++      const init = await fetch(handle.url, { method: "POST", headers: baseHeaders, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "raw", version: "1" } } }) });
++      assert.equal(init.status, 200);
++      const sessionId = init.headers.get("mcp-session-id");
++      assert.ok(sessionId);
++      await init.arrayBuffer();
++      const headers = { ...baseHeaders, "mcp-session-id": sessionId };
++      const initialized = await fetch(handle.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) });
++      assert.equal(initialized.status, 202);
++      await initialized.arrayBuffer();
++      const pending = await fetch(handle.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "slow", arguments: {} } }) });
++      assert.equal(pending.status, 200);
++      const pendingBody = await pending.text();
++      assert.match(pendingBody, /STILL RUNNING/);
++      assert.ok(parked);
++      await new Promise((resolve) => setTimeout(resolve, 120));
++      const ping = await fetch(handle.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ping" }) });
++      assert.equal(ping.status, 200);
++      await ping.arrayBuffer();
++      const poll = await fetch(handle.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "bridge_poll_result", arguments: { callId: parked.callId } } }) });
++      assert.equal(poll.status, 200);
++      await poll.arrayBuffer();
++      assert.equal(handle.completePark(parked.callId, { text: "done", isError: false }), true);
++    });
++  });
++
+   it("falls back to the bundled catalog when discovery fails", async () => {
+     await withIsolatedAgentDir(async () => {
+       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
+@@ -370,7 +545,7 @@ describe("MCP bridge", () => {
+     await withIsolatedAgentDir(async () => {
+       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
+       // Escalate quickly after 50ms for testing
+-      const handle = await startMcpBridge(dir, { escalateAfterMs: 50 });
++      const handle = await startMcpBridge(dir, { escalateAfterMs: 50, sessionIdleMs: 50 });
+       assert.ok(handle);
+       handles.push(handle);
+       handle.setTools([
+@@ -392,6 +567,9 @@ describe("MCP bridge", () => {
+         assert.match(earlyAck.content[0].text, /STILL RUNNING/);
+         assert.match(earlyAck.content[0].text, new RegExp(callIdCaptured));
+ 
++        // The HTTP request has already early-acked, but the accepted park keeps
++        // the session alive beyond its idle TTL until completion.
++        await new Promise((resolve) => setTimeout(resolve, 120));
+         // Poll before completion
+         const stillRunningPoll = (await client.callTool({
+           name: "bridge_poll_result",

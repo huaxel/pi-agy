@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import { chmod, mkdir, mkdtemp, readdir, readFile, stat as statFile, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -42,6 +43,7 @@ import { SUMMARY_CONTEXT_MAX_CHARS } from "../extensions/lib/context.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
 import { hasFlagPair, readFakeAgyArgs, withFakeAgy } from "./helpers.js";
+import { awaitNativeTurn, awaitWithWatchdog, withTimingFakeAgy } from "./timing-helpers.js";
 describe("resolveAgyMode", () => {
   it("defaults direct tool calls to accept-edits", () => {
     assert.equal(resolveAgyMode(), "accept-edits");
@@ -1033,47 +1035,54 @@ describe("shared executor", () => {
     const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
     const previousDir = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = agentDir;
-    // Emit the init record (with a conversation id), then hang past the
-    // deadline — the failure-path save must survive the aborted signal.
     const raw = JSON.stringify({
       event: "init",
       conversation_id: "timeout-conv",
       init: { model: "fake" },
     });
+    mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000 });
+    let pending: Promise<unknown> | undefined;
+    let taskChild: import("./timing-helpers.js").FakeChild | undefined;
     try {
-      await withFakeAgy(
-        raw,
-        async () => {
-          resetPreflightCache();
-          await assert.rejects(
-            executeAgyTask(
-              {
-                prompt: "hang after starting",
-                mode: "plan",
-                dir: process.cwd(),
-                timeout_ms: 3_000,
-                new_session: true,
-                stream: true,
-              },
-              undefined,
-            ),
-            /timed out.*conversation "timeout-conv" was recorded.*resume with conversation_id.*\/agy continue.*\/agy sessions/s,
-          );
-          const store = JSON.parse(
-            await readFile(path.join(agentDir, "agy-sessions.json"), "utf8"),
-          );
-          const record = store[path.resolve(process.cwd())];
-          assert.ok(record, "session store has a record for the directory");
-          assert.equal(record.last_conversation_id, "timeout-conv");
-        },
-        0, // failures
-        0, // delayMs
-        "", // failureOutput
-        "", // failureConversationId
-        "{}", // usageOutput
-        60_000, // hangAfterOutputMs — far past the 1.5s budget
-      );
+      let outputReady!: () => void;
+      const ready = new Promise<void>((resolve) => { outputReady = resolve; });
+      await withTimingFakeAgy({ taskOutput: `${raw}\n`, onSpawn: (args, child) => { if (!args.includes("models") && args[0] !== "--version" && args[0] !== "--output-format") taskChild = child; }, onTaskOutput: outputReady }, async (_children, signal, track) => {
+        resetPreflightCache();
+        pending = track(executeAgyTask(
+          {
+            prompt: "hang after starting",
+            mode: "plan",
+            dir: process.cwd(),
+            timeout_ms: 3_000,
+            new_session: true,
+            stream: true,
+          },
+          signal,
+        ));
+        const rejected = assert.rejects(
+          pending,
+          /timed out.*conversation "timeout-conv" was recorded.*resume with conversation_id.*\/agy continue.*\/agy sessions/s,
+        );
+        await awaitWithWatchdog(ready, "conversation init");
+        let settled = false;
+        pending.then(() => { settled = true; }, () => { settled = true; });
+        mock.timers.tick(2_999);
+        await awaitNativeTurn("post-init pending turn");
+        assert.equal(settled, false, "post-init run must remain pending before its deadline");
+        assert.equal(taskChild?.killRequested, false);
+        mock.timers.tick(1);
+        assert.equal(taskChild?.killRequested, true);
+        await awaitWithWatchdog(rejected, "timeout persistence");
+        const store = JSON.parse(await readFile(path.join(agentDir, "agy-sessions.json"), "utf8"));
+        const record = store[path.resolve(process.cwd())];
+        assert.ok(record, "session store has a record for the directory");
+        assert.equal(record.last_conversation_id, "timeout-conv");
+      });
+    } catch (error) {
+      if (pending) await pending.catch(() => undefined);
+      throw error;
     } finally {
+      mock.timers.reset();
       if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousDir;
     }
@@ -1089,37 +1098,172 @@ describe("shared executor", () => {
       conversation_id: "observed-conv",
       init: { model: "fake" },
     });
+    mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000 });
+    let pending: Promise<unknown> | undefined;
+    let taskChild: import("./timing-helpers.js").FakeChild | undefined;
     try {
-      await withFakeAgy(
-        raw,
-        async () => {
-          resetPreflightCache();
-          await assert.rejects(
-            executeAgyTask(
-              {
-                prompt: "hang with a corrupt store",
-                mode: "plan",
-                dir: process.cwd(),
-                timeout_ms: 1_000,
-                new_session: true,
-                stream: true,
-              },
-              undefined,
-            ),
-            /conversation "observed-conv" was observed — resume with conversation_id/,
-          );
-        },
-        0,
-        0,
-        "",
-        "",
-        "{}",
-        60_000,
-      );
+      let outputReady!: () => void;
+      const ready = new Promise<void>((resolve) => { outputReady = resolve; });
+      await withTimingFakeAgy({ taskOutput: `${raw}\n`, onSpawn: (args, child) => { if (!args.includes("models") && args[0] !== "--version" && args[0] !== "--output-format") taskChild = child; }, onTaskOutput: outputReady }, async (_children, signal, track) => {
+        resetPreflightCache();
+        pending = track(executeAgyTask(
+          {
+            prompt: "hang with a corrupt store",
+            mode: "plan",
+            dir: process.cwd(),
+            timeout_ms: 1_000,
+            new_session: true,
+            stream: true,
+          },
+          signal,
+        ));
+        const rejected = assert.rejects(
+          pending,
+          /conversation "observed-conv" was observed — resume with conversation_id/,
+        );
+        await awaitWithWatchdog(ready, "observed conversation init");
+        let settled = false;
+        pending.then(() => { settled = true; }, () => { settled = true; });
+        mock.timers.tick(999);
+        await awaitNativeTurn("corrupt-store pending turn");
+        assert.equal(settled, false, "corrupt-store run must remain pending before its deadline");
+        assert.equal(taskChild?.killRequested, false);
+        mock.timers.tick(1);
+        assert.equal(taskChild?.killRequested, true);
+        await awaitWithWatchdog(rejected, "observed-id timeout");
+      });
+    } catch (error) {
+      if (pending) await pending.catch(() => undefined);
+      throw error;
     } finally {
+      mock.timers.reset();
       if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousDir;
     }
+  });
+
+  it("does not claim a conversation when the deadline precedes initialization", async () => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preinit-agent-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000 });
+    let pending: Promise<unknown> | undefined;
+    try {
+      let initReady!: () => void;
+      const ready = new Promise<void>((resolve) => { initReady = resolve; });
+      await withTimingFakeAgy({ onTaskOutput: initReady }, async (_children, signal, track) => {
+        resetPreflightCache();
+        pending = track(executeAgyTask(
+          {
+            prompt: "hang before starting",
+            mode: "plan",
+            dir: process.cwd(),
+            timeout_ms: 1_000,
+            new_session: true,
+            stream: true,
+          },
+          signal,
+        ));
+        const outcome = pending.catch((error: unknown) => error);
+        await awaitWithWatchdog(ready, "id-less initialization");
+        mock.timers.tick(999);
+        await awaitNativeTurn("pre-init pending turn");
+        mock.timers.tick(1);
+        const error = await awaitWithWatchdog(outcome, "pre-init timeout");
+        assert.ok(error instanceof Error);
+        assert.equal(error.message, "agy timed out after 1000ms");
+      });
+    } catch (error) {
+      if (pending) await pending.catch(() => undefined);
+      throw error;
+    } finally {
+      mock.timers.reset();
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+    }
+  });
+
+  it("cancels withheld readiness after the native watchdog and restores the spawn hook", async () => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-watchdog-agent-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000 });
+    const cp = createRequire(import.meta.url)("node:child_process") as {
+      spawn: (...args: unknown[]) => unknown;
+    };
+    const originalSpawn = cp.spawn;
+    let fallbackCalls = 0;
+    const fence = (..._args: unknown[]): never => {
+      fallbackCalls++;
+      throw new Error("unexpected native agy fallback");
+    };
+    cp.spawn = fence;
+    let fixtureSignal!: AbortSignal;
+    let fixtureChildren!: Set<import("./timing-helpers.js").FakeChild>;
+    let modelChild: import("./timing-helpers.js").FakeChild | undefined;
+    let modelsClosed = 0;
+    let modelsStarted!: () => void;
+    const started = new Promise<void>((resolve) => { modelsStarted = resolve; });
+    let settled = false;
+    try {
+      const failed = withTimingFakeAgy({
+        hangModels: true,
+        onSpawn: (args, child) => {
+          if (args[0] === "models") {
+            modelChild = child;
+            modelsStarted();
+          }
+        },
+        onClose: (args) => {
+          if (args[0] === "models") modelsClosed++;
+        },
+      }, async (children, signal, track) => {
+        fixtureSignal = signal;
+        fixtureChildren = children;
+        resetPreflightCache();
+        const pending = track(executeAgyTask(
+          {
+            prompt: "wait for withheld initialization",
+            mode: "plan",
+            dir: process.cwd(),
+            timeout_ms: 60_000,
+            new_session: true,
+            stream: true,
+          },
+          signal,
+        ));
+        pending.then(() => { settled = true; }, () => { settled = true; });
+        await awaitWithWatchdog(started, "models readiness", 1_000);
+        // The helper owns cancellation: the deliberate watchdog escapes this
+        // callback without manually aborting the fixture signal.
+        await awaitWithWatchdog(new Promise<void>(() => {}), "withheld readiness", 20);
+      });
+      await assert.rejects(failed, /withheld readiness watchdog expired/);
+      assert.ok(modelChild, "hanging preflight must create a real models child");
+      assert.equal(modelsClosed, 1, "fixture cleanup must close the models child");
+      assert.equal(fixtureChildren.size, 0, "fixture cleanup must empty its owned children");
+      assert.equal(settled, true, "tracked execute promise must settle during cleanup");
+      assert.equal(fixtureSignal.aborted, true, "fixture cleanup must abort its owned signal");
+      assert.equal(Date.now(), 1_000, "native watchdog cleanup must not advance virtual time");
+      assert.equal(fallbackCalls, 0, "no late retry may reach the native spawn fence");
+      assert.equal(cp.spawn, fence, "helper cleanup must restore the outer public fence");
+    } finally {
+      cp.spawn = originalSpawn;
+      mock.timers.reset();
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+      resetPreflightCache();
+    }
+  });
+
+  it("rejects cleanup when tracked work never settles", async () => {
+    await assert.rejects(
+      withTimingFakeAgy({ cleanupTimeoutMs: 20 }, async (_children, _signal, track) => {
+        track(new Promise<void>(() => {}));
+        return "callback success";
+      }),
+      /timing fixture cleanup watchdog expired/,
+    );
   });
 
   it("returns a completed response even when the run is cancelled after delivery", async () => {

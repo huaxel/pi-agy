@@ -1,0 +1,92 @@
+{
+  "baselineHashes": {
+    "extensions/lib/provider.ts": "2e4de47639a9d4bf136d015e9b7bc51b9f1bbd4e36014637c12401b2ecf0dddc",
+    "extensions/lib/provider-driver.ts": "bd96e5a108a6a371db85d7eef97935aff75b549668beb9340f32d042650dd868",
+    "tests/provider.test.ts": "fb33cc06117067b7afa6f1ae94d7d4fb9bd3e15c43c5f4a4ee736d75cf5583eb",
+    "tests/provider-driver.test.ts": "2601d79a51e0303484da08a99e1b47f5225ae6f97a8924e996d33307862f22ac"
+  },
+  "finalHashes": {
+    "extensions/lib/provider.ts": "6ea80779507d3b313bee125ba02ca9af75b812a6b2c637c49b1dd7ef111fbf7a",
+    "extensions/lib/provider-driver.ts": "ca5029bcce82b21327eabe51e9fc075c77d5e182f336524ef56ca5b05e89fb79",
+    "tests/provider.test.ts": "35eca7cdc9dfcde2bbd9c6f630445f466fdc24c3cee4abcef0a5cd9b31d26c0b",
+    "tests/provider-driver.test.ts": "8501f1a2d19c3b633c99b7bf99aa4b498a98497f89398567eaecc36e409baaec"
+  },
+  "incrementalPatchSha256": "7f9ad39134970ae7f5b47a71be3d9fffa7bac5f25f52a9371b71b6cc0364852b",
+  "nonownedPrerequisitesUnchanged": true,
+  "checks": [
+    {
+      "label": "named",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "--test-name-pattern=provider terminal response reconciliation|caps an oversized authoritative terminal response|provider tool round-trip",
+        "tests/provider.test.ts",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 8",
+        "# pass 8",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "focused",
+      "command": [
+        "node",
+        "--import",
+        "./tests/resolve-hook.mjs",
+        "--test",
+        "tests/provider.test.ts",
+        "tests/provider-driver.test.ts"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 56",
+        "# pass 56",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "tests",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "exit": 0,
+      "counts": [
+        "# tests 319",
+        "# pass 319",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0"
+      ]
+    },
+    {
+      "label": "typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "exit": 0,
+      "counts": []
+    },
+    {
+      "label": "pack",
+      "command": [
+        "npm",
+        "run",
+        "pack:check"
+      ],
+      "exit": 0,
+      "counts": []
+    }
+  ]
+}

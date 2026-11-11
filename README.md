@@ -43,6 +43,14 @@ Provider turns use a persistent agy process per working directory and can stage 
 
 Do not install `@estebanforge/pi-antigravity-bridge` alongside this package: both register the `antigravity` provider and `/agy` command.
 
+### Bridge input limits
+
+Authenticated bridge POSTs retain a **1 MiB UTF-8 body cap** and allow at most **10,000 object properties plus array elements** across the entire parsed JSON-RPC body, including metadata, with at most **64 container levels** (root container = level 1). Scalar string content counts toward bytes, not structural elements. Overly wide/deep requests return HTTP **413** before SDK validation, session allocation or tool parking; oversized byte streams retain the existing connection-close behavior. Authentication and localhost Host checks happen first, but authentication alone is not a complexity budget.
+
+The bridge uses the SDK's low-level `Server`, not the high-level `McpServer` tool validator, so it enforces these local structural limits rather than relying on `maxToolInputElements`. These are defensive input bounds, not a guarantee against all resource exhaustion.
+
+The SDK dependency floor is `^1.32.2`; the repository lock qualifies SDK 1.32.2, Zod 4.6.7 and body-parser 2.4.0. A library consumer resolves its own dependency graph: the SDK still permits older Zod through `^3.25 || ^4.0`, and overrides in this package would not enforce a consumer's resolutions. Audit the actual consumer tree; a patched repository lock is not a universal downstream security guarantee.
+
 ## Configuration
 
 Optional file: `$PI_CODING_AGENT_DIR/agy-config.json` (default `~/.pi/agent/agy-config.json`). For example:
@@ -58,6 +66,8 @@ Optional file: `$PI_CODING_AGENT_DIR/agy-config.json` (default `~/.pi/agent/agy-
 `defaultModel` sets the default for delegated tasks. `skipPermissions` controls agy's permission-bypass flag for `accept-edits` runs; set it to `false` to retain agy's checks. `providerBridge` toggles the provider's Pi-tool bridge.
 
 ## Development
+
+Development tests are qualified against the exact Pi SDK fixture version 1.5.2, which requires Node >=22.19.0; qualification ran on Node 22.23.4. The resolved development graph is qualified; embedded Undici is not independently attested.
 
 ```bash
 npm test

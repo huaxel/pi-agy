@@ -1,0 +1,33 @@
+{
+  "checks": {
+    "original:package.json:unchanged": true,
+    "accepted:package.json:unchanged": true,
+    "original:package-lock.json:unchanged": true,
+    "accepted:package-lock.json:unchanged": true,
+    "fresh-audit-8-package-entries": true,
+    "registry-sdk-1.32.2": true,
+    "registry-zod-range-still-permits-old-versions": true,
+    "actual-auth-reader-resolver-transport-order": true,
+    "inspected-sdk-version": true,
+    "low-level-tool-arguments-unknown-record": true,
+    "budget-option-on-high-level-only": true,
+    "parsed-body-bypasses-sdk-owned-reader": true,
+    "plans/README.md:balanced-fences": true,
+    "plans/README.md:local-links": true,
+    "plans/010-bound-mcp-validation-and-refresh-vulnerable-dependencies.md:balanced-fences": true,
+    "plans/010-bound-mcp-validation-and-refresh-vulnerable-dependencies.md:local-links": true,
+    "## Scope": true,
+    "## Steps": true,
+    "## Done criteria": true,
+    "## STOP conditions": true,
+    "## Planning verification and review status": true,
+    "original-tracked-tree-unchanged": true,
+    "staging-empty": true
+  },
+  "documentSha256": {
+    "plans/README.md": "9f36521824387366dc27ba11bb0161981f96f9b8c9c2886a4a7fb1da163521ca",
+    "plans/010-bound-mcp-validation-and-refresh-vulnerable-dependencies.md": "a4a76893f5ba02b158bc70c534eb5155328a707ec1be93a27e1c160e85ce7205"
+  },
+  "projectGate": "not rerun: planning-only; no source/dependency changes",
+  "independentPlanReview": "not performed; no nested Pi process launched"
+}

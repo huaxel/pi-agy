@@ -1,0 +1,279 @@
+diff --git a/extensions/index.ts b/extensions/index.ts
+index cbbeee9..12f9873 100644
+--- a/extensions/index.ts
++++ b/extensions/index.ts
+@@ -86,13 +86,11 @@ function registerAgyProvider(pi: ExtensionAPI): void {
+         streamSimple(
+           { id: model.id },
+           context.messages as unknown as ProviderTranscriptMessage[],
+-          options
+-            ? {
+-                signal: options.signal,
+-                reasoning: options.reasoning,
+-                tools: getCurrentTools(context.messages) as unknown as ProviderToolSource[],
+-              }
+-            : undefined,
++          {
++            signal: options?.signal,
++            reasoning: options?.reasoning,
++            tools: getCurrentTools(context.messages) as unknown as ProviderToolSource[],
++          },
+         ) as unknown as AssistantMessageEventStream,
+     });
+   };
+diff --git a/extensions/lib/provider.ts b/extensions/lib/provider.ts
+index 1d287e6..075be57 100644
+--- a/extensions/lib/provider.ts
++++ b/extensions/lib/provider.ts
+@@ -727,7 +727,7 @@ export function createAgyStreamSimple(
+             timeoutMs: deps.timeoutMs ?? PROVIDER_TURN_TIMEOUT_MS,
+             resumeConversationId: resume,
+             skipPermissions: deps.skipPermissions ?? true,
+-            bridgedTools: projectBridgeTools(deps.tools ?? []),
++            bridgedTools: projectBridgeTools(options?.tools ?? deps.tools ?? []),
+             callbacks,
+           });
+         }
+diff --git a/tests/provider.test.ts b/tests/provider.test.ts
+index 7bb7f04..caead58 100644
+--- a/tests/provider.test.ts
++++ b/tests/provider.test.ts
+@@ -1,5 +1,6 @@
+ import assert from "node:assert/strict";
+ import { afterEach, describe, it } from "node:test";
++import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+ 
+ import {
+   createAgyStreamSimple,
+@@ -14,10 +15,10 @@ import {
+   type ProviderTurnResult,
+   type ProviderTurnRunner,
+ } from "../extensions/lib/provider.js";
+-import { mkdtemp } from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
+ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
++import { Type } from "@sinclair/typebox";
+ import piAgyExtension from "../extensions/index.js";
+ import { withDirLock } from "../extensions/lib/lock.js";
+ import { AGY_PROVIDER_ID, closeProviderDrivers } from "../extensions/lib/provider.js";
+@@ -313,6 +314,68 @@ describe("provider streamSimple", () => {
+   });
+ });
+ 
++async function waitForStreamEnd(factory: { events: Array<Record<string, unknown>> }, start: number): Promise<void> {
++  const deadline = Date.now() + 1_000;
++  while (!factory.events.slice(start).some((event) => event.type === "__end")) {
++    if (Date.now() >= deadline) throw new Error("timed out waiting for provider stream");
++    await new Promise((resolve) => setTimeout(resolve, 5));
++  }
++}
++
++const ordinaryTool = { name: "read_file", description: "Read a file", parameters: { type: "object", properties: {} } };
++const secondTool = { name: "write_file", description: "Write a file", parameters: { type: "object", properties: {} } };
++const selfDelegationTool = { name: "askantigravity", description: "Delegate", parameters: { type: "object", properties: {} } };
++
++async function bridgedToolCatalogs(
++  invocations: Array<typeof ordinaryTool[] | undefined>,
++  depsTools?: typeof ordinaryTool[],
++): Promise<Array<Array<{ name: string; piName: string }>>> {
++  const factory = createRecordingFactory();
++  const captured: Array<Array<{ name: string; piName: string }>> = [];
++  const streamSimple = createAgyStreamSimple(factory, {
++    entries: [...FALLBACK_PROVIDER_MODELS],
++    tools: depsTools,
++    runner: makeStaticRunner(async (request) => {
++      captured.push(request.bridgedTools.map(({ name, piName }) => ({ name, piName })));
++      return { text: "ok", truncated: false, activity: [] };
++    }),
++  });
++  for (const tools of invocations) {
++    const start = factory.events.length;
++    streamSimple({ id: "gemini-3-8-flash" }, [userMessage("inspect")], tools === undefined ? undefined : { tools });
++    await waitForStreamEnd(factory, start);
++  }
++  return captured;
++}
++
++describe("provider active tool catalog", () => {
++  it("uses invocation tools, refreshes them on consecutive fresh turns, and honors an explicit empty catalog", async () => {
++    await withIsolatedAgentDir(async () => {
++      assert.deepEqual(await bridgedToolCatalogs([[ordinaryTool], [secondTool], []], [ordinaryTool]), [
++        [{ name: "read_file", piName: "read_file" }],
++        [{ name: "write_file", piName: "write_file" }],
++        [],
++      ]);
++    });
++  });
++
++  it("retains dependency tools when invocation tools are omitted", async () => {
++    await withIsolatedAgentDir(async () => {
++      assert.deepEqual(await bridgedToolCatalogs([undefined], [ordinaryTool]), [
++        [{ name: "read_file", piName: "read_file" }],
++      ]);
++    });
++  });
++
++  it("excludes the agy self-delegation tool while retaining ordinary tools", async () => {
++    await withIsolatedAgentDir(async () => {
++      assert.deepEqual(await bridgedToolCatalogs([[selfDelegationTool, ordinaryTool]]), [
++        [{ name: "read_file", piName: "read_file" }],
++      ]);
++    });
++  });
++});
++
+ describe("provider tool round-trip", () => {
+   it("emits a shadow toolUse on park and resumes on toolResult", async () => {
+     await withIsolatedAgentDir(async () => {
+@@ -672,6 +735,150 @@ describe("provider status", () => {
+   });
+ });
+ 
++async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
++  let timer: NodeJS.Timeout | undefined;
++  try {
++    return await Promise.race([
++      promise,
++      new Promise<T>((_, reject) => {
++        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
++      }),
++    ]);
++  } finally {
++    if (timer) clearTimeout(timer);
++  }
++}
++
++async function withFakePersistentAgy<T>(assertionFile: string, fn: (workspace: string) => Promise<T>): Promise<T> {
++  const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-registration-bin-"));
++  const clientUrl = import.meta.resolve("@modelcontextprotocol/sdk/client/index.js");
++  const transportUrl = import.meta.resolve("@modelcontextprotocol/sdk/client/streamableHttp.js");
++  const script = `#!/usr/bin/env node
++import { readFileSync, writeFileSync } from "node:fs";
++import { createInterface } from "node:readline";
++const { Client } = await import(${JSON.stringify(clientUrl)});
++const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
++const args = process.argv.slice(2);
++if (args.includes("models")) { console.log("fake-model"); process.exit(0); }
++const dirs = args.flatMap((arg, index) => arg === "--add-dir" ? [args[index + 1]] : []);
++const configDir = dirs.find((dir) => { try { return readFileSync(dir + "/.agents/mcp_config.json", "utf8"); } catch { return false; } });
++if (!configDir) throw new Error("bridge config not found");
++const config = JSON.parse(readFileSync(configDir + "/.agents/mcp_config.json", "utf8"));
++const server = config.mcpServers["pi-agy-tools"];
++const client = new Client({ name: "catalog-test", version: "1" }, { capabilities: {} });
++const transport = new StreamableHTTPClientTransport(new URL(server.serverUrl), { requestInit: { headers: server.headers } });
++await client.connect(transport);
++const listed = await client.listTools();
++writeFileSync(${JSON.stringify(assertionFile)}, JSON.stringify(listed.tools.map((tool) => tool.name)));
++await client.close();
++const expiry = setTimeout(() => process.exit(0), 5000);
++expiry.unref();
++const input = createInterface({ input: process.stdin });
++for await (const _line of input) {
++  console.log(JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "ok", conversation_id: "catalog-test" } }));
++}
++`;
++  const fake = path.join(bin, "agy");
++  await writeFile(fake, script);
++  await chmod(fake, 0o755);
++  const previousPath = process.env.PATH;
++  process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
++  const workspace = await mkdtemp(path.join(os.tmpdir(), "pi-agy-registration-workspace-"));
++  try {
++    return await fn(workspace);
++  } finally {
++    if (previousPath === undefined) delete process.env.PATH;
++    else process.env.PATH = previousPath;
++  }
++}
++
++const registrationReadTool = {
++  name: "read_file",
++  description: "Read a file",
++  parameters: Type.Object({ path: Type.String() }),
++};
++const registrationWriteTool = {
++  name: "write_file",
++  description: "Write a file",
++  parameters: Type.Object({ path: Type.String(), content: Type.String() }),
++};
++const registrationSelfTool = {
++  name: "askantigravity",
++  description: "Delegate to agy",
++  parameters: Type.Object({ prompt: Type.String() }),
++};
++
++type CapturedProviderStream = { result: () => Promise<{ stopReason?: string }> };
++type CapturedProvider = {
++  streamSimple?: (
++    model: { id: string },
++    context: { messages: ProviderTranscriptMessage[] },
++    options?: object,
++  ) => CapturedProviderStream;
++};
++
++async function runRegisteredCatalogScenario(withOptions: boolean): Promise<string[]> {
++  const privateRoot = await mkdtemp(path.join(os.tmpdir(), "pi-agy-registration-"));
++  const assertionFile = path.join(privateRoot, "listed-tools.json");
++  try {
++    return await withFakePersistentAgy(assertionFile, async (workspace) => {
++      const previousCwd = process.cwd();
++      try {
++        process.chdir(workspace);
++        return await withIsolatedAgentDir(async () => {
++          const providers: CapturedProvider[] = [];
++          const fakePi = {
++            registerCommand: () => {},
++            registerTool: () => {},
++            registerProvider: (_name: string, config: CapturedProvider) => providers.push(config),
++          };
++          piAgyExtension(fakePi as unknown as ExtensionAPI);
++          const provider = providers[0];
++          assert.ok(provider?.streamSimple);
++          type RegistrationTranscriptMessage = ProviderTranscriptMessage & {
++            timestamp: number;
++            toolsAdded?: object[];
++            toolsRemoved?: Array<{ name: string }>;
++          };
++          const messages: RegistrationTranscriptMessage[] = [
++            { role: "system", content: "test", timestamp: 0, toolsAdded: [registrationReadTool, registrationWriteTool, registrationSelfTool] },
++            { role: "user", content: "inspect", timestamp: 1 },
++            { role: "system", content: "", timestamp: 2, toolsRemoved: [{ name: registrationWriteTool.name }] },
++          ];
++          try {
++            const stream = provider!.streamSimple!({ id: "gemini-3-8-flash" }, { messages }, withOptions ? {} : undefined);
++            const completed = await withTimeout(stream.result(), 3_000);
++            assert.equal(completed.stopReason, "stop");
++          } finally {
++            await closeProviderDrivers();
++          }
++          return JSON.parse(await readFile(assertionFile, "utf8")) as string[];
++        });
++      } finally {
++        process.chdir(previousCwd);
++      }
++    });
++  } finally {
++    await rm(privateRoot, { recursive: true, force: true });
++  }
++}
++
++describe("provider registration active tool catalog", () => {
++  it("advertises transcript tools without stream options and omits removed/self-delegation tools", async () => {
++    const names = await runRegisteredCatalogScenario(false);
++    assert.ok(names.includes("read_file"));
++    assert.ok(!names.includes("write_file"));
++    assert.ok(!names.includes("askantigravity"));
++  });
++
++  it("advertises the same active catalog when stream options are supplied", async () => {
++    const names = await runRegisteredCatalogScenario(true);
++    assert.ok(names.includes("read_file"));
++    assert.ok(!names.includes("write_file"));
++    assert.ok(!names.includes("askantigravity"));
++  });
++});
++
+ describe("provider registration", () => {
+   it("registers antigravity picker models without breaking when discovery yields nothing", async () => {
+     await withFakeAgy(

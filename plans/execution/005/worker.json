@@ -1,0 +1,44 @@
+{
+  "worker": "luna-plan-005",
+  "plan": "005",
+  "model": "openai-codex/gpt-5.6-luna",
+  "pid": 27978,
+  "worktree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-005-35y4ci17/worktree",
+  "prerequisiteTree": "/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-009-followup-z2zktn_f/catalog-integration",
+  "prerequisitePatches": {
+    "003-tool-catalog.patch": "1783ab890124a146b8dfe643154fb98659c4a83053ed6d93bbeb15477c1d3c91",
+    "009-timing-tests.patch": "98a0d48a971e19cb4c6528ff89530cbc7f92f6d34c9baffd91139982aa013f51"
+  },
+  "session": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/005/session.jsonl",
+  "log": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/005/worker-review2-events.log",
+  "state": "approved",
+  "reviewRound": 2,
+  "startedAt": "2026-11-11T13:37:44.998443+00:00",
+  "scope": [
+    "extensions/lib/provider.ts",
+    "extensions/lib/provider-driver.ts",
+    "tests/provider.test.ts",
+    "tests/provider-driver.test.ts"
+  ],
+  "priorPid": 7488,
+  "priorLog": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/005/worker-events.log",
+  "revisionStartedAt": "2026-11-11T13:48:51.821704+00:00",
+  "priorReviewPid": 18962,
+  "priorReviewLog": "/Users/juanbenjumea/projects/pi-extensions/pi-agy/plans/execution/005/worker-review1-events.log",
+  "reviewVerdict": "APPROVE",
+  "workerExit": "COMPLETE; native stop",
+  "pendingQuestions": false,
+  "reviewedAt": "2026-11-11T13:55:51.198219+00:00",
+  "proposalPatch": "plans/patches/005-terminal-response.patch",
+  "proposalPatchSha256": "7f9ad39134970ae7f5b47a71be3d9fffa7bac5f25f52a9371b71b6cc0364852b",
+  "reviewReport": "plans/evidence/005-terminal-response-review.md",
+  "independentChecks": "plans/execution/005/independent-checks.json",
+  "checks": {
+    "named": "8/8 exit0 including cap and roundtrip",
+    "focused": "56/56 exit0",
+    "tests": "319/319 exit0",
+    "typecheck": "exit0",
+    "pack": "exit0; dry-run only",
+    "scope": "incremental4files; immutable003+009 snapshots verified"
+  }
+}

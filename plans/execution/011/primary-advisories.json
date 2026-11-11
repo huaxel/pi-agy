@@ -1,0 +1,503 @@
+[
+  {
+    "id": "GHSA-q2hr-2g5m-vwhr",
+    "summary": "brace-expansion: Quadratic-time expansion of the `{a},b}` rewrite causes CPU denial of service",
+    "severity": "medium",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 4.0.0, < 5.0.12",
+        "first_patched_version": "5.0.12",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 3.0.0, < 3.0.9",
+        "first_patched_version": "3.0.9",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 2.0.0, < 2.1.7",
+        "first_patched_version": "2.1.7",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": "< 1.1.21",
+        "first_patched_version": "1.1.21",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-09-29T23:45:39Z",
+    "references": [
+      "https://github.com/juliangruber/brace-expansion/security/advisories/GHSA-q2hr-2g5m-vwhr",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-102277",
+      "https://github.com/juliangruber/brace-expansion/commit/33a5ef17b8d800bbfa8c52b14c39043b6aac1a96",
+      "https://github.com/juliangruber/brace-expansion/commit/bdff773f98e5988616b7039cc9b508df5d640b22",
+      "https://github.com/juliangruber/brace-expansion/commit/c55e67d8d8b1c56a2474afff15c2891166b2d364",
+      "https://github.com/juliangruber/brace-expansion/commit/ffdfa3e3806bed17c0874b8f1439b084de354a7e",
+      "https://github.com/advisories/GHSA-q2hr-2g5m-vwhr"
+    ]
+  },
+  {
+    "id": "GHSA-qhr7-859c-m2p7",
+    "summary": "brace-expansion: DoS via uncontrolled recursion on nested brace groups causing stack exhaustion",
+    "severity": "high",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 4.0.0, < 5.0.11",
+        "first_patched_version": "5.0.11",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 3.0.0, < 3.0.8",
+        "first_patched_version": "3.0.8",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 2.0.0, < 2.1.6",
+        "first_patched_version": "2.1.6",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": "< 1.1.20",
+        "first_patched_version": "1.1.20",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-09-29T23:45:19Z",
+    "references": [
+      "https://github.com/juliangruber/brace-expansion/security/advisories/GHSA-qhr7-859c-m2p7",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-102278",
+      "https://github.com/juliangruber/brace-expansion/commit/1efee7c397c191da6287a78ec19512476a966a7b",
+      "https://github.com/juliangruber/brace-expansion/commit/935d78f32f335b2ff76578e5c5e877d31ae9888c",
+      "https://github.com/juliangruber/brace-expansion/commit/de84f144e9816f30e25fc8179e2e1249ab6df0db",
+      "https://github.com/advisories/GHSA-qhr7-859c-m2p7"
+    ]
+  },
+  {
+    "id": "GHSA-6j4f-fj2g-mc7p",
+    "summary": "brace-expansion: DoS via uncontrolled recursion in parseCommaParts causing stack exhaustion",
+    "severity": "high",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 4.0.0, < 5.0.10",
+        "first_patched_version": "5.0.10",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 3.0.0, < 3.0.7",
+        "first_patched_version": "3.0.7",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": ">= 2.0.0, < 2.1.5",
+        "first_patched_version": "2.1.5",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "brace-expansion"
+        },
+        "vulnerable_version_range": "< 1.1.19",
+        "first_patched_version": "1.1.19",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-09-29T23:44:59Z",
+    "references": [
+      "https://github.com/juliangruber/brace-expansion/security/advisories/GHSA-6j4f-fj2g-mc7p",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-102276",
+      "https://github.com/juliangruber/brace-expansion/commit/0bcbfc0a5928c3073d48f42999d1ce4fc1c42fbc",
+      "https://github.com/juliangruber/brace-expansion/commit/316359e6019c39b3254c8ba8e25dc586a480652c",
+      "https://github.com/juliangruber/brace-expansion/commit/5171e681c0922b7ae8bfaf9a331e309107be6edc",
+      "https://github.com/juliangruber/brace-expansion/commit/6735c94873ca570bcdd6a0690033bdd3126379d3",
+      "https://github.com/advisories/GHSA-6j4f-fj2g-mc7p"
+    ]
+  },
+  {
+    "id": "GHSA-4qv8-2p9j-2685",
+    "summary": "undici vulnerable to Denial of Service via unbounded memory in the EventSource parser",
+    "severity": "medium",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 6.5.0, < 6.29.1",
+        "first_patched_version": "6.29.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 7.0.0, < 7.30.1",
+        "first_patched_version": "7.30.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 8.0.0, < 8.12.2",
+        "first_patched_version": "8.12.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-10-23T22:13:31Z",
+    "references": [
+      "https://github.com/nodejs/undici/security/advisories/GHSA-4qv8-2p9j-2685",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-109924",
+      "https://github.com/nodejs/undici/commit/299162740d5f39120092277e70efacb4d151c1c6",
+      "https://github.com/nodejs/undici/commit/789ef26461c648480433846607154f52d74ec9ab",
+      "https://github.com/nodejs/undici/commit/c43b23fdc6b37e1283d4347408bb16800f867d9e",
+      "https://cna.openjsf.org/security-advisories.html",
+      "https://github.com/nodejs/undici/releases/tag/v6.29.1",
+      "https://github.com/nodejs/undici/releases/tag/v7.30.1",
+      "https://github.com/nodejs/undici/releases/tag/v8.12.2",
+      "https://github.com/advisories/GHSA-4qv8-2p9j-2685"
+    ]
+  },
+  {
+    "id": "GHSA-f72v-6w45-q472",
+    "summary": "undici vulnerable to Subresource Integrity bypass via non-lowercase algorithm tokens",
+    "severity": "medium",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 7.15.0, < 7.30.1",
+        "first_patched_version": "7.30.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 8.0.0, < 8.12.2",
+        "first_patched_version": "8.12.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-10-23T22:13:18Z",
+    "references": [
+      "https://github.com/nodejs/undici/security/advisories/GHSA-f72v-6w45-q472",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-109841",
+      "https://github.com/nodejs/undici/commit/18bc8a1e09d15bc45815154a289dcf6fd5254d00",
+      "https://github.com/nodejs/undici/commit/4f7ef6806e532ab9e29ccd6229b1b9d241e1b1f0",
+      "https://cna.openjsf.org/security-advisories.html",
+      "https://github.com/nodejs/undici/releases/tag/v7.30.1",
+      "https://github.com/nodejs/undici/releases/tag/v8.12.2",
+      "https://github.com/advisories/GHSA-f72v-6w45-q472"
+    ]
+  },
+  {
+    "id": "GHSA-xjj6-f33q-929c",
+    "summary": "undici vulnerable to Denial of Service via unhandled error on excessive content-encodings",
+    "severity": "high",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 6.23.0, < 6.29.1",
+        "first_patched_version": "6.29.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 7.18.0, < 7.30.1",
+        "first_patched_version": "7.30.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 8.0.0, < 8.12.2",
+        "first_patched_version": "8.12.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-10-23T22:14:32Z",
+    "references": [
+      "https://github.com/nodejs/undici/security/advisories/GHSA-xjj6-f33q-929c",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-109869",
+      "https://github.com/nodejs/undici/commit/07ded4941b1e72afec862958c3b8ddf468f3b429",
+      "https://github.com/nodejs/undici/commit/1325a87dfb3492f8e87e6b0a84b3bda4e82e3436",
+      "https://github.com/nodejs/undici/commit/b5084c7dc239172d75c336b1cd51ddac023938a5",
+      "https://cna.openjsf.org/security-advisories.html",
+      "https://github.com/nodejs/undici/releases/tag/v6.29.1",
+      "https://github.com/nodejs/undici/releases/tag/v7.30.1",
+      "https://github.com/nodejs/undici/releases/tag/v8.12.2",
+      "https://github.com/advisories/GHSA-xjj6-f33q-929c"
+    ]
+  },
+  {
+    "id": "GHSA-4w7w-5xrc-9h26",
+    "summary": "undici vulnerable to cache poisoning and cross-user disclosure via cross-origin redirects",
+    "severity": "high",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 7.0.0, < 7.30.1",
+        "first_patched_version": "7.30.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 8.0.0, < 8.12.2",
+        "first_patched_version": "8.12.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-10-27T19:02:32Z",
+    "references": [
+      "https://github.com/nodejs/undici/security/advisories/GHSA-4w7w-5xrc-9h26",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-109829",
+      "https://github.com/nodejs/undici/commit/26c2bfb3def0b67241ce878e80657ed5d6c3efa8",
+      "https://github.com/nodejs/undici/commit/b20b82ad80a405a12b6ce1f341bcd418de390aa0",
+      "https://cna.openjsf.org/security-advisories.html",
+      "https://github.com/nodejs/undici/releases/tag/v7.30.1",
+      "https://github.com/nodejs/undici/releases/tag/v8.12.2",
+      "https://github.com/advisories/GHSA-4w7w-5xrc-9h26"
+    ]
+  },
+  {
+    "id": "GHSA-2m5v-pch6-74hx",
+    "summary": "undici vulnerable to TLS certificate validation bypass via dropped tls options in Agent",
+    "severity": "high",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 4.0.0, < 6.29.1",
+        "first_patched_version": "6.29.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 7.0.0, < 7.30.1",
+        "first_patched_version": "7.30.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 8.0.0, < 8.12.2",
+        "first_patched_version": "8.12.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-10-27T19:02:27Z",
+    "references": [
+      "https://github.com/nodejs/undici/security/advisories/GHSA-2m5v-pch6-74hx",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-109383",
+      "https://github.com/nodejs/undici/commit/04cb74b1db131ff8f5b4557dce811cbf5f4664b4",
+      "https://github.com/nodejs/undici/commit/8c59f6b302898cb2e9b0f7962cd7212b6e597c9f",
+      "https://github.com/nodejs/undici/commit/f75eac00ac177f7b2e6c8bfbd52d4113164286e6",
+      "https://cna.openjsf.org/security-advisories.html",
+      "https://github.com/nodejs/undici/releases/tag/v6.29.1",
+      "https://github.com/nodejs/undici/releases/tag/v7.30.1",
+      "https://github.com/nodejs/undici/releases/tag/v8.12.2",
+      "https://github.com/advisories/GHSA-2m5v-pch6-74hx"
+    ]
+  },
+  {
+    "id": "GHSA-qrxm-fqhp-jwvm",
+    "summary": "undici vulnerable to Denial of Service via TLS 1.2 certificate-changing renegotiation",
+    "severity": "high",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 4.2.1, < 6.29.1",
+        "first_patched_version": "6.29.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 7.0.0, < 7.30.1",
+        "first_patched_version": "7.30.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 8.0.0, < 8.12.2",
+        "first_patched_version": "8.12.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-10-27T19:02:22Z",
+    "references": [
+      "https://github.com/nodejs/undici/security/advisories/GHSA-qrxm-fqhp-jwvm",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-87018",
+      "https://github.com/nodejs/undici/commit/12cfd96c3f430897656e3edc1c5e02be8c1cd309",
+      "https://github.com/nodejs/undici/commit/b40fbfc0651703cf9fa9f6ced68b679f28d8bb28",
+      "https://github.com/nodejs/undici/commit/e257e9f8fb42eedd50727b9cf65e548c8925e4a8",
+      "https://cna.openjsf.org/security-advisories.html",
+      "https://github.com/nodejs/undici/releases/tag/v6.29.1",
+      "https://github.com/nodejs/undici/releases/tag/v7.30.1",
+      "https://github.com/nodejs/undici/releases/tag/v8.12.2",
+      "https://github.com/advisories/GHSA-qrxm-fqhp-jwvm"
+    ]
+  },
+  {
+    "id": "GHSA-9fm3-97px-rjf6",
+    "summary": "undici WebSocket client vulnerable to Denial of Service via unbounded automatic PONG buffering",
+    "severity": "medium",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 5.15.0, < 6.29.1",
+        "first_patched_version": "6.29.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 7.0.0, < 7.30.1",
+        "first_patched_version": "7.30.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 8.0.0, < 8.12.2",
+        "first_patched_version": "8.12.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-10-27T19:02:17Z",
+    "references": [
+      "https://github.com/nodejs/undici/security/advisories/GHSA-9fm3-97px-rjf6",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-109932",
+      "https://github.com/nodejs/undici/commit/39f93e142df03e559fe7c3d1fc7fba9beee2c185",
+      "https://github.com/nodejs/undici/commit/53944624462b6797560288c55dbd8c66857bb495",
+      "https://github.com/nodejs/undici/commit/b217373bb024cd93f85eb5b3ffd25684855f60f8",
+      "https://cna.openjsf.org/security-advisories.html",
+      "https://github.com/nodejs/undici/releases/tag/v6.29.1",
+      "https://github.com/nodejs/undici/releases/tag/v7.30.1",
+      "https://github.com/nodejs/undici/releases/tag/v8.12.2",
+      "https://github.com/advisories/GHSA-9fm3-97px-rjf6"
+    ]
+  },
+  {
+    "id": "GHSA-55wc-3pg8-jfw6",
+    "summary": "undici vulnerable to Denial of Service via unhandled exception in the decompress interceptor",
+    "severity": "medium",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 7.15.0, < 7.30.1",
+        "first_patched_version": "7.30.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "npm",
+          "name": "undici"
+        },
+        "vulnerable_version_range": ">= 8.0.0, < 8.12.2",
+        "first_patched_version": "8.12.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "updated_at": "2026-10-27T19:02:12Z",
+    "references": [
+      "https://github.com/nodejs/undici/security/advisories/GHSA-55wc-3pg8-jfw6",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-87029",
+      "https://github.com/nodejs/undici/commit/63cba7712ca012b2603c6aeeb4c72d8692332cd0",
+      "https://github.com/nodejs/undici/commit/f851f315db1f2acce0ea668f88d9d0fa61c8420c",
+      "https://cna.openjsf.org/security-advisories.html",
+      "https://github.com/nodejs/undici/releases/tag/v7.30.1",
+      "https://github.com/nodejs/undici/releases/tag/v8.12.2",
+      "https://github.com/advisories/GHSA-55wc-3pg8-jfw6"
+    ]
+  }
+]

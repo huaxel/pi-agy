@@ -34,6 +34,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { getDefaultConfigPath } from "./config.js";
+import { isBridgeInputWithinBudget } from "./bridge-input-budget.js";
 import { checkAgyUsage, formatAgyUsage } from "./cli.js";
 import {
   FALLBACK_PROVIDER_MODELS,
@@ -217,6 +218,8 @@ interface CatalogCache {
 
 export interface StartMcpBridgeOptions {
   escalateAfterMs?: number;
+  sessionCap?: number;
+  sessionIdleMs?: number;
 }
 
 /**
@@ -230,12 +233,6 @@ export async function startMcpBridge(
   const token = randomBytes(32).toString("hex");
   const escalateAfterMs = options?.escalateAfterMs ?? DEFAULT_PARK_ESCALATE_MS;
   let catalogCache: CatalogCache | undefined;
-
-  const mcp = new McpServer(
-    { name: "pi-agy-bridge", version: "1" },
-    { capabilities: { tools: {} } },
-  );
-
   let bridgedTools: BridgeToolDef[] = [];
   let parkHandler: BridgeParkHandler | undefined;
   const parks = new Map<string, (result: BridgeToolResult) => void>();
@@ -244,7 +241,25 @@ export async function startMcpBridge(
     { name: string; state: "running" | "done" | "failed"; result?: BridgeToolResult; reason?: string }
   >();
 
-  mcp.setRequestHandler(ListToolsRequestSchema, () => {
+  interface BridgeSession {
+    transport: StreamableHTTPServerTransport;
+    mcp: McpServer;
+    last: number;
+    active: number;
+    parks: number;
+    closing: boolean;
+  }
+  const sessions = new Map<string, BridgeSession>();
+  const pendingSessions = new Set<BridgeSession>();
+  const parkOwners = new Map<string, BridgeSession>();
+
+  const createMcpServer = (session: BridgeSession): McpServer => {
+    const mcp = new McpServer(
+      { name: "pi-agy-bridge", version: "1" },
+      { capabilities: { tools: {} } },
+    );
+
+    mcp.setRequestHandler(ListToolsRequestSchema, () => {
     const skills = scanSkills(dir);
     return {
       tools: [
@@ -410,8 +425,10 @@ export async function startMcpBridge(
         }
         let escalateTimer: NodeJS.Timeout | undefined;
         let didEscalate = false;
+        let settled = false;
         const parked = await new Promise<BridgeToolResult | undefined>((resolve) => {
           parks.set(callId, (res) => {
+            settled = true;
             if (escalateTimer) clearTimeout(escalateTimer);
             if (didEscalate) {
               const record = escalations.get(callId);
@@ -423,6 +440,8 @@ export async function startMcpBridge(
               resolve(res);
             }
           });
+          session.parks += 1;
+          parkOwners.set(callId, session);
           let accepted = false;
           try {
             accepted = handler({ callId, toolName: bridged.piName, args: callArgs });
@@ -431,9 +450,14 @@ export async function startMcpBridge(
           }
           if (!accepted) {
             parks.delete(callId);
+            if (parkOwners.get(callId) === session) {
+              parkOwners.delete(callId);
+              session.parks = Math.max(0, session.parks - 1);
+            }
             resolve(undefined);
             return;
           }
+          if (settled) return;
           // Early-ack escalation: if the tool runs longer than escalateAfterMs,
           // settle the MCP request with STILL RUNNING so agy avoids its 180s timeout.
           escalateTimer = setTimeout(() => {
@@ -467,18 +491,100 @@ export async function startMcpBridge(
     }
   });
 
-  // Stateful: one transport serves many agy sessions, routed by the
-  // session id header. The default (no generator) is stateless and rejects
-  // any second request on the same transport.
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
+    return mcp;
+  };
+
+  let stopping = false;
+  const sessionCap = Number.isFinite(options?.sessionCap) && (options?.sessionCap ?? 16) > 0 ? Math.floor(options?.sessionCap ?? 16) : 16;
+  const sessionIdleMs = Number.isFinite(options?.sessionIdleMs) && (options?.sessionIdleMs ?? 300_000) > 0 ? options?.sessionIdleMs ?? 300_000 : 300_000;
+  const closeSession = async (id: string, session: BridgeSession) => {
+    if (sessions.get(id) !== session) return;
+    sessions.delete(id);
+    session.closing = true;
+    for (const [callId, owner] of parkOwners) {
+      if (owner !== session) continue;
+      parkOwners.delete(callId);
+      session.parks = Math.max(0, session.parks - 1);
+      const resolve = parks.get(callId);
+      parks.delete(callId);
+      resolve?.({ text: "MCP session closed.", isError: true });
+      const escalation = escalations.get(callId);
+      if (escalation?.state === "running") {
+        escalation.state = "failed";
+        escalation.reason = "MCP session closed.";
+      }
+    }
+    await session.transport.close().catch(() => undefined);
+    await session.mcp.close().catch(() => undefined);
+  };
+  const sweep = setInterval(() => {
+    const now = Date.now();
+    for (const [id, session] of sessions) {
+      if (session.active === 0 && session.parks === 0 && now - session.last >= sessionIdleMs) void closeSession(id, session);
+    }
+  }, Math.max(50, Math.min(sessionIdleMs, 60_000)));
+  sweep.unref();
+
   const configDir = allocateBridgeConfigDir();
   // Filled after bind; the request handler validates Host against it
   // (defense-in-depth against DNS rebinding past the loopback bind).
   const bound = { port: 0 };
   const http = createServer((req, res) => {
-    void handleBridgeRequest(req, res, transport, token, bound.port).catch(() => {
+    void handleBridgeRequest(req, res, token, bound.port, async (request, body) => {
+      const requested = request.headers["mcp-session-id"];
+      if (typeof requested === "string") {
+        const session = sessions.get(requested);
+        if (!session) return undefined;
+        session.last = Date.now();
+        session.active += 1;
+        return { transport: session.transport, session };
+      }
+      if (!body || typeof body !== "object" || (body as { method?: string }).method !== "initialize") return undefined;
+      if (stopping || sessions.size + pendingSessions.size >= sessionCap) return undefined;
+      let removeSession = (): void => undefined;
+      let session!: BridgeSession;
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => {
+          pendingSessions.delete(session);
+          if (!stopping && !session.closing) sessions.set(id, session);
+        },
+        onsessionclosed: () => removeSession(),
+      });
+      session = { transport, mcp: undefined as never, last: Date.now(), active: 1, parks: 0, closing: false };
+      session.mcp = createMcpServer(session);
+      pendingSessions.add(session);
+      removeSession = () => {
+        const id = session.transport.sessionId;
+        if (id) void closeSession(id, session);
+        else {
+          pendingSessions.delete(session);
+          session.closing = true;
+          void session.transport.close().catch(() => undefined);
+          void session.mcp.close().catch(() => undefined);
+        }
+      };
+      session.transport.onclose = removeSession;
+      try {
+        await session.mcp.connect(session.transport);
+        return { transport: session.transport, session };
+      } catch {
+        await session.transport.close().catch(() => undefined);
+        await session.mcp.close().catch(() => undefined);
+        return undefined;
+      }
+    }, (session) => {
+      const id = session.transport.sessionId;
+      if (id && sessions.get(id) === session) return;
+      pendingSessions.delete(session);
+      if (id && !session.closing && !stopping) {
+        sessions.set(id, session);
+      } else if (!session.closing) {
+        session.closing = true;
+        void session.transport.close().catch(() => undefined);
+        void session.mcp.close().catch(() => undefined);
+      }
+    }).catch(() => {
       // handleBridgeRequest guards every response path; this is unreachable
       // belt-and-braces so a client error can never crash Pi.
       if (!res.headersSent) {
@@ -512,9 +618,14 @@ export async function startMcpBridge(
       }
     }
     if (parks.size === 0) return;
-    const pending = [...parks.values()];
+    const pending = [...parks.entries()];
     parks.clear();
-    for (const resolve of pending) {
+    for (const [callId, resolve] of pending) {
+      const owner = parkOwners.get(callId);
+      if (owner) {
+        parkOwners.delete(callId);
+        owner.parks = Math.max(0, owner.parks - 1);
+      }
       try {
         resolve({ text: message, isError: true });
       } catch {
@@ -524,6 +635,12 @@ export async function startMcpBridge(
   };
 
   const completePark = (callId: string, result: BridgeToolResult): boolean => {
+    const owner = parkOwners.get(callId);
+    if (owner) {
+      parkOwners.delete(callId);
+      owner.parks = Math.max(0, owner.parks - 1);
+      owner.last = Date.now();
+    }
     const esc = escalations.get(callId);
     if (esc && esc.state === "running") {
       esc.state = "done";
@@ -543,17 +660,16 @@ export async function startMcpBridge(
   };
 
   const stop = async (): Promise<void> => {
+    stopping = true;
     failAllParks("Pi tool bridge stopped.");
-    try {
-      await transport.close();
-    } catch {
-      // Best effort.
+    clearInterval(sweep);
+    await Promise.all([...sessions].map(([id, session]) => closeSession(id, session)));
+    for (const session of pendingSessions) {
+      session.closing = true;
+      await session.transport.close().catch(() => undefined);
+      await session.mcp.close().catch(() => undefined);
     }
-    try {
-      await mcp.close();
-    } catch {
-      // Best effort.
-    }
+    pendingSessions.clear();
     // close() alone waits out keep-alive/SSE sockets; destroy them and
     // bound the wait so session shutdown can never hang on a lingerer.
     try {
@@ -584,7 +700,6 @@ export async function startMcpBridge(
     const address = http.address();
     const port = typeof address === "object" && address ? address.port : 0;
     if (!port) throw new Error("bridge bound no port");
-    await mcp.connect(transport);
     await writeBridgeConfig(configDir, port, token);
     bound.port = port;
     return {
@@ -654,9 +769,10 @@ async function readBody(req: IncomingMessage): Promise<{ body?: unknown; tooLarg
 async function handleBridgeRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  transport: StreamableHTTPServerTransport,
   token: string,
   port: number,
+  resolveTransport: (req: IncomingMessage, body?: unknown) => Promise<{ transport: StreamableHTTPServerTransport; session: { transport: StreamableHTTPServerTransport; mcp: McpServer; last: number; active: number; parks: number; closing: boolean } } | undefined>,
+  registerSession: (session: { transport: StreamableHTTPServerTransport; mcp: McpServer; last: number; active: number; parks: number; closing: boolean }) => void,
 ): Promise<void> {
   try {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -702,10 +818,40 @@ async function handleBridgeRequest(
         res.writeHead(400).end();
         return;
       }
-      await transport.handleRequest(req, res, body);
+      // The SDK receives a pre-parsed body, bypassing its own body reader.
+      // Bound structure before even resolving/allocating an MCP session.
+      if (!isBridgeInputWithinBudget(body)) {
+        res.writeHead(413, { "Content-Type": "application/json" }).end(JSON.stringify({
+          error: "Request structure exceeds bridge limits",
+        }));
+        return;
+      }
+      const resolved = await resolveTransport(req, body);
+      if (!resolved) {
+        res.writeHead(req.headers["mcp-session-id"] ? 404 : 503).end();
+        return;
+      }
+      try {
+        await resolved.transport.handleRequest(req, res, body);
+      } finally {
+        resolved.session.active -= 1;
+        resolved.session.last = Date.now();
+        const id = resolved.transport.sessionId;
+        registerSession(resolved.session as { transport: StreamableHTTPServerTransport; mcp: McpServer; last: number; active: number; parks: number; closing: boolean });
+      }
       return;
     }
-    await transport.handleRequest(req, res);
+    const resolved = await resolveTransport(req);
+    if (!resolved) {
+      res.writeHead(req.headers["mcp-session-id"] ? 404 : 400).end();
+      return;
+    }
+    try {
+      await resolved.transport.handleRequest(req, res);
+    } finally {
+      resolved.session.active -= 1;
+      resolved.session.last = Date.now();
+    }
   } catch {
     if (!res.headersSent) {
       try {

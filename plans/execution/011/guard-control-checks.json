@@ -1,0 +1,6 @@
+{
+  "old-guard-runs-marker-under-conditional": true,
+  "fixed-missing-directory-blocks": true,
+  "fixed-mismatched-toplevel-blocks": true,
+  "fixed-correct-directory-runs-marker": true
+}

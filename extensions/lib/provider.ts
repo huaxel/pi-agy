@@ -727,7 +727,7 @@ export function createAgyStreamSimple(
             timeoutMs: deps.timeoutMs ?? PROVIDER_TURN_TIMEOUT_MS,
             resumeConversationId: resume,
             skipPermissions: deps.skipPermissions ?? true,
-            bridgedTools: projectBridgeTools(deps.tools ?? []),
+            bridgedTools: projectBridgeTools(options?.tools ?? deps.tools ?? []),
             callbacks,
           });
         }
@@ -776,27 +776,20 @@ export function createAgyStreamSimple(
           const thinking = (output.content[thinkingIndex] as { thinking: string }).thinking;
           stream.push({ type: "thinking_end", contentIndex: thinkingIndex, content: thinking, partial: output });
         }
-        if (textIndex === -1) {
-          // No live deltas arrived: the terminal response (if any) is the
-          // answer — never answer empty when agy produced text.
-          const index = ensureText();
-          const fallback =
-            result.text ||
-            (result.activity.length > 0 ? result.activity.join("\n") : "(agy returned no text)");
-          (output.content[index] as { text: string }).text = fallback;
-          stream.push({ type: "text_end", contentIndex: index, content: fallback, partial: output });
-        } else {
-          const block = output.content[textIndex];
-          let finalText = (block as { text: string }).text;
-          if (result.truncated) finalText += "\n\n[truncated: agy response exceeded the provider cap]";
-          if (result.deniedActions && result.deniedActions.length > 0) {
-            finalText += `\n\n[warning: agy reported ${result.deniedActions.length} denied action(s) alongside this response]`;
-          }
-          if (result.aborted) finalText += "\n\n[note: turn cancelled — response is partial]";
-          else if (result.timedOut) finalText += "\n\n[note: turn timed out — response is partial]";
-          (block as { text: string }).text = finalText;
-          stream.push({ type: "text_end", contentIndex: textIndex, content: finalText, partial: output });
+        const index = textIndex === -1 ? ensureText() : textIndex;
+        const block = output.content[index] as { text: string };
+        // The terminal result is authoritative; activity and the empty-result
+        // fallback supply content only when that result has no answer.
+        let finalText = result.text ||
+          (result.activity.length > 0 ? result.activity.join("\n") : "(agy returned no text)");
+        if (result.truncated) finalText += "\n\n[truncated: agy response exceeded the provider cap]";
+        if (result.deniedActions && result.deniedActions.length > 0) {
+          finalText += `\n\n[warning: agy reported ${result.deniedActions.length} denied action(s) alongside this response]`;
         }
+        if (result.aborted) finalText += "\n\n[note: turn cancelled — response is partial]";
+        else if (result.timedOut) finalText += "\n\n[note: turn timed out — response is partial]";
+        block.text = finalText;
+        stream.push({ type: "text_end", contentIndex: index, content: finalText, partial: output });
 
         output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
         // Partial turns must never masquerade as clean stops: surface the
