@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.8
+
+- Improve agy provider cache behavior: stabilize prompt prefixes, cap recent resume context, key preflight and verification caches by working directory, and bucket print timeouts for identical arguments.
+- Simplify extension guidance and modules, route steerable work through Herdr, and refresh package positioning and keywords.
+- Full test, typecheck, and package checks pass.
+
 ## 0.7.7
 
 - Add dynamic Pi Skills injection (`activate_skill`) to the loopback MCP server, scanning global (`~/.pi/agent/skills`, `~/.agents/skills`) and project (`.pi/skills`, `.agents/skills`) locations, presenting an enum of skills with summaries and returning `SKILL.md` markdown to agy.
