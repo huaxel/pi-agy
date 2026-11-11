@@ -26,6 +26,7 @@ import {
 import { resolveAgyMode, truncate } from "../extensions/index.js";
 import piAgyExtension from "../extensions/index.js";
 import { registerAgyCommand } from "../extensions/commands.js";
+import { executeConfirmedRun } from "../extensions/command-run.js";
 import { executeAgyTask } from "../extensions/lib/execute.js";
 import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withDirLock } from "../extensions/lib/lock.js";
@@ -1739,6 +1740,167 @@ describe("shared executor", () => {
       const args = await readFakeAgyArgs(bin);
       assert.ok(args.some((argv) => hasFlagPair(argv, "--model", "claude-sonnet-4-6")));
       assert.ok(!args.some((argv) => hasFlagPair(argv, "--effort", "high")));
+    });
+  });
+});
+
+describe("conversation flag characterization", () => {
+  const cases: Array<{
+    name: string;
+    flags: { conversation_id?: string; continue?: boolean; new_session?: boolean };
+    stored?: boolean;
+    id?: string;
+    cli?: boolean;
+    agent?: string;
+    error?: string;
+  }> = [
+    { name: "absent", flags: {} },
+    { name: "new true", flags: { new_session: true } },
+    { name: "false continue", flags: { continue: false } },
+    { name: "empty id", flags: { conversation_id: "" } },
+    { name: "empty id is compatible with new", flags: { conversation_id: "", new_session: true } },
+    { name: "recorded without history", flags: { new_session: false } },
+    { name: "recorded with history", flags: { new_session: false }, stored: true, id: "stored-id", agent: "stored-agent" },
+    { name: "empty id selects recorded", flags: { conversation_id: "", continue: false, new_session: false }, stored: true, id: "stored-id", agent: "stored-agent" },
+    { name: "CLI latest keeps CLI continue", flags: { continue: true }, stored: true, cli: true, agent: "stored-agent" },
+    { name: "CLI latest without history", flags: { continue: true }, cli: true },
+    { name: "CLI latest wins over recorded", flags: { continue: true, new_session: false, conversation_id: "" }, stored: true, cli: true, agent: "stored-agent" },
+    { name: "explicit id", flags: { conversation_id: "explicit-id", continue: false }, stored: true, id: "explicit-id", agent: "history-agent" },
+    { name: "explicit id with false new retains latest agent policy", flags: { conversation_id: "explicit-id", new_session: false }, stored: true, id: "explicit-id", agent: "stored-agent" },
+    { name: "id and continue conflict", flags: { conversation_id: "explicit-id", continue: true }, error: "agy cannot use --continue and --conversation together" },
+    { name: "new and id conflict", flags: { conversation_id: "explicit-id", new_session: true }, error: "agy new_session cannot be combined with a conversation to resume" },
+    { name: "new and continue conflict", flags: { conversation_id: "", continue: true, new_session: true }, error: "agy new_session cannot be combined with a conversation to resume" },
+    { name: "all conflicting flags retain error precedence", flags: { conversation_id: "explicit-id", continue: true, new_session: true }, error: "agy cannot use --continue and --conversation together" },
+  ];
+  for (const testCase of cases) {
+    it(testCase.name, async () => {
+      const raw = JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
+      await withFakeAgy(raw, async (bin) => {
+        const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-selection-"));
+        if (testCase.stored) {
+          await mkdir(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
+          await writeFile(path.join(process.env.PI_CODING_AGENT_DIR!, "agy-sessions.json"), JSON.stringify({
+            [dir]: {
+              last_conversation_id: "stored-id", last_agent: "stored-agent",
+              history: [{ conversation_id: "explicit-id", agent: "history-agent", updated_at: new Date().toISOString() }],
+            },
+          }));
+        }
+        const run = () => executeAgyTask({ prompt: "selection", mode: "plan", model: "flash-medium", dir, timeout_ms: 60_000, ...testCase.flags }, undefined);
+        if (testCase.error) {
+          await assert.rejects(run(), { message: testCase.error });
+          assert.deepEqual(await readFakeAgyArgs(bin), []);
+          return;
+        }
+        const result = await run();
+        const args = (await readFakeAgyArgs(bin)).find((argv) => argv.includes("-p") && !argv.includes("/usage"));
+        assert.ok(args);
+        assert.equal(args.includes("--continue"), testCase.cli ?? false);
+        assert.equal(args.includes("--conversation"), Boolean(testCase.id));
+        if (testCase.id) assert.ok(hasFlagPair(args, "--conversation", testCase.id));
+        assert.equal(result.details.agent, testCase.agent);
+        assert.equal(args.includes("--agent"), Boolean(testCase.agent));
+        if (testCase.agent) assert.ok(hasFlagPair(args, "--agent", testCase.agent));
+      });
+    });
+  }
+});
+
+describe("conversation selection entrypoint parity", () => {
+  for (const flags of [{}, { conversation_id: "" }, { conversation_id: "saved-id" }, { continue: true }]) {
+    for (const context of ["none", "recent"] as const) {
+      it(`${JSON.stringify(flags)} context=${context}`, async () => {
+        const raw = JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
+        await withFakeAgy(raw, async (bin) => {
+          const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-parity-"));
+          await mkdir(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
+          await writeFile(path.join(process.env.PI_CODING_AGENT_DIR!, "agy-sessions.json"), JSON.stringify({
+            [cwd]: {
+              last_conversation_id: "saved-id", last_agent: "saved-agent",
+              history: [{ conversation_id: "saved-id", agent: "saved-agent", updated_at: new Date().toISOString() }],
+            },
+          }));
+          const ctx = {
+            cwd, hasUI: false, waitForIdle: async () => {},
+            ui: { setStatus: () => {}, notify: (message: string) => assert.fail(message) },
+            sessionManager: { buildContextEntries: () => [{ type: "message", message: { role: "user", content: "parity context" } }] },
+          };
+          const receipts: any[] = [];
+          await executeConfirmedRun({ appendEntry: (_type: string, data: unknown) => receipts.push(data) } as unknown as ExtensionAPI,
+            ctx as unknown as ExtensionCommandContext,
+            { prompt: "parity task", mode: "plan", model: "flash-medium", context, ...flags });
+          let tool: { execute: (...args: any[]) => Promise<any> } | undefined;
+          piAgyExtension({ registerCommand: () => {}, registerTool: (candidate: { name: string; execute: (...args: any[]) => Promise<any> }) => {
+            if (candidate.name === "agy_execute") tool = candidate;
+          } } as unknown as ExtensionAPI);
+          const result = await tool!.execute("parity", { prompt: "parity task", mode: "plan", model: "flash-medium", context, ...flags }, undefined, undefined, ctx);
+          const prints = (await readFakeAgyArgs(bin)).filter((argv) => argv.includes("-p") && !argv.includes("/usage"));
+          assert.equal(prints.length, 2);
+          assert.equal(receipts.length, 1);
+          const resume = Boolean(flags.conversation_id || flags.continue);
+          const expectedContext = context === "recent" && resume ? "summary" : context;
+          assert.equal(result.details.context_mode, expectedContext);
+          assert.equal(receipts[0].details.context_mode, expectedContext);
+          assert.equal(result.details.agent, resume ? "saved-agent" : undefined);
+          assert.equal(receipts[0].details.agent, result.details.agent);
+          for (const flag of ["--continue", "--conversation", "--agent"]) {
+            assert.equal(prints[0].includes(flag), prints[1].includes(flag));
+            if (prints[0].includes(flag)) assert.equal(prints[0][prints[0].indexOf(flag) + 1], prints[1][prints[1].indexOf(flag) + 1]);
+          }
+          assert.equal(prints[0][prints[0].indexOf("-p") + 1], prints[1][prints[1].indexOf("-p") + 1]);
+          assert.equal(result.details.context_chars, receipts[0].details.context_chars);
+        });
+      });
+    }
+  }
+
+  it("rejects tool conflicts before context, approval, or spawning", async () => {
+    await withFakeAgy("", async (bin) => {
+      let tool: { execute: (...args: any[]) => Promise<any> } | undefined;
+      piAgyExtension({ registerCommand: () => {}, registerTool: (candidate: { name: string; execute: (...args: any[]) => Promise<any> }) => {
+        if (candidate.name === "agy_execute") tool = candidate;
+      } } as unknown as ExtensionAPI);
+      for (const flags of [
+        { conversation_id: "id", continue: true },
+        { conversation_id: "id", new_session: true },
+        { conversation_id: "", continue: true, new_session: true },
+      ]) {
+        await assert.rejects(tool!.execute("conflict", { prompt: "task", mode: "accept-edits", context: "recent", ...flags }, undefined, undefined, {
+          cwd: "/nonexistent-014", hasUI: true,
+          ui: { confirm: () => assert.fail("must not confirm conflicting flags") },
+          sessionManager: { buildContextEntries: () => assert.fail("must not build context for conflicting flags") },
+        }), /agy (cannot use --continue and --conversation together|new_session cannot be combined with a conversation to resume)/);
+      }
+      assert.deepEqual(await readFakeAgyArgs(bin), []);
+    });
+  });
+
+  it("resolves recorded latest again after approval instead of caching the preview", async () => {
+    const raw = JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
+    await withFakeAgy(raw, async (bin) => {
+      const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-approval-history-"));
+      await mkdir(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
+      const storePath = path.join(process.env.PI_CODING_AGENT_DIR!, "agy-sessions.json");
+      await writeFile(storePath, JSON.stringify({ [cwd]: { last_conversation_id: "preview-id" } }));
+      let tool: { execute: (...args: any[]) => Promise<any> } | undefined;
+      piAgyExtension({ registerCommand: () => {}, registerTool: (candidate: { name: string; execute: (...args: any[]) => Promise<any> }) => {
+        if (candidate.name === "agy_execute") tool = candidate;
+      } } as unknown as ExtensionAPI);
+      let confirmations = 0;
+      const result = await tool!.execute("temporal", { prompt: "task", mode: "accept-edits", model: "flash-medium", new_session: false }, undefined, undefined, {
+        cwd, hasUI: true,
+        ui: { confirm: async () => {
+          confirmations++;
+          await writeFile(storePath, JSON.stringify({ [cwd]: { last_conversation_id: "execution-id", last_agent: "execution-agent" } }));
+          return true;
+        } },
+      });
+      assert.equal(confirmations, 1);
+      const print = (await readFakeAgyArgs(bin)).find((argv) => argv.includes("-p") && !argv.includes("/usage"));
+      assert.ok(print);
+      assert.ok(hasFlagPair(print, "--conversation", "execution-id"));
+      assert.ok(hasFlagPair(print, "--agent", "execution-agent"));
+      assert.equal(result.details.agent, "execution-agent");
     });
   });
 });

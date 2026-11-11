@@ -35,6 +35,7 @@ import {
 } from "./postflight.js";
 import { resetPreflightCache, runPreflight } from "./preflight.js";
 import { getHistory, getSession, saveSession, conversationSummary } from "./sessions.js";
+import { normalizeConversationSelection } from "./request.js";
 
 export type AgyMode = "plan" | "accept-edits" | "sandbox";
 
@@ -92,6 +93,7 @@ export async function executeAgyTask(
   onProgress?: (message: string) => void,
 ): Promise<AgyExecutionResult> {
   validateAgyExecutionOptions(options);
+  const selection = normalizeConversationSelection(options);
   let agent = normalizeAgyAgentName(options.agent);
   const startedAt = Date.now();
   const budgetController = new AbortController();
@@ -123,17 +125,18 @@ export async function executeAgyTask(
           throw new Error(`Working directory is not a directory: ${options.dir}`);
         }
 
-        let conversationId = options.conversation_id;
-        const resumesLatest = options.continue || options.new_session === false;
+        let conversationId = selection.kind === "resume" ? selection.id : undefined;
+        // Explicit IDs with new_session=false historically inherit the latest
+        // agent too. This lookup policy is separate from the selected CLI ID.
+        const resumesLatest = selection.kind === "latest" || options.new_session === false;
         const prior =
           (!conversationId && options.new_session !== true) || (!agent && resumesLatest)
             ? await getSession(options.dir)
             : undefined;
         if (
-          !conversationId &&
-          !options.continue &&
-          prior?.last_conversation_id &&
-          options.new_session === false
+          selection.kind === "latest" &&
+          selection.source === "recorded" &&
+          prior?.last_conversation_id
         ) {
           conversationId = prior.last_conversation_id;
         }
@@ -227,7 +230,7 @@ export async function executeAgyTask(
               dir: options.dir,
               timeout_ms: runTimeoutMs,
               conversation_id: conversationId,
-              continue: options.continue,
+              continue: selection.kind === "latest" && selection.source === "cli",
               stream: options.stream ?? true,
               skipPermissions,
             },
@@ -354,12 +357,7 @@ export function validateAgyExecutionOptions(options: AgyExecutionOptions): void 
   if (!Number.isFinite(options.timeout_ms) || options.timeout_ms <= 0) {
     throw new Error("agy timeout_ms must be a positive finite number");
   }
-  if (options.continue && options.conversation_id) {
-    throw new Error("agy cannot use --continue and --conversation together");
-  }
-  if (options.new_session === true && (options.continue || options.conversation_id)) {
-    throw new Error("agy new_session cannot be combined with a conversation to resume");
-  }
+  normalizeConversationSelection(options);
 }
 
 function remainingBudget(startedAt: number, timeoutMs: number): number {

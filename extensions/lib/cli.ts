@@ -1,17 +1,7 @@
 export { detectVerifyCommand, detectVerifyCommandFromPackageJson } from "./verify.js";
 export { parseJsonResponse } from "./parse.js";
 
-export type AgyModel =
-  | "flash-low"
-  | "flash-medium"
-  | "flash-high"
-  | "pro-low"
-  | "pro-high"
-  | "sonnet"
-  | "opus"
-  | "gpt-oss";
-
-export const AGY_MODEL_ALIASES: readonly AgyModel[] = [
+export const AGY_MODEL_ALIASES = [
   "flash-low",
   "flash-medium",
   "flash-high",
@@ -20,7 +10,9 @@ export const AGY_MODEL_ALIASES: readonly AgyModel[] = [
   "sonnet",
   "opus",
   "gpt-oss",
-];
+] as const;
+
+export type AgyModel = typeof AGY_MODEL_ALIASES[number];
 
 export function isAgyModel(value: unknown): value is AgyModel {
   return typeof value === "string" && (AGY_MODEL_ALIASES as readonly string[]).includes(value);

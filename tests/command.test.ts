@@ -25,6 +25,7 @@ import {
 import { resolveAgyMode, truncate } from "../extensions/index.js";
 import piAgyExtension from "../extensions/index.js";
 import { registerAgyCommand } from "../extensions/commands.js";
+import { executeConfirmedRun } from "../extensions/command-run.js";
 import { executeAgyTask } from "../extensions/lib/execute.js";
 import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withDirLock } from "../extensions/lib/lock.js";
@@ -545,3 +546,36 @@ describe("parseAgyCommandArgs", () => {
 });
 
 
+
+
+describe("confirmed command conversation flags", () => {
+  for (const flags of [{}, { continue: false }, { conversation_id: "" }, { conversation_id: "explicit-id" }, { continue: true }, { conversation_id: "", continue: true }, { conversation_id: "explicit-id", continue: true }]) {
+    it(JSON.stringify(flags), async () => {
+      const raw = JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
+      await withFakeAgy(raw, async (bin) => {
+        const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-command-selection-"));
+        const notifications: string[] = [];
+        const receipts: any[] = [];
+        await executeConfirmedRun({ appendEntry: (_type: string, data: unknown) => receipts.push(data) } as unknown as ExtensionAPI, {
+          cwd,
+          waitForIdle: async () => {},
+          ui: { setStatus: () => {}, notify: (message: string) => notifications.push(message) },
+        } as unknown as ExtensionCommandContext, { prompt: "selection", mode: "plan", model: "flash-medium", ...flags });
+        const args = await readFakeAgyArgs(bin);
+        if (flags.conversation_id && flags.continue) {
+          assert.deepEqual(args, []);
+          assert.deepEqual(notifications, ["agy failed: agy cannot use --continue and --conversation together"]);
+          assert.equal(receipts.length, 0);
+        } else {
+          const print = args.find((argv) => argv.includes("-p") && !argv.includes("/usage"));
+          assert.ok(print);
+          assert.equal(print.includes("--continue"), Boolean(flags.continue));
+          assert.equal(print.includes("--conversation"), Boolean(flags.conversation_id));
+          if (flags.conversation_id) assert.ok(hasFlagPair(print, "--conversation", flags.conversation_id));
+          assert.equal(receipts.length, 1);
+          assert.deepEqual(notifications, []);
+        }
+      });
+    });
+  }
+});

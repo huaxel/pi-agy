@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.10
+
+- Harden process-tree cancellation, provider tool forwarding, bridge reconnection, terminal response handling, and cancelled resumes.
+- Bound bridge request complexity and refresh the MCP dependency floor and qualified Pi development dependencies.
+- Derive delegation model aliases and tool schemas from one definition; normalize conversation selection while preserving resume behavior.
+- Keep completed background polling compact; retrieve full results with `agy_tasks collect`.
+- Expand regression coverage to 414 tests; typecheck and package checks pass.
+
 ## 0.7.9
 
 - Rewrite the README as a concise overview of agy task delegation and the Antigravity provider, retaining installation, configuration, and development essentials.

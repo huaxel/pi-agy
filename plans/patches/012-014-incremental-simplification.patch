@@ -1,0 +1,804 @@
+diff --git a/extensions/command-run.ts b/extensions/command-run.ts
+index d04081f..2fba3d7 100644
+--- a/extensions/command-run.ts
++++ b/extensions/command-run.ts
+@@ -8,6 +8,7 @@ import { describeWhen, truncate } from "./lib/output.js";
+ import { buildAcceptEditsConfirm } from "./lib/confirm.js";
+ import { AGY_RUN_ENTRY_TYPE, type AgyRunReceipt } from "./lib/render.js";
+ import { getHistory } from "./lib/sessions.js";
++import { normalizeConversationSelection, type ConversationSelection } from "./lib/request.js";
+ 
+ export interface InteractiveRun {
+   mode: "plan" | "accept-edits" | "sandbox";
+@@ -83,11 +84,23 @@ export async function executeConfirmedRun(
+   run: InteractiveRun,
+ ): Promise<void> {
+   const cwd = ctx.cwd;
++  let selection: ConversationSelection;
++  try {
++    selection = normalizeConversationSelection(run);
++  } catch (error) {
++    if (ctx.signal?.aborted) {
++      ctx.ui.notify("agy: cancelled", "info");
++    } else {
++      const message = error instanceof Error ? error.message : String(error);
++      ctx.ui.notify(`agy failed: ${message}`, "error");
++    }
++    return;
++  }
+   await ctx.waitForIdle();
+   const requestedContextMode = run.context ?? "none";
+   const contextMode = effectiveResumeContextMode(
+     requestedContextMode,
+-    Boolean(run.conversation_id || run.continue),
++    selection.kind !== "new",
+   );
+   const contextText =
+     contextMode === "none"
+@@ -127,7 +140,7 @@ export async function executeConfirmedRun(
+         timeout_ms: run.timeout_ms ?? DEFAULT_TIMEOUT_MS,
+         conversation_id: run.conversation_id,
+         continue: run.continue,
+-        new_session: run.conversation_id || run.continue ? false : true,
++        new_session: selection.kind === "new",
+         stream: true,
+         context: contextMode,
+         context_text: contextText,
+diff --git a/extensions/lib/cli.ts b/extensions/lib/cli.ts
+index f404fdd..a77f790 100644
+--- a/extensions/lib/cli.ts
++++ b/extensions/lib/cli.ts
+@@ -1,17 +1,7 @@
+ export { detectVerifyCommand, detectVerifyCommandFromPackageJson } from "./verify.js";
+ export { parseJsonResponse } from "./parse.js";
+ 
+-export type AgyModel =
+-  | "flash-low"
+-  | "flash-medium"
+-  | "flash-high"
+-  | "pro-low"
+-  | "pro-high"
+-  | "sonnet"
+-  | "opus"
+-  | "gpt-oss";
+-
+-export const AGY_MODEL_ALIASES: readonly AgyModel[] = [
++export const AGY_MODEL_ALIASES = [
+   "flash-low",
+   "flash-medium",
+   "flash-high",
+@@ -20,7 +10,9 @@ export const AGY_MODEL_ALIASES: readonly AgyModel[] = [
+   "sonnet",
+   "opus",
+   "gpt-oss",
+-];
++] as const;
++
++export type AgyModel = typeof AGY_MODEL_ALIASES[number];
+ 
+ export function isAgyModel(value: unknown): value is AgyModel {
+   return typeof value === "string" && (AGY_MODEL_ALIASES as readonly string[]).includes(value);
+diff --git a/extensions/lib/execute.ts b/extensions/lib/execute.ts
+index a180bae..42c9e77 100644
+--- a/extensions/lib/execute.ts
++++ b/extensions/lib/execute.ts
+@@ -35,6 +35,7 @@ import {
+ } from "./postflight.js";
+ import { resetPreflightCache, runPreflight } from "./preflight.js";
+ import { getHistory, getSession, saveSession, conversationSummary } from "./sessions.js";
++import { normalizeConversationSelection } from "./request.js";
+ 
+ export type AgyMode = "plan" | "accept-edits" | "sandbox";
+ 
+@@ -92,6 +93,7 @@ export async function executeAgyTask(
+   onProgress?: (message: string) => void,
+ ): Promise<AgyExecutionResult> {
+   validateAgyExecutionOptions(options);
++  const selection = normalizeConversationSelection(options);
+   let agent = normalizeAgyAgentName(options.agent);
+   const startedAt = Date.now();
+   const budgetController = new AbortController();
+@@ -123,17 +125,18 @@ export async function executeAgyTask(
+           throw new Error(`Working directory is not a directory: ${options.dir}`);
+         }
+ 
+-        let conversationId = options.conversation_id;
+-        const resumesLatest = options.continue || options.new_session === false;
++        let conversationId = selection.kind === "resume" ? selection.id : undefined;
++        // Explicit IDs with new_session=false historically inherit the latest
++        // agent too. This lookup policy is separate from the selected CLI ID.
++        const resumesLatest = selection.kind === "latest" || options.new_session === false;
+         const prior =
+           (!conversationId && options.new_session !== true) || (!agent && resumesLatest)
+             ? await getSession(options.dir)
+             : undefined;
+         if (
+-          !conversationId &&
+-          !options.continue &&
+-          prior?.last_conversation_id &&
+-          options.new_session === false
++          selection.kind === "latest" &&
++          selection.source === "recorded" &&
++          prior?.last_conversation_id
+         ) {
+           conversationId = prior.last_conversation_id;
+         }
+@@ -227,7 +230,7 @@ export async function executeAgyTask(
+               dir: options.dir,
+               timeout_ms: runTimeoutMs,
+               conversation_id: conversationId,
+-              continue: options.continue,
++              continue: selection.kind === "latest" && selection.source === "cli",
+               stream: options.stream ?? true,
+               skipPermissions,
+             },
+@@ -354,12 +357,7 @@ export function validateAgyExecutionOptions(options: AgyExecutionOptions): void
+   if (!Number.isFinite(options.timeout_ms) || options.timeout_ms <= 0) {
+     throw new Error("agy timeout_ms must be a positive finite number");
+   }
+-  if (options.continue && options.conversation_id) {
+-    throw new Error("agy cannot use --continue and --conversation together");
+-  }
+-  if (options.new_session === true && (options.continue || options.conversation_id)) {
+-    throw new Error("agy new_session cannot be combined with a conversation to resume");
+-  }
++  normalizeConversationSelection(options);
+ }
+ 
+ function remainingBudget(startedAt: number, timeoutMs: number): number {
+diff --git a/extensions/tools.ts b/extensions/tools.ts
+index 2754645..69b955b 100644
+--- a/extensions/tools.ts
++++ b/extensions/tools.ts
+@@ -1,9 +1,10 @@
+ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+-import { Type } from "@sinclair/typebox";
++import { Type, type SchemaOptions } from "@sinclair/typebox";
+ import { stat } from "node:fs/promises";
+ import * as path from "node:path";
+ 
+ import {
++  AGY_MODEL_ALIASES,
+   checkAgyUsage,
+   findAgyQuotaEntries,
+   formatAgyUsage,
+@@ -31,6 +32,7 @@ import { describeWhen, truncate } from "./lib/output.js";
+ import { BackgroundTaskRunner, summarizeTaskPrompt } from "./lib/background.js";
+ import { renderAgyCall, renderAgyResult } from "./lib/render.js";
+ import { getHistory, getSession } from "./lib/sessions.js";
++import { normalizeConversationSelection } from "./lib/request.js";
+ 
+ async function resolveToolDir(cwd: string, dir?: string): Promise<string> {
+   const resolved = dir ? path.resolve(cwd, dir) : cwd;
+@@ -58,6 +60,10 @@ export function getBackgroundRunner(): BackgroundTaskRunner {
+   return backgroundRunner;
+ }
+ 
++function modelAliasSchema(options: SchemaOptions) {
++  return Type.Union(AGY_MODEL_ALIASES.map((alias) => Type.Literal(alias)), options);
++}
++
+ export function registerAgyTools(pi: ExtensionAPI): void {
+   pi.registerTool({
+     name: "agy_execute",
+@@ -78,19 +84,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
+         minLength: 1,
+       }),
+       model: Type.Optional(
+-        Type.Union(
+-          [
+-            Type.Literal("flash-low"),
+-            Type.Literal("flash-medium"),
+-            Type.Literal("flash-high"),
+-            Type.Literal("pro-low"),
+-            Type.Literal("pro-high"),
+-            Type.Literal("sonnet"),
+-            Type.Literal("opus"),
+-            Type.Literal("gpt-oss"),
+-          ],
+-          { description: "Model alias. Defaults to 'flash-medium'.", default: "flash-medium" },
+-        ),
++        modelAliasSchema({ description: "Model alias. Defaults to 'flash-medium'.", default: "flash-medium" }),
+       ),
+       effort: Type.Optional(
+         Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
+@@ -183,12 +177,13 @@ export function registerAgyTools(pi: ExtensionAPI): void {
+       const mode = resolveAgyMode(params.mode);
+       const model = params.model as AgyModel | undefined;
+       const contextMode = (params.context ?? "none") as AgyContextMode;
++      const selection = normalizeConversationSelection(params);
+       let agent = normalizeAgyAgentName(params.agent);
+-      if (!agent && params.conversation_id) {
++      if (!agent && selection.kind === "resume") {
+         agent = (await getHistory(cwd)).find(
+-          (entry) => entry.conversation_id === params.conversation_id,
++          (entry) => entry.conversation_id === selection.id,
+         )?.agent;
+-      } else if (!agent && (params.continue || params.new_session === false)) {
++      } else if (!agent && selection.kind === "latest") {
+         const storedAgent = (await getSession(cwd))?.last_agent;
+         try {
+           agent = normalizeAgyAgentName(storedAgent);
+@@ -196,9 +191,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
+           // Ignore malformed legacy session metadata.
+         }
+       }
+-      const isResume = Boolean(
+-        params.conversation_id || params.continue || params.new_session === false,
+-      );
++      const isResume = selection.kind !== "new";
+       const effectiveContextMode = effectiveResumeContextMode(contextMode, isResume);
+       const contextText =
+         effectiveContextMode === "none"
+@@ -459,7 +452,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
+         const outcome = task.state === "running"
+           ? ""
+           : task.state === "done"
+-            ? `\nresult: ${truncate(task.text ?? "(empty response)")}`
++            ? "\nResult ready; use agy_tasks collect to retrieve it."
+             : `\n${task.state}${task.error ? `: ${task.error}` : ""}`;
+         const conversation = task.conversationId ? `\nconversation: ${task.conversationId}` : "";
+         return {
+@@ -505,19 +498,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
+     promptSnippet: "Inspect Antigravity model quotas before choosing a model",
+     parameters: Type.Object({
+       model: Type.Optional(
+-        Type.Union(
+-          [
+-            Type.Literal("flash-low"),
+-            Type.Literal("flash-medium"),
+-            Type.Literal("flash-high"),
+-            Type.Literal("pro-low"),
+-            Type.Literal("pro-high"),
+-            Type.Literal("sonnet"),
+-            Type.Literal("opus"),
+-            Type.Literal("gpt-oss"),
+-          ],
+-          { description: "Optional model alias to place first in the report." },
+-        ),
++        modelAliasSchema({ description: "Optional model alias to place first in the report." }),
+       ),
+       dir: Type.Optional(
+         Type.String({
+diff --git a/tests/background.test.ts b/tests/background.test.ts
+index e8ed311..c6ac959 100644
+--- a/tests/background.test.ts
++++ b/tests/background.test.ts
+@@ -356,71 +356,100 @@ describe("background tools", () => {
+     });
+   });
+ 
+-  it("keeps full payloads out of list and status details", async () => {
++  it("keeps full payloads behind collect while list and repeated status observe", async () => {
++    const marker = "result-only-013-7c389a";
+     const raw =
+       JSON.stringify({
+         event: "result",
+-        result: { status: "SUCCESS", response: "payload-data", conversation_id: "conv-trim" },
++        result: { status: "SUCCESS", response: marker, conversation_id: "conv-trim" },
+       }) + "\n";
+     await withFakeAgy(raw, async () => {
+       resetPreflightCache();
+-      const tools: CapturedTool[] = [];
+-      piAgyExtension({
+-        registerCommand: () => {},
+-        registerTool: (tool: CapturedTool) => {
+-          tools.push(tool);
+-        },
+-      } as unknown as ExtensionAPI);
++      const { tools } = captureTools();
+       const executeTool = findTool(tools, "agy_execute");
+       const tasksTool = findTool(tools, "agy_tasks");
+       const workDir = await tempDir("pi-agy-bg-trim-");
+       const ctx = { cwd: workDir } as unknown as Parameters<CapturedTool["execute"]>[4];
+-      const started = await executeTool.execute(
+-        "call-1",
+-        { prompt: "trim job", mode: "plan", background: true },
+-        new AbortController().signal,
+-        undefined,
+-        ctx,
+-      );
+-      const handle = started.details.handle as string;
+-      for (let i = 0; i < 50; i++) {
+-        const current = await tasksTool.execute(
+-          "call-2",
+-          { action: "status", handle },
++      try {
++        const started = await executeTool.execute(
++          "call-1",
++          { prompt: "trim job", mode: "plan", background: true },
++          new AbortController().signal,
++          undefined,
++          ctx,
++        );
++        const handle = started.details.handle as string;
++        for (let i = 0; i < 50; i++) {
++          const current = await tasksTool.execute(
++            "call-2",
++            { action: "status", handle },
++            new AbortController().signal,
++            undefined,
++            ctx,
++          );
++          if (current.details.task.state !== "running") break;
++          await new Promise((resolve) => setTimeout(resolve, 100));
++        }
++        for (let i = 0; i < 2; i++) {
++          const status = await tasksTool.execute(
++            "call-status",
++            { action: "status", handle },
++            new AbortController().signal,
++            undefined,
++            ctx,
++          );
++          assert.equal(status.details.task.state, "done");
++          assert.equal(status.details.task.conversationId, "conv-trim");
++          assert.match(status.content[0].text, /conv-trim/);
++          assert.equal("text" in status.details.task, false);
++          assert.equal("details" in status.details.task, false);
++          assert.equal(JSON.stringify(status.content).includes(marker), false, "status content exposes result marker");
++          assert.equal(JSON.stringify(status.details).includes(marker), false);
++
++          const listed = await tasksTool.execute(
++            "call-list",
++            { action: "list", dir: workDir },
++            new AbortController().signal,
++            undefined,
++            ctx,
++          );
++          assert.equal(listed.details.tasks.length, 1);
++          assert.equal(listed.details.tasks[0].state, "done");
++          assert.equal(listed.details.tasks[0].conversationId, "conv-trim");
++          assert.equal("text" in listed.details.tasks[0], false);
++          assert.equal("details" in listed.details.tasks[0], false);
++          assert.equal(JSON.stringify(listed.content).includes(marker), false);
++          assert.equal(JSON.stringify(listed.details).includes(marker), false);
++        }
++        const collected = await tasksTool.execute(
++          "call-collect",
++          { action: "collect", handle },
+           new AbortController().signal,
+           undefined,
+           ctx,
+         );
+-        if (current.details.task.state !== "running") break;
+-        await new Promise((resolve) => setTimeout(resolve, 100));
++        assert.ok(collected.content[0].text.includes(marker));
++        assert.equal(collected.details.task.text, marker);
++        assert.equal(collected.details.task.state, "done");
++        assert.equal(collected.details.task.conversationId, "conv-trim");
++        assert.equal(collected.details.task.details.conversation_id, "conv-trim");
++        assert.equal(collected.details.task.details.dir, workDir);
++        assert.equal(getBackgroundRunner().get(handle), undefined);
++        await assert.rejects(
++          tasksTool.execute("call-after-collect", { action: "status", handle }, new AbortController().signal, undefined, ctx),
++          /unknown background task/,
++        );
++        const listed = await tasksTool.execute(
++          "call-list-after-collect",
++          { action: "list", dir: workDir },
++          new AbortController().signal,
++          undefined,
++          ctx,
++        );
++        assert.deepEqual(listed.details.tasks, []);
++      } finally {
++        await getBackgroundRunner().shutdown();
+       }
+-      const listed = await tasksTool.execute(
+-        "call-3",
+-        { action: "list", dir: workDir },
+-        new AbortController().signal,
+-        undefined,
+-        ctx,
+-      );
+-      assert.equal(listed.details.tasks.length, 1);
+-      assert.equal("text" in listed.details.tasks[0], false);
+-      assert.equal("details" in listed.details.tasks[0], false);
+-      const status = await tasksTool.execute(
+-        "call-4",
+-        { action: "status", handle },
+-        new AbortController().signal,
+-        undefined,
+-        ctx,
+-      );
+-      assert.equal("text" in status.details.task, false);
+-      const collected = await tasksTool.execute(
+-        "call-5",
+-        { action: "collect", handle },
+-        new AbortController().signal,
+-        undefined,
+-        ctx,
+-      );
+-      assert.match(collected.content[0].text, /payload-data/);
+-      await getBackgroundRunner().shutdown();
+     });
+   });
+ 
+diff --git a/tests/cli-args.test.ts b/tests/cli-args.test.ts
+index c5de94a..34c8a02 100644
+--- a/tests/cli-args.test.ts
++++ b/tests/cli-args.test.ts
+@@ -13,6 +13,7 @@ import type {
+ const execAsync = promisify(execFile);
+ 
+ import {
++  AGY_MODEL_ALIASES,
+   buildAgyArgs,
+   buildAgyPrompt,
+   isAgyModel,
+@@ -247,9 +248,10 @@ describe("model catalog", () => {
+   });
+ 
+   it("accepts only known model aliases", () => {
+-    assert.ok(isAgyModel("sonnet"));
+-    assert.ok(!isAgyModel("gpt-4"));
+-    assert.ok(!isAgyModel(undefined));
++    for (const alias of AGY_MODEL_ALIASES) assert.ok(isAgyModel(alias), alias);
++    for (const value of ["gpt-4", "", "FLASH-LOW", undefined, null, 1, {}]) {
++      assert.equal(isAgyModel(value), false);
++    }
+   });
+ });
+ 
+diff --git a/tests/command.test.ts b/tests/command.test.ts
+index 28e24f1..14a6e3b 100644
+--- a/tests/command.test.ts
++++ b/tests/command.test.ts
+@@ -25,6 +25,7 @@ import {
+ import { resolveAgyMode, truncate } from "../extensions/index.js";
+ import piAgyExtension from "../extensions/index.js";
+ import { registerAgyCommand } from "../extensions/commands.js";
++import { executeConfirmedRun } from "../extensions/command-run.js";
+ import { executeAgyTask } from "../extensions/lib/execute.js";
+ import { resetPreflightCache } from "../extensions/lib/preflight.js";
+ import { withDirLock } from "../extensions/lib/lock.js";
+@@ -545,3 +546,36 @@ describe("parseAgyCommandArgs", () => {
+ });
+ 
+ 
++
++
++describe("confirmed command conversation flags", () => {
++  for (const flags of [{}, { continue: false }, { conversation_id: "" }, { conversation_id: "explicit-id" }, { continue: true }, { conversation_id: "", continue: true }, { conversation_id: "explicit-id", continue: true }]) {
++    it(JSON.stringify(flags), async () => {
++      const raw = JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
++      await withFakeAgy(raw, async (bin) => {
++        const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-command-selection-"));
++        const notifications: string[] = [];
++        const receipts: any[] = [];
++        await executeConfirmedRun({ appendEntry: (_type: string, data: unknown) => receipts.push(data) } as unknown as ExtensionAPI, {
++          cwd,
++          waitForIdle: async () => {},
++          ui: { setStatus: () => {}, notify: (message: string) => notifications.push(message) },
++        } as unknown as ExtensionCommandContext, { prompt: "selection", mode: "plan", model: "flash-medium", ...flags });
++        const args = await readFakeAgyArgs(bin);
++        if (flags.conversation_id && flags.continue) {
++          assert.deepEqual(args, []);
++          assert.deepEqual(notifications, ["agy failed: agy cannot use --continue and --conversation together"]);
++          assert.equal(receipts.length, 0);
++        } else {
++          const print = args.find((argv) => argv.includes("-p") && !argv.includes("/usage"));
++          assert.ok(print);
++          assert.equal(print.includes("--continue"), Boolean(flags.continue));
++          assert.equal(print.includes("--conversation"), Boolean(flags.conversation_id));
++          if (flags.conversation_id) assert.ok(hasFlagPair(print, "--conversation", flags.conversation_id));
++          assert.equal(receipts.length, 1);
++          assert.deepEqual(notifications, []);
++        }
++      });
++    });
++  }
++});
+diff --git a/tests/execution.test.ts b/tests/execution.test.ts
+index 5aab298..9b7eaea 100644
+--- a/tests/execution.test.ts
++++ b/tests/execution.test.ts
+@@ -26,6 +26,7 @@ import {
+ import { resolveAgyMode, truncate } from "../extensions/index.js";
+ import piAgyExtension from "../extensions/index.js";
+ import { registerAgyCommand } from "../extensions/commands.js";
++import { executeConfirmedRun } from "../extensions/command-run.js";
+ import { executeAgyTask } from "../extensions/lib/execute.js";
+ import { resetPreflightCache } from "../extensions/lib/preflight.js";
+ import { withDirLock } from "../extensions/lib/lock.js";
+@@ -1742,3 +1743,164 @@ describe("shared executor", () => {
+     });
+   });
+ });
++
++describe("conversation flag characterization", () => {
++  const cases: Array<{
++    name: string;
++    flags: { conversation_id?: string; continue?: boolean; new_session?: boolean };
++    stored?: boolean;
++    id?: string;
++    cli?: boolean;
++    agent?: string;
++    error?: string;
++  }> = [
++    { name: "absent", flags: {} },
++    { name: "new true", flags: { new_session: true } },
++    { name: "false continue", flags: { continue: false } },
++    { name: "empty id", flags: { conversation_id: "" } },
++    { name: "empty id is compatible with new", flags: { conversation_id: "", new_session: true } },
++    { name: "recorded without history", flags: { new_session: false } },
++    { name: "recorded with history", flags: { new_session: false }, stored: true, id: "stored-id", agent: "stored-agent" },
++    { name: "empty id selects recorded", flags: { conversation_id: "", continue: false, new_session: false }, stored: true, id: "stored-id", agent: "stored-agent" },
++    { name: "CLI latest keeps CLI continue", flags: { continue: true }, stored: true, cli: true, agent: "stored-agent" },
++    { name: "CLI latest without history", flags: { continue: true }, cli: true },
++    { name: "CLI latest wins over recorded", flags: { continue: true, new_session: false, conversation_id: "" }, stored: true, cli: true, agent: "stored-agent" },
++    { name: "explicit id", flags: { conversation_id: "explicit-id", continue: false }, stored: true, id: "explicit-id", agent: "history-agent" },
++    { name: "explicit id with false new retains latest agent policy", flags: { conversation_id: "explicit-id", new_session: false }, stored: true, id: "explicit-id", agent: "stored-agent" },
++    { name: "id and continue conflict", flags: { conversation_id: "explicit-id", continue: true }, error: "agy cannot use --continue and --conversation together" },
++    { name: "new and id conflict", flags: { conversation_id: "explicit-id", new_session: true }, error: "agy new_session cannot be combined with a conversation to resume" },
++    { name: "new and continue conflict", flags: { conversation_id: "", continue: true, new_session: true }, error: "agy new_session cannot be combined with a conversation to resume" },
++    { name: "all conflicting flags retain error precedence", flags: { conversation_id: "explicit-id", continue: true, new_session: true }, error: "agy cannot use --continue and --conversation together" },
++  ];
++  for (const testCase of cases) {
++    it(testCase.name, async () => {
++      const raw = JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
++      await withFakeAgy(raw, async (bin) => {
++        const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-selection-"));
++        if (testCase.stored) {
++          await mkdir(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
++          await writeFile(path.join(process.env.PI_CODING_AGENT_DIR!, "agy-sessions.json"), JSON.stringify({
++            [dir]: {
++              last_conversation_id: "stored-id", last_agent: "stored-agent",
++              history: [{ conversation_id: "explicit-id", agent: "history-agent", updated_at: new Date().toISOString() }],
++            },
++          }));
++        }
++        const run = () => executeAgyTask({ prompt: "selection", mode: "plan", model: "flash-medium", dir, timeout_ms: 60_000, ...testCase.flags }, undefined);
++        if (testCase.error) {
++          await assert.rejects(run(), { message: testCase.error });
++          assert.deepEqual(await readFakeAgyArgs(bin), []);
++          return;
++        }
++        const result = await run();
++        const args = (await readFakeAgyArgs(bin)).find((argv) => argv.includes("-p") && !argv.includes("/usage"));
++        assert.ok(args);
++        assert.equal(args.includes("--continue"), testCase.cli ?? false);
++        assert.equal(args.includes("--conversation"), Boolean(testCase.id));
++        if (testCase.id) assert.ok(hasFlagPair(args, "--conversation", testCase.id));
++        assert.equal(result.details.agent, testCase.agent);
++        assert.equal(args.includes("--agent"), Boolean(testCase.agent));
++        if (testCase.agent) assert.ok(hasFlagPair(args, "--agent", testCase.agent));
++      });
++    });
++  }
++});
++
++describe("conversation selection entrypoint parity", () => {
++  for (const flags of [{}, { conversation_id: "" }, { conversation_id: "saved-id" }, { continue: true }]) {
++    for (const context of ["none", "recent"] as const) {
++      it(`${JSON.stringify(flags)} context=${context}`, async () => {
++        const raw = JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
++        await withFakeAgy(raw, async (bin) => {
++          const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-parity-"));
++          await mkdir(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
++          await writeFile(path.join(process.env.PI_CODING_AGENT_DIR!, "agy-sessions.json"), JSON.stringify({
++            [cwd]: {
++              last_conversation_id: "saved-id", last_agent: "saved-agent",
++              history: [{ conversation_id: "saved-id", agent: "saved-agent", updated_at: new Date().toISOString() }],
++            },
++          }));
++          const ctx = {
++            cwd, hasUI: false, waitForIdle: async () => {},
++            ui: { setStatus: () => {}, notify: (message: string) => assert.fail(message) },
++            sessionManager: { buildContextEntries: () => [{ type: "message", message: { role: "user", content: "parity context" } }] },
++          };
++          const receipts: any[] = [];
++          await executeConfirmedRun({ appendEntry: (_type: string, data: unknown) => receipts.push(data) } as unknown as ExtensionAPI,
++            ctx as unknown as ExtensionCommandContext,
++            { prompt: "parity task", mode: "plan", model: "flash-medium", context, ...flags });
++          let tool: { execute: (...args: any[]) => Promise<any> } | undefined;
++          piAgyExtension({ registerCommand: () => {}, registerTool: (candidate: { name: string; execute: (...args: any[]) => Promise<any> }) => {
++            if (candidate.name === "agy_execute") tool = candidate;
++          } } as unknown as ExtensionAPI);
++          const result = await tool!.execute("parity", { prompt: "parity task", mode: "plan", model: "flash-medium", context, ...flags }, undefined, undefined, ctx);
++          const prints = (await readFakeAgyArgs(bin)).filter((argv) => argv.includes("-p") && !argv.includes("/usage"));
++          assert.equal(prints.length, 2);
++          assert.equal(receipts.length, 1);
++          const resume = Boolean(flags.conversation_id || flags.continue);
++          const expectedContext = context === "recent" && resume ? "summary" : context;
++          assert.equal(result.details.context_mode, expectedContext);
++          assert.equal(receipts[0].details.context_mode, expectedContext);
++          assert.equal(result.details.agent, resume ? "saved-agent" : undefined);
++          assert.equal(receipts[0].details.agent, result.details.agent);
++          for (const flag of ["--continue", "--conversation", "--agent"]) {
++            assert.equal(prints[0].includes(flag), prints[1].includes(flag));
++            if (prints[0].includes(flag)) assert.equal(prints[0][prints[0].indexOf(flag) + 1], prints[1][prints[1].indexOf(flag) + 1]);
++          }
++          assert.equal(prints[0][prints[0].indexOf("-p") + 1], prints[1][prints[1].indexOf("-p") + 1]);
++          assert.equal(result.details.context_chars, receipts[0].details.context_chars);
++        });
++      });
++    }
++  }
++
++  it("rejects tool conflicts before context, approval, or spawning", async () => {
++    await withFakeAgy("", async (bin) => {
++      let tool: { execute: (...args: any[]) => Promise<any> } | undefined;
++      piAgyExtension({ registerCommand: () => {}, registerTool: (candidate: { name: string; execute: (...args: any[]) => Promise<any> }) => {
++        if (candidate.name === "agy_execute") tool = candidate;
++      } } as unknown as ExtensionAPI);
++      for (const flags of [
++        { conversation_id: "id", continue: true },
++        { conversation_id: "id", new_session: true },
++        { conversation_id: "", continue: true, new_session: true },
++      ]) {
++        await assert.rejects(tool!.execute("conflict", { prompt: "task", mode: "accept-edits", context: "recent", ...flags }, undefined, undefined, {
++          cwd: "/nonexistent-014", hasUI: true,
++          ui: { confirm: () => assert.fail("must not confirm conflicting flags") },
++          sessionManager: { buildContextEntries: () => assert.fail("must not build context for conflicting flags") },
++        }), /agy (cannot use --continue and --conversation together|new_session cannot be combined with a conversation to resume)/);
++      }
++      assert.deepEqual(await readFakeAgyArgs(bin), []);
++    });
++  });
++
++  it("resolves recorded latest again after approval instead of caching the preview", async () => {
++    const raw = JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
++    await withFakeAgy(raw, async (bin) => {
++      const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-approval-history-"));
++      await mkdir(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
++      const storePath = path.join(process.env.PI_CODING_AGENT_DIR!, "agy-sessions.json");
++      await writeFile(storePath, JSON.stringify({ [cwd]: { last_conversation_id: "preview-id" } }));
++      let tool: { execute: (...args: any[]) => Promise<any> } | undefined;
++      piAgyExtension({ registerCommand: () => {}, registerTool: (candidate: { name: string; execute: (...args: any[]) => Promise<any> }) => {
++        if (candidate.name === "agy_execute") tool = candidate;
++      } } as unknown as ExtensionAPI);
++      let confirmations = 0;
++      const result = await tool!.execute("temporal", { prompt: "task", mode: "accept-edits", model: "flash-medium", new_session: false }, undefined, undefined, {
++        cwd, hasUI: true,
++        ui: { confirm: async () => {
++          confirmations++;
++          await writeFile(storePath, JSON.stringify({ [cwd]: { last_conversation_id: "execution-id", last_agent: "execution-agent" } }));
++          return true;
++        } },
++      });
++      assert.equal(confirmations, 1);
++      const print = (await readFakeAgyArgs(bin)).find((argv) => argv.includes("-p") && !argv.includes("/usage"));
++      assert.ok(print);
++      assert.ok(hasFlagPair(print, "--conversation", "execution-id"));
++      assert.ok(hasFlagPair(print, "--agent", "execution-agent"));
++      assert.equal(result.details.agent, "execution-agent");
++    });
++  });
++});
+diff --git a/extensions/lib/request.ts b/extensions/lib/request.ts
+new file mode 100644
+index 0000000..eccbcad
+--- /dev/null
++++ b/extensions/lib/request.ts
+@@ -0,0 +1,25 @@
++/** Pure interpretation of the public conversation-selection flags. */
++export type ConversationSelection =
++  | { kind: "new" }
++  | { kind: "latest"; source: "cli" | "recorded" }
++  | { kind: "resume"; id: string };
++
++export interface ConversationFlags {
++  conversation_id?: string;
++  continue?: boolean;
++  new_session?: boolean;
++}
++
++export function normalizeConversationSelection(flags: ConversationFlags): ConversationSelection {
++  // Empty IDs have always behaved like an omitted ID; do not trim or coerce.
++  if (flags.continue && flags.conversation_id) {
++    throw new Error("agy cannot use --continue and --conversation together");
++  }
++  if (flags.new_session === true && (flags.continue || flags.conversation_id)) {
++    throw new Error("agy new_session cannot be combined with a conversation to resume");
++  }
++  if (flags.conversation_id) return { kind: "resume", id: flags.conversation_id };
++  if (flags.continue) return { kind: "latest", source: "cli" };
++  if (flags.new_session === false) return { kind: "latest", source: "recorded" };
++  return { kind: "new" };
++}
+diff --git a/tests/model-schema.test.ts b/tests/model-schema.test.ts
+new file mode 100644
+index 0000000..7f96daa
+--- /dev/null
++++ b/tests/model-schema.test.ts
+@@ -0,0 +1,65 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
++import type { TObject } from "@sinclair/typebox";
++import { Value } from "@sinclair/typebox/value";
++
++import { AGY_MODEL_ALIASES } from "../extensions/lib/cli.js";
++import { registerAgyTools } from "../extensions/tools.js";
++
++interface CapturedTool {
++  name: string;
++  parameters: TObject;
++}
++
++function captureTools(): CapturedTool[] {
++  const tools: CapturedTool[] = [];
++  registerAgyTools({
++    registerTool: (tool: CapturedTool) => tools.push(tool),
++  } as unknown as ExtensionAPI);
++  return tools;
++}
++
++const expectedAliases = [
++  "flash-low",
++  "flash-medium",
++  "flash-high",
++  "pro-low",
++  "pro-high",
++  "sonnet",
++  "opus",
++  "gpt-oss",
++];
++
++describe("registered model schemas", () => {
++  it("keeps the canonical alias inventory in its exact order", () => {
++    assert.deepEqual(AGY_MODEL_ALIASES, expectedAliases);
++  });
++
++  for (const name of ["agy_execute", "agy_usage"]) {
++    it(`${name} preserves aliases, metadata, and optional validation`, () => {
++      const tool = captureTools().find((candidate) => candidate.name === name);
++      assert.ok(tool, `missing tool: ${name}`);
++      const model = tool.parameters.properties.model;
++      assert.deepEqual(model.anyOf.map((literal: { const: string }) => literal.const), expectedAliases);
++      assert.deepEqual(model.anyOf.map((literal: { const: string }) => literal.const), AGY_MODEL_ALIASES);
++      assert.equal(model.description, name === "agy_execute"
++        ? "Model alias. Defaults to 'flash-medium'."
++        : "Optional model alias to place first in the report.");
++      if (name === "agy_execute") {
++        assert.equal(model.default, "flash-medium");
++      } else {
++        assert.equal(Object.hasOwn(model, "default"), false);
++      }
++
++      const required = name === "agy_execute" ? { prompt: "test" } : {};
++      assert.equal(Value.Check(tool.parameters, required), true);
++      for (const alias of expectedAliases) {
++        assert.equal(Value.Check(tool.parameters, { ...required, model: alias }), true, alias);
++      }
++      for (const value of ["unknown", "", "FLASH-LOW", null, 1, {}]) {
++        assert.equal(Value.Check(tool.parameters, { ...required, model: value }), false);
++      }
++    });
++  }
++});
+diff --git a/tests/request.test.ts b/tests/request.test.ts
+new file mode 100644
+index 0000000..22deb24
+--- /dev/null
++++ b/tests/request.test.ts
+@@ -0,0 +1,27 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import { normalizeConversationSelection } from "../extensions/lib/request.js";
++
++describe("normalizeConversationSelection", () => {
++  // Exhaust every public combination, including empty IDs and explicit false.
++  for (const conversation_id of [undefined, "", "explicit-id", " "]) {
++    for (const resume of [undefined, false, true]) {
++      for (const new_session of [undefined, false, true]) {
++        const flags = { conversation_id, continue: resume, new_session };
++        it(JSON.stringify(flags), () => {
++          if (resume && conversation_id) {
++            assert.throws(() => normalizeConversationSelection(flags), { message: "agy cannot use --continue and --conversation together" });
++          } else if (new_session === true && (resume || conversation_id)) {
++            assert.throws(() => normalizeConversationSelection(flags), { message: "agy new_session cannot be combined with a conversation to resume" });
++          } else {
++            const expected = conversation_id ? { kind: "resume", id: conversation_id }
++              : resume ? { kind: "latest", source: "cli" }
++                : new_session === false ? { kind: "latest", source: "recorded" }
++                  : { kind: "new" };
++            assert.deepEqual(normalizeConversationSelection(Object.freeze(flags)), expected);
++          }
++        });
++      }
++    }
++  }
++});

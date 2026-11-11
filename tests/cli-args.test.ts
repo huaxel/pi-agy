@@ -13,6 +13,7 @@ import type {
 const execAsync = promisify(execFile);
 
 import {
+  AGY_MODEL_ALIASES,
   buildAgyArgs,
   buildAgyPrompt,
   isAgyModel,
@@ -247,9 +248,10 @@ describe("model catalog", () => {
   });
 
   it("accepts only known model aliases", () => {
-    assert.ok(isAgyModel("sonnet"));
-    assert.ok(!isAgyModel("gpt-4"));
-    assert.ok(!isAgyModel(undefined));
+    for (const alias of AGY_MODEL_ALIASES) assert.ok(isAgyModel(alias), alias);
+    for (const value of ["gpt-4", "", "FLASH-LOW", undefined, null, 1, {}]) {
+      assert.equal(isAgyModel(value), false);
+    }
   });
 });
 

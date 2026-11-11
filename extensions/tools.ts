@@ -1,9 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type, type SchemaOptions } from "@sinclair/typebox";
 import { stat } from "node:fs/promises";
 import * as path from "node:path";
 
 import {
+  AGY_MODEL_ALIASES,
   checkAgyUsage,
   findAgyQuotaEntries,
   formatAgyUsage,
@@ -31,6 +32,7 @@ import { describeWhen, truncate } from "./lib/output.js";
 import { BackgroundTaskRunner, summarizeTaskPrompt } from "./lib/background.js";
 import { renderAgyCall, renderAgyResult } from "./lib/render.js";
 import { getHistory, getSession } from "./lib/sessions.js";
+import { normalizeConversationSelection } from "./lib/request.js";
 
 async function resolveToolDir(cwd: string, dir?: string): Promise<string> {
   const resolved = dir ? path.resolve(cwd, dir) : cwd;
@@ -58,6 +60,10 @@ export function getBackgroundRunner(): BackgroundTaskRunner {
   return backgroundRunner;
 }
 
+function modelAliasSchema(options: SchemaOptions) {
+  return Type.Union(AGY_MODEL_ALIASES.map((alias) => Type.Literal(alias)), options);
+}
+
 export function registerAgyTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "agy_execute",
@@ -78,19 +84,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
         minLength: 1,
       }),
       model: Type.Optional(
-        Type.Union(
-          [
-            Type.Literal("flash-low"),
-            Type.Literal("flash-medium"),
-            Type.Literal("flash-high"),
-            Type.Literal("pro-low"),
-            Type.Literal("pro-high"),
-            Type.Literal("sonnet"),
-            Type.Literal("opus"),
-            Type.Literal("gpt-oss"),
-          ],
-          { description: "Model alias. Defaults to 'flash-medium'.", default: "flash-medium" },
-        ),
+        modelAliasSchema({ description: "Model alias. Defaults to 'flash-medium'.", default: "flash-medium" }),
       ),
       effort: Type.Optional(
         Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
@@ -183,12 +177,13 @@ export function registerAgyTools(pi: ExtensionAPI): void {
       const mode = resolveAgyMode(params.mode);
       const model = params.model as AgyModel | undefined;
       const contextMode = (params.context ?? "none") as AgyContextMode;
+      const selection = normalizeConversationSelection(params);
       let agent = normalizeAgyAgentName(params.agent);
-      if (!agent && params.conversation_id) {
+      if (!agent && selection.kind === "resume") {
         agent = (await getHistory(cwd)).find(
-          (entry) => entry.conversation_id === params.conversation_id,
+          (entry) => entry.conversation_id === selection.id,
         )?.agent;
-      } else if (!agent && (params.continue || params.new_session === false)) {
+      } else if (!agent && selection.kind === "latest") {
         const storedAgent = (await getSession(cwd))?.last_agent;
         try {
           agent = normalizeAgyAgentName(storedAgent);
@@ -196,9 +191,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
           // Ignore malformed legacy session metadata.
         }
       }
-      const isResume = Boolean(
-        params.conversation_id || params.continue || params.new_session === false,
-      );
+      const isResume = selection.kind !== "new";
       const effectiveContextMode = effectiveResumeContextMode(contextMode, isResume);
       const contextText =
         effectiveContextMode === "none"
@@ -459,7 +452,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
         const outcome = task.state === "running"
           ? ""
           : task.state === "done"
-            ? `\nresult: ${truncate(task.text ?? "(empty response)")}`
+            ? "\nResult ready; use agy_tasks collect to retrieve it."
             : `\n${task.state}${task.error ? `: ${task.error}` : ""}`;
         const conversation = task.conversationId ? `\nconversation: ${task.conversationId}` : "";
         return {
@@ -505,19 +498,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
     promptSnippet: "Inspect Antigravity model quotas before choosing a model",
     parameters: Type.Object({
       model: Type.Optional(
-        Type.Union(
-          [
-            Type.Literal("flash-low"),
-            Type.Literal("flash-medium"),
-            Type.Literal("flash-high"),
-            Type.Literal("pro-low"),
-            Type.Literal("pro-high"),
-            Type.Literal("sonnet"),
-            Type.Literal("opus"),
-            Type.Literal("gpt-oss"),
-          ],
-          { description: "Optional model alias to place first in the report." },
-        ),
+        modelAliasSchema({ description: "Optional model alias to place first in the report." }),
       ),
       dir: Type.Optional(
         Type.String({

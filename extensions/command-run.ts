@@ -8,6 +8,7 @@ import { describeWhen, truncate } from "./lib/output.js";
 import { buildAcceptEditsConfirm } from "./lib/confirm.js";
 import { AGY_RUN_ENTRY_TYPE, type AgyRunReceipt } from "./lib/render.js";
 import { getHistory } from "./lib/sessions.js";
+import { normalizeConversationSelection, type ConversationSelection } from "./lib/request.js";
 
 export interface InteractiveRun {
   mode: "plan" | "accept-edits" | "sandbox";
@@ -83,11 +84,23 @@ export async function executeConfirmedRun(
   run: InteractiveRun,
 ): Promise<void> {
   const cwd = ctx.cwd;
+  let selection: ConversationSelection;
+  try {
+    selection = normalizeConversationSelection(run);
+  } catch (error) {
+    if (ctx.signal?.aborted) {
+      ctx.ui.notify("agy: cancelled", "info");
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`agy failed: ${message}`, "error");
+    }
+    return;
+  }
   await ctx.waitForIdle();
   const requestedContextMode = run.context ?? "none";
   const contextMode = effectiveResumeContextMode(
     requestedContextMode,
-    Boolean(run.conversation_id || run.continue),
+    selection.kind !== "new",
   );
   const contextText =
     contextMode === "none"
@@ -127,7 +140,7 @@ export async function executeConfirmedRun(
         timeout_ms: run.timeout_ms ?? DEFAULT_TIMEOUT_MS,
         conversation_id: run.conversation_id,
         continue: run.continue,
-        new_session: run.conversation_id || run.continue ? false : true,
+        new_session: selection.kind === "new",
         stream: true,
         context: contextMode,
         context_text: contextText,

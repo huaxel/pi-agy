@@ -356,71 +356,100 @@ describe("background tools", () => {
     });
   });
 
-  it("keeps full payloads out of list and status details", async () => {
+  it("keeps full payloads behind collect while list and repeated status observe", async () => {
+    const marker = "result-only-013-7c389a";
     const raw =
       JSON.stringify({
         event: "result",
-        result: { status: "SUCCESS", response: "payload-data", conversation_id: "conv-trim" },
+        result: { status: "SUCCESS", response: marker, conversation_id: "conv-trim" },
       }) + "\n";
     await withFakeAgy(raw, async () => {
       resetPreflightCache();
-      const tools: CapturedTool[] = [];
-      piAgyExtension({
-        registerCommand: () => {},
-        registerTool: (tool: CapturedTool) => {
-          tools.push(tool);
-        },
-      } as unknown as ExtensionAPI);
+      const { tools } = captureTools();
       const executeTool = findTool(tools, "agy_execute");
       const tasksTool = findTool(tools, "agy_tasks");
       const workDir = await tempDir("pi-agy-bg-trim-");
       const ctx = { cwd: workDir } as unknown as Parameters<CapturedTool["execute"]>[4];
-      const started = await executeTool.execute(
-        "call-1",
-        { prompt: "trim job", mode: "plan", background: true },
-        new AbortController().signal,
-        undefined,
-        ctx,
-      );
-      const handle = started.details.handle as string;
-      for (let i = 0; i < 50; i++) {
-        const current = await tasksTool.execute(
-          "call-2",
-          { action: "status", handle },
+      try {
+        const started = await executeTool.execute(
+          "call-1",
+          { prompt: "trim job", mode: "plan", background: true },
           new AbortController().signal,
           undefined,
           ctx,
         );
-        if (current.details.task.state !== "running") break;
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        const handle = started.details.handle as string;
+        for (let i = 0; i < 50; i++) {
+          const current = await tasksTool.execute(
+            "call-2",
+            { action: "status", handle },
+            new AbortController().signal,
+            undefined,
+            ctx,
+          );
+          if (current.details.task.state !== "running") break;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        for (let i = 0; i < 2; i++) {
+          const status = await tasksTool.execute(
+            "call-status",
+            { action: "status", handle },
+            new AbortController().signal,
+            undefined,
+            ctx,
+          );
+          assert.equal(status.details.task.state, "done");
+          assert.equal(status.details.task.conversationId, "conv-trim");
+          assert.match(status.content[0].text, /conv-trim/);
+          assert.equal("text" in status.details.task, false);
+          assert.equal("details" in status.details.task, false);
+          assert.equal(JSON.stringify(status.content).includes(marker), false, "status content exposes result marker");
+          assert.equal(JSON.stringify(status.details).includes(marker), false);
+
+          const listed = await tasksTool.execute(
+            "call-list",
+            { action: "list", dir: workDir },
+            new AbortController().signal,
+            undefined,
+            ctx,
+          );
+          assert.equal(listed.details.tasks.length, 1);
+          assert.equal(listed.details.tasks[0].state, "done");
+          assert.equal(listed.details.tasks[0].conversationId, "conv-trim");
+          assert.equal("text" in listed.details.tasks[0], false);
+          assert.equal("details" in listed.details.tasks[0], false);
+          assert.equal(JSON.stringify(listed.content).includes(marker), false);
+          assert.equal(JSON.stringify(listed.details).includes(marker), false);
+        }
+        const collected = await tasksTool.execute(
+          "call-collect",
+          { action: "collect", handle },
+          new AbortController().signal,
+          undefined,
+          ctx,
+        );
+        assert.ok(collected.content[0].text.includes(marker));
+        assert.equal(collected.details.task.text, marker);
+        assert.equal(collected.details.task.state, "done");
+        assert.equal(collected.details.task.conversationId, "conv-trim");
+        assert.equal(collected.details.task.details.conversation_id, "conv-trim");
+        assert.equal(collected.details.task.details.dir, workDir);
+        assert.equal(getBackgroundRunner().get(handle), undefined);
+        await assert.rejects(
+          tasksTool.execute("call-after-collect", { action: "status", handle }, new AbortController().signal, undefined, ctx),
+          /unknown background task/,
+        );
+        const listed = await tasksTool.execute(
+          "call-list-after-collect",
+          { action: "list", dir: workDir },
+          new AbortController().signal,
+          undefined,
+          ctx,
+        );
+        assert.deepEqual(listed.details.tasks, []);
+      } finally {
+        await getBackgroundRunner().shutdown();
       }
-      const listed = await tasksTool.execute(
-        "call-3",
-        { action: "list", dir: workDir },
-        new AbortController().signal,
-        undefined,
-        ctx,
-      );
-      assert.equal(listed.details.tasks.length, 1);
-      assert.equal("text" in listed.details.tasks[0], false);
-      assert.equal("details" in listed.details.tasks[0], false);
-      const status = await tasksTool.execute(
-        "call-4",
-        { action: "status", handle },
-        new AbortController().signal,
-        undefined,
-        ctx,
-      );
-      assert.equal("text" in status.details.task, false);
-      const collected = await tasksTool.execute(
-        "call-5",
-        { action: "collect", handle },
-        new AbortController().signal,
-        undefined,
-        ctx,
-      );
-      assert.match(collected.content[0].text, /payload-data/);
-      await getBackgroundRunner().shutdown();
     });
   });
 
