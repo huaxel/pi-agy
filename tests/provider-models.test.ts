@@ -23,6 +23,19 @@ const LIVE_MODELS = [
 ].join("\n");
 
 describe("provider catalog", () => {
+  it("accepts nonhyphen model ids and preserves exact values without effort", () => {
+    for (const [full, id] of [["argon", "argon"], ["r2", "r2"], ["123", "123"], ["model_v2", "model-v2"], ["model.v2", "model-v2"]]) {
+      for (const row of [full, `${full}\tDisplay Label`, `${full}  Display Label`, `${full} Display Label`]) {
+        const entries = parseProviderCatalog(row);
+        assert.deepEqual(entries, [{ full, id }], row);
+        assert.equal(toProviderModelDef(entries[0]).reasoning, false);
+        assert.equal(toProviderModelDef(entries[0]).thinkingLevelMap, undefined);
+      }
+    }
+    assert.deepEqual(parseProviderCatalog("argon\tArgon"), [{ full: "argon", id: "argon" }]);
+    assert.deepEqual(parseProviderCatalog("argon Argon"), [{ full: "argon", id: "argon" }]);
+  });
+
   it("collapses multi-tier Gemini bases and keeps fixed families qualified", () => {
     const entries = parseProviderCatalog(LIVE_MODELS);
     const flash = entries.find((entry) => entry.id === "gemini-3-8-flash");
@@ -44,7 +57,13 @@ describe("provider catalog", () => {
 
   it("ignores banners, progress chatter, and flag-like tokens", () => {
     const entries = parseProviderCatalog(
-      ["Fetching available models...", "Available", "-high", "", "gemini-3.8-flash-high\tLabel"].join("\n"),
+      [
+        "Fetching available models...", "Available", "-high", "Fetching models…", "",
+        "Argon", "Argon Model", "fetching available models", "authentication required",
+        "error: authentication required", "unauthorized", "error", "authentication",
+        "model\tname", "id  label", "MODEL\tNAME", "models", "name", "status",
+        "gemini-3.8-flash-high\tLabel",
+      ].join("\n"),
     );
     assert.deepEqual(entries.map((entry) => entry.full), ["gemini-3.8-flash-high"]);
   });

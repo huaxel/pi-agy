@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.12
+
+- Refresh the full Antigravity model catalog automatically at session startup and whenever Pi opens `/model`, using Pi's native refresh lifecycle instead of a one-time discovery probe.
+- Discover nonhyphen IDs such as `argon` and new model generations without hardcoded catalog updates; preserve exact CLI names and existing Gemini effort grouping.
+- Retain the last good catalog on discovery failures and retry on the next picker opening; reject canceled, superseded, and shutdown refresh results.
+- Add real Pi runtime and model-picker integration regressions. Full 465-test gate, typecheck, and package checks pass; live discovery still requires an authenticated agy CLI.
+
 ## 0.7.11
 
 - Preserve exclusive provider-turn ownership across tool suspension, resumption, and terminal delivery; reject competing turns before they alter bridge tools.

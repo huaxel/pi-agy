@@ -36,11 +36,18 @@ const EFFORT_ORDER: readonly AgyProviderEffort[] = ["low", "medium", "high"];
 const TIER_RE = /^(.+)-(high|medium|low)$/;
 
 /**
- * Validate the first column of an `agy models` line so banners, auth
- * prompts, or progress chatter ("Fetching models…") can never register as a
- * model, and a leading-dash token cannot reach agy's flag parser as `--model`.
+ * Preserve the established hyphenated first-column format. A leading-dash
+ * token must never reach agy's flag parser as `--model`.
  */
 const MODEL_LINE_RE = /^[A-Za-z0-9][A-Za-z0-9._]*-[A-Za-z0-9._-]*$/;
+
+// Nonhyphen ids also occur (e.g. `argon`). Be conservative about ambiguous
+// human text: require lowercase slug syntax with no trailing dot. Common
+// header and diagnostic first tokens are not models. Other lowercase words
+// (bare or followed by whitespace) are inherently indistinguishable from ids
+// in this unstructured CLI format.
+const NONHYPHEN_MODEL_ID_RE = /^[a-z0-9](?:[a-z0-9._]*[a-z0-9_])?$/;
+const NON_MODEL_TOKEN_RE = /^(?:id|model|models|name|label|status|available|fetching|loading|error|warning|info|auth|authentication|unauthorized|forbidden|login|success)$/;
 
 /**
  * Families verified to accept base-slug + `--effort`. Only these collapse to
@@ -141,7 +148,10 @@ export function parseProviderCatalog(raw: string): AgyProviderModelEntry[] {
   const groups = new Map<string, { lines: string[]; tiers: Set<AgyProviderEffort> }>();
   for (const line of raw.split("\n")) {
     const slug = line.trim().split(/\s+/)[0] ?? "";
-    if (!slug || !MODEL_LINE_RE.test(slug)) continue;
+    if (
+      !MODEL_LINE_RE.test(slug) &&
+      (!NONHYPHEN_MODEL_ID_RE.test(slug) || NON_MODEL_TOKEN_RE.test(slug))
+    ) continue;
     const match = TIER_RE.exec(slug);
     const base = match ? match[1] : slug;
     const tier = match ? (match[2] as AgyProviderEffort) : null;

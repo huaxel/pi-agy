@@ -23,6 +23,7 @@ import {
 } from "../extensions/lib/provider.js";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import piAgyExtension from "../extensions/index.js";
@@ -35,7 +36,7 @@ afterEach(async () => {
   await closeProviderDrivers();
 });
 import { FALLBACK_PROVIDER_MODELS } from "../extensions/lib/provider-models.js";
-import { withFakeAgy } from "./helpers.js";
+import { readFakeAgyArgs, withFakeAgy } from "./helpers.js";
 
 /** Run with an isolated agent dir so session-store reads/writes never touch the real store. */
 async function withIsolatedAgentDir<T>(fn: () => Promise<T>): Promise<T> {
@@ -146,7 +147,7 @@ describe("provider model resolution", () => {
   it("fails closed on unknown model ids", () => {
     assert.throws(
       () => resolveProviderTurnModel(FALLBACK_PROVIDER_MODELS, "gemini-9-9-flash"),
-      /Unknown antigravity model/,
+      /Unknown antigravity model.*reopen \/model to refresh/,
     );
   });
 });
@@ -979,12 +980,24 @@ const registrationSelfTool = {
 
 type CapturedProviderStream = { result: () => Promise<{ stopReason?: string }> };
 type CapturedProvider = {
+  models: Array<{ id: string; reasoning: boolean }>;
+  refreshModels?: Provider["refreshModels"];
   streamSimple?: (
     model: { id: string },
     context: { messages: ProviderTranscriptMessage[] },
     options?: object,
   ) => CapturedProviderStream;
 };
+
+// Exercise the native registration while keeping stream assertions independent
+// of Pi's model metadata types. Real-runtime refresh tests live next door.
+function captureNativeProvider(provider: Provider): CapturedProvider {
+  return {
+    get models() { return [...provider.getModels()]; },
+    refreshModels: provider.refreshModels?.bind(provider),
+    streamSimple: provider.streamSimple.bind(provider) as unknown as CapturedProvider["streamSimple"],
+  };
+}
 
 async function runRegisteredCatalogScenario(withOptions: boolean): Promise<string[]> {
   const privateRoot = await mkdtemp(path.join(os.tmpdir(), "pi-agy-registration-"));
@@ -999,7 +1012,7 @@ async function runRegisteredCatalogScenario(withOptions: boolean): Promise<strin
           const fakePi = {
             registerCommand: () => {},
             registerTool: () => {},
-            registerProvider: (_name: string, config: CapturedProvider) => providers.push(config),
+            registerProvider: (provider: Provider) => providers.push(captureNativeProvider(provider)),
           };
           piAgyExtension(fakePi as unknown as ExtensionAPI);
           const provider = providers[0];
@@ -1049,6 +1062,52 @@ describe("provider registration active tool catalog", () => {
 });
 
 describe("provider registration", () => {
+  it("refreshes discovery with Argon and resolves its exact model without effort", async () => {
+    await withFakeAgy("", async (bin) => {
+      await withIsolatedAgentDir(async () => {
+        const providers: Array<CapturedProvider & { models: Array<{ id: string; reasoning: boolean }> }> = [];
+        const fakePi = {
+          registerCommand: () => {},
+          registerTool: () => {},
+          registerProvider: (provider: Provider) => {
+            assert.equal(provider.id, AGY_PROVIDER_ID);
+            providers.push(captureNativeProvider(provider));
+          },
+        };
+        // Intercept the public provider's runner: discovery uses fake agy,
+        // and a provider turn must never launch an inference process here.
+        const seen: ProviderTurnRequest[] = [];
+        const runStub = mock.method(getProviderRunner(process.cwd()), "run", async (request: ProviderTurnRequest): Promise<ProviderRunEnd> => {
+          seen.push(request);
+          return { kind: "done", result: { text: "ok", truncated: false, activity: [] } };
+        });
+        try {
+          piAgyExtension(fakePi as unknown as ExtensionAPI);
+          assert.ok(!providers[0].models.some((model) => model.id === "argon"));
+          await providers[0].refreshModels!({
+            allowNetwork: true,
+            signal: new AbortController().signal,
+            publish: async ({ update }) => { update?.(); return true; },
+          });
+          assert.equal(providers.length, 1);
+          assert.deepEqual(providers[0].models.map(({ id, reasoning }) => ({ id, reasoning })), [
+            { id: "argon", reasoning: false },
+          ]);
+          // The originally registered handler must see the refreshed catalog too.
+          const stream = providers[0].streamSimple!({ id: "argon" }, { messages: [userMessage("hello")] }, { reasoning: "high" });
+          assert.equal((await withTimeout(stream.result(), 3_000)).stopReason, "stop");
+          assert.equal(seen.length, 1);
+          assert.equal(seen[0].fullModel, "argon");
+          assert.equal(seen[0].effort, undefined);
+          assert.deepEqual(await readFakeAgyArgs(bin), [["models"]]);
+        } finally {
+          await closeProviderDrivers();
+          runStub.mock.restore();
+        }
+      });
+    }, 0, 0, "", "", "{}", 0, "argon Argon");
+  });
+
   it("registers antigravity picker models without breaking when discovery yields nothing", async () => {
     await withFakeAgy(
       "",
@@ -1058,11 +1117,8 @@ describe("provider registration", () => {
           const fakePi = {
             registerCommand: () => {},
             registerTool: () => {},
-            registerProvider: (
-              name: string,
-              config: { models: Array<{ id: string }>; streamSimple?: unknown },
-            ) => {
-              providers.push({ name, config });
+            registerProvider: (provider: Provider) => {
+              providers.push({ name: provider.id, config: captureNativeProvider(provider) });
             },
           };
           piAgyExtension(fakePi as unknown as ExtensionAPI);
@@ -1073,9 +1129,7 @@ describe("provider registration", () => {
             assert.ok(ids.includes(entry.id), `missing fallback model: ${entry.id}`);
           }
           assert.equal(typeof provider!.config.streamSimple, "function");
-          // Let the background catalog refresh settle (fake `agy models`
-          // yields no parseable entries, so the fallback stands).
-          await new Promise((resolve) => setTimeout(resolve, 200));
+          // Factory registration is synchronous and starts no discovery I/O.
           assert.equal(
             providers.filter((entry) => entry.name === AGY_PROVIDER_ID).length,
             1,

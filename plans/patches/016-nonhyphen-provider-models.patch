@@ -1,0 +1,143 @@
+diff --git a/extensions/lib/provider-models.ts b/extensions/lib/provider-models.ts
+index f158e09..f736ff8 100644
+--- a/extensions/lib/provider-models.ts
++++ b/extensions/lib/provider-models.ts
+@@ -36,12 +36,19 @@ const EFFORT_ORDER: readonly AgyProviderEffort[] = ["low", "medium", "high"];
+ const TIER_RE = /^(.+)-(high|medium|low)$/;
+ 
+ /**
+- * Validate the first column of an `agy models` line so banners, auth
+- * prompts, or progress chatter ("Fetching models…") can never register as a
+- * model, and a leading-dash token cannot reach agy's flag parser as `--model`.
++ * Preserve the established hyphenated first-column format. A leading-dash
++ * token must never reach agy's flag parser as `--model`.
+  */
+ const MODEL_LINE_RE = /^[A-Za-z0-9][A-Za-z0-9._]*-[A-Za-z0-9._-]*$/;
+ 
++// Nonhyphen ids also occur (e.g. `argon`). Be conservative about ambiguous
++// human text: require lowercase slug syntax with no trailing dot. Common
++// header and diagnostic first tokens are not models. Other lowercase words
++// (bare or followed by whitespace) are inherently indistinguishable from ids
++// in this unstructured CLI format.
++const NONHYPHEN_MODEL_ID_RE = /^[a-z0-9](?:[a-z0-9._]*[a-z0-9_])?$/;
++const NON_MODEL_TOKEN_RE = /^(?:id|model|models|name|label|status|available|fetching|loading|error|warning|info|auth|authentication|unauthorized|forbidden|login|success)$/;
++
+ /**
+  * Families verified to accept base-slug + `--effort`. Only these collapse to
+  * a base entry with a thinking toggle; every other family keeps agy's exact
+@@ -141,7 +148,10 @@ export function parseProviderCatalog(raw: string): AgyProviderModelEntry[] {
+   const groups = new Map<string, { lines: string[]; tiers: Set<AgyProviderEffort> }>();
+   for (const line of raw.split("\n")) {
+     const slug = line.trim().split(/\s+/)[0] ?? "";
+-    if (!slug || !MODEL_LINE_RE.test(slug)) continue;
++    if (
++      !MODEL_LINE_RE.test(slug) &&
++      (!NONHYPHEN_MODEL_ID_RE.test(slug) || NON_MODEL_TOKEN_RE.test(slug))
++    ) continue;
+     const match = TIER_RE.exec(slug);
+     const base = match ? match[1] : slug;
+     const tier = match ? (match[2] as AgyProviderEffort) : null;
+diff --git a/tests/provider-models.test.ts b/tests/provider-models.test.ts
+index d84c332..586ab42 100644
+--- a/tests/provider-models.test.ts
++++ b/tests/provider-models.test.ts
+@@ -23,6 +23,19 @@ const LIVE_MODELS = [
+ ].join("\n");
+ 
+ describe("provider catalog", () => {
++  it("accepts nonhyphen model ids and preserves exact values without effort", () => {
++    for (const [full, id] of [["argon", "argon"], ["r2", "r2"], ["123", "123"], ["model_v2", "model-v2"], ["model.v2", "model-v2"]]) {
++      for (const row of [full, `${full}\tDisplay Label`, `${full}  Display Label`, `${full} Display Label`]) {
++        const entries = parseProviderCatalog(row);
++        assert.deepEqual(entries, [{ full, id }], row);
++        assert.equal(toProviderModelDef(entries[0]).reasoning, false);
++        assert.equal(toProviderModelDef(entries[0]).thinkingLevelMap, undefined);
++      }
++    }
++    assert.deepEqual(parseProviderCatalog("argon\tArgon"), [{ full: "argon", id: "argon" }]);
++    assert.deepEqual(parseProviderCatalog("argon Argon"), [{ full: "argon", id: "argon" }]);
++  });
++
+   it("collapses multi-tier Gemini bases and keeps fixed families qualified", () => {
+     const entries = parseProviderCatalog(LIVE_MODELS);
+     const flash = entries.find((entry) => entry.id === "gemini-3-8-flash");
+@@ -44,7 +57,13 @@ describe("provider catalog", () => {
+ 
+   it("ignores banners, progress chatter, and flag-like tokens", () => {
+     const entries = parseProviderCatalog(
+-      ["Fetching available models...", "Available", "-high", "", "gemini-3.8-flash-high\tLabel"].join("\n"),
++      [
++        "Fetching available models...", "Available", "-high", "Fetching models…", "",
++        "Argon", "Argon Model", "fetching available models", "authentication required",
++        "error: authentication required", "unauthorized", "error", "authentication",
++        "model\tname", "id  label", "MODEL\tNAME", "models", "name", "status",
++        "gemini-3.8-flash-high\tLabel",
++      ].join("\n"),
+     );
+     assert.deepEqual(entries.map((entry) => entry.full), ["gemini-3.8-flash-high"]);
+   });
+diff --git a/tests/provider.test.ts b/tests/provider.test.ts
+index 53b1472..b3f8855 100644
+--- a/tests/provider.test.ts
++++ b/tests/provider.test.ts
+@@ -35,7 +35,7 @@ afterEach(async () => {
+   await closeProviderDrivers();
+ });
+ import { FALLBACK_PROVIDER_MODELS } from "../extensions/lib/provider-models.js";
+-import { withFakeAgy } from "./helpers.js";
++import { readFakeAgyArgs, withFakeAgy } from "./helpers.js";
+ 
+ /** Run with an isolated agent dir so session-store reads/writes never touch the real store. */
+ async function withIsolatedAgentDir<T>(fn: () => Promise<T>): Promise<T> {
+@@ -1049,6 +1049,51 @@ describe("provider registration active tool catalog", () => {
+ });
+ 
+ describe("provider registration", () => {
++  it("refreshes discovery with Argon and resolves its exact model without effort", async () => {
++    await withFakeAgy("", async (bin) => {
++      await withIsolatedAgentDir(async () => {
++        const providers: Array<CapturedProvider & { models: Array<{ id: string; reasoning: boolean }> }> = [];
++        let refreshed!: () => void;
++        const ready = new Promise<void>((resolve) => { refreshed = resolve; });
++        const fakePi = {
++          registerCommand: () => {},
++          registerTool: () => {},
++          registerProvider: (name: string, config: typeof providers[number]) => {
++            assert.equal(name, AGY_PROVIDER_ID);
++            providers.push(config);
++            if (providers.length === 2) refreshed();
++          },
++        };
++        // Intercept the public provider's runner: discovery uses fake agy,
++        // and a provider turn must never launch an inference process here.
++        const seen: ProviderTurnRequest[] = [];
++        const runStub = mock.method(getProviderRunner(process.cwd()), "run", async (request: ProviderTurnRequest): Promise<ProviderRunEnd> => {
++          seen.push(request);
++          return { kind: "done", result: { text: "ok", truncated: false, activity: [] } };
++        });
++        try {
++          piAgyExtension(fakePi as unknown as ExtensionAPI);
++          assert.ok(!providers[0].models.some((model) => model.id === "argon"));
++          await withTimeout(ready, 3_000);
++          assert.equal(providers.length, 2);
++          assert.deepEqual(providers[1].models.map(({ id, reasoning }) => ({ id, reasoning })), [
++            { id: "argon", reasoning: false },
++          ]);
++          // The originally registered handler must see the refreshed catalog too.
++          const stream = providers[0].streamSimple!({ id: "argon" }, { messages: [userMessage("hello")] }, { reasoning: "high" });
++          assert.equal((await withTimeout(stream.result(), 3_000)).stopReason, "stop");
++          assert.equal(seen.length, 1);
++          assert.equal(seen[0].fullModel, "argon");
++          assert.equal(seen[0].effort, undefined);
++          assert.deepEqual(await readFakeAgyArgs(bin), [["models"]]);
++        } finally {
++          await closeProviderDrivers();
++          runStub.mock.restore();
++        }
++      });
++    }, 0, 0, "", "", "{}", 0, "argon Argon");
++  });
++
+   it("registers antigravity picker models without breaking when discovery yields nothing", async () => {
+     await withFakeAgy(
+       "",

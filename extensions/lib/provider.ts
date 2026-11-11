@@ -461,7 +461,7 @@ export function resolveProviderTurnModel(
   const entry = entries.find((candidate) => candidate.id === modelId);
   if (!entry) {
     throw new Error(
-      `Unknown ${AGY_PROVIDER_ID} model '${modelId}'; pick another via /model (the agy catalog may have changed — restart Pi to refresh).`,
+      `Unknown ${AGY_PROVIDER_ID} model '${modelId}'; pick another via /model (the agy catalog may have changed — reopen /model to refresh).`,
     );
   }
   const effort =

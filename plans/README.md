@@ -1,5 +1,26 @@
 # pi-agy improvement plans
 
+## Automatic full model catalog refresh — 017
+
+User clarified that the goal includes new Sonnet/Opus generations, not just
+Argon parsing. **DONE — integrated, independently approved; advisor 78/78
+focused, 465/465 full, types/pack passed.** Native refresh runs at session startup
+and automatically on every `/model` picker opening; failures preserve last-good
+catalog and retry on subsequent opens. No static new-model list or polling loop.
+[Current acceptance](evidence/017-automatic-model-refresh.md),
+[independent review](evidence/017-native-refresh-independent-review.md).
+User authorized commit/push/publication as v0.7.12; installed Pi copy stays unchanged.
+The earlier016 parser-only checkpoint below is superseded by this full fix.
+
+## Nonhyphen provider model discovery — 016
+
+**DONE — integrated locally, uncommitted/unpublished.** Model IDs such as `argon`
+were rejected solely for lacking a hyphen. Generic nonhyphen parsing and public
+registration regressions now pass: advisor 70/70 focused, 457/457 full, types/pack.
+[Diagnosis and evidence](evidence/016-nonhyphen-model-discovery.md).
+Installed Pi package remains 0.7.11, unchanged; live `agy models` currently fails
+authentication. No claim of live Argon access. Baseline HEAD `ed9adcc`.
+
 ## Provider lifecycle fixes — 015
 
 User requested fixes for the state-machine audit at `82af24b`. **DONE —

@@ -37,7 +37,7 @@ In `accept-edits` mode, Pi confirms before writes. agy's own permission behavior
 
 ## Use agy as a Pi model
 
-The package registers an `antigravity` provider. Select discovered models as `antigravity/<model>` in Pi's `/model` picker. Models are discovered from `agy models`, with a fallback catalog if discovery fails. Gemini thinking levels map to agy's supported effort tiers.
+The package registers an `antigravity` provider. Select discovered models as `antigravity/<model>` in Pi's `/model` picker. Models refresh automatically from `agy models` at session startup and whenever Pi opens the model picker (Pi 1.5.2 native refresh). New model names need no package update. Failed discovery keeps the last good catalog, or the synchronous fallback before the first success; reopen `/model` after signing in to retry. Cache-only refreshes never run the CLI. Gemini thinking levels map to agy's supported effort tiers.
 
 Provider turns use a persistent agy process per working directory and can stage attached images for agy to read. By default, an MCP bridge gives agy read-only Pi context and lets it call active Pi tools through Pi's normal permission and approval flow. Set `"providerBridge": false` in `agy-config.json` to disable the bridge.
 
