@@ -1,0 +1,1225 @@
+diff --git a/extensions/lib/provider-driver.ts b/extensions/lib/provider-driver.ts
+index 700b51c..6776b27 100644
+--- a/extensions/lib/provider-driver.ts
++++ b/extensions/lib/provider-driver.ts
+@@ -126,12 +126,14 @@ interface ActiveTurn {
+   activity: string[];
+   seenActivity: Set<string>;
+   runResult: AgyRunResult;
+-  /** Terminally settled (done/error/abort/timeout): the record is over. */
++  /** Process outcome is final; pendingTerminal may still own continuation delivery. */
+   settled: boolean;
+   /** Suspended mid-turn on a parked bridge call: child alive, timers off. */
+   suspended: boolean;
+   /** Live waiter for the current phase (turn() or continueTurn()). */
+   phase?: TurnPhase;
++  /** Terminal envelope received during a park; owned until consumed or abandoned. */
++  pendingTerminal?: { kind: "done"; end: DriverTurnEnd } | { kind: "error"; error: Error };
+   timer?: NodeJS.Timeout;
+   suspendedTimer?: NodeJS.Timeout;
+   onAbort?: () => void;
+@@ -203,13 +205,13 @@ export class AgyProviderDriver {
+       clearTimeout(turn.timer);
+       turn.timer = undefined;
+     }
+-    // Abandoned suspensions (Pi session died without shutdown) must not
+-    // hold the child forever.
++    // Keep this deadline through terminal-awaiting-consumption too: a lost
++    // Pi continuation must not hold the child, parks, images or driver forever.
+     turn.suspendedTimer = setTimeout(() => {
++      if (this.active !== turn || (!turn.pendingTerminal && (turn.settled || !turn.suspended))) return;
+       turn.suspendedTimer = undefined;
+       this.killChild();
+-      this.failParksOrphaned("agy provider turn was abandoned while awaiting Pi tools");
+-      this.settleError(turn, new Error("agy provider turn was abandoned while awaiting Pi tools"));
++      this.abandonTurn(turn, new Error("agy provider turn was abandoned while awaiting Pi tools"));
+     }, SUSPENDED_TURN_MAX_MS);
+     (turn.suspendedTimer as unknown as { unref?: () => void }).unref?.();
+     const phase = turn.phase;
+@@ -234,6 +236,32 @@ export class AgyProviderDriver {
+     }
+   }
+ 
++  /** Abandonment has no future consumer: orphan parks once and release ownership. */
++  private abandonTurn(turn: ActiveTurn, error: Error): void {
++    if (this.active !== turn) return;
++    const parked = turn.suspended || !!turn.pendingTerminal;
++    // Teardown must also release a retained terminal, but must never replace it
++    // with an abort/transport failure during ordinary terminal settlement.
++    turn.pendingTerminal = undefined;
++    turn.suspended = false;
++    if (parked) this.failParksOrphaned(error.message);
++    if (turn.settled) {
++      this.active = undefined;
++      this.clearSuspendedTimer(turn);
++      this.armIdleTimer();
++    } else {
++      this.settleError(turn, error);
++    }
++  }
++
++  private interruptTurn(turn: ActiveTurn, flag: "aborted" | "timedOut", message: string): void {
++    if (turn.settled || this.active !== turn) return;
++    this.killChild();
++    if (turn.suspended) this.abandonTurn(turn, new Error(message));
++    else if (turn.text) this.settleDone(turn, flag === "aborted" ? { aborted: true } : { timedOut: true });
++    else this.settleError(turn, new Error(message));
++  }
++
+   /**
+    * Resume a suspended turn after its parked calls were completed.
+    * Re-arms the full turn timeout (round-trips wait on user approvals) and
+@@ -249,6 +277,14 @@ export class AgyProviderDriver {
+   }): Promise<DriverTurnEnd> {
+     const turn = this.active;
+     if (this.closed) throw new Error("agy provider driver was closed");
++    if (turn?.pendingTerminal) {
++      const terminal = turn.pendingTerminal;
++      turn.pendingTerminal = undefined;
++      this.clearSuspendedTimer(turn);
++      this.active = undefined;
++      this.armIdleTimer();
++      return terminal.kind === "done" ? Promise.resolve(terminal.end) : Promise.reject(terminal.error);
++    }
+     if (!turn || turn.settled || !turn.suspended) {
+       throw new Error("agy provider driver has no suspended turn");
+     }
+@@ -266,25 +302,20 @@ export class AgyProviderDriver {
+         turn.signal.removeEventListener("abort", turn.onAbort);
+         turn.onAbort = undefined;
+       }
+-      if (options?.signal) {
+-        turn.signal = options.signal;
++      {
++        if (options?.signal) turn.signal = options.signal;
+         const onAbort = (): void => {
+-          if (turn.settled) return;
+-          this.killChild();
+-          if (turn.text) this.settleDone(turn, { aborted: true });
+-          else this.settleError(turn, new Error("agy provider turn was cancelled"));
++          this.interruptTurn(turn, "aborted", "agy provider turn was cancelled");
+         };
+         turn.onAbort = onAbort;
+-        options.signal.addEventListener("abort", onAbort, { once: true });
+-        if (options.signal.aborted) onAbort();
++        turn.signal.addEventListener("abort", onAbort, { once: true });
++        if (turn.signal.aborted) onAbort();
+       }
+       if (turn.settled) return;
+       turn.timer = setTimeout(() => {
+         // A resumed timeout kills the hung child like a fresh one: never
+         // leave it running to be reused.
+-        this.killChild();
+-        if (turn.text) this.settleDone(turn, { timedOut: true });
+-        else this.settleError(turn, new Error("agy provider turn timed out"));
++        this.interruptTurn(turn, "timedOut", "agy provider turn timed out");
+       }, Math.max(1, Math.min(PROVIDER_TURN_TIMEOUT_MS, turn.timeoutMs)));
+       (turn.timer as unknown as { unref?: () => void }).unref?.();
+     });
+@@ -295,8 +326,7 @@ export class AgyProviderDriver {
+     const turn = this.active;
+     if (!turn) return;
+     this.killChild();
+-    this.failParksOrphaned(message);
+-    this.settleError(turn, new Error(message));
++    this.abandonTurn(turn, new Error(message));
+   }
+ 
+   snapshot(): ProviderDriverSnapshot {
+@@ -313,9 +343,9 @@ export class AgyProviderDriver {
+   async close(): Promise<void> {
+     this.closed = true;
+     this.clearIdleTimer();
+-    if (this.active && !this.active.settled) {
+-      // Never strand a caller: a closed driver fails its turns loudly.
+-      this.settleError(this.active, new Error("agy provider driver was closed"));
++    if (this.active) {
++      // Never strand a caller or an outstanding park on shutdown.
++      this.abandonTurn(this.active, new Error("agy provider driver was closed"));
+     }
+     this.killChild();
+   }
+@@ -578,15 +608,16 @@ export class AgyProviderDriver {
+     overrides?: { text?: string; aborted?: boolean; timedOut?: boolean },
+   ): void {
+     if (turn.settled) return;
++    const retain = turn.suspended && !turn.phase;
+     turn.settled = true;
+     turn.suspended = false;
+-    this.clearSuspendedTimer(turn);
++    if (!retain) this.clearSuspendedTimer(turn);
+     if (turn.timer) {
+       clearTimeout(turn.timer);
+       turn.timer = undefined;
+     }
+     if (turn.onAbort) turn.signal.removeEventListener("abort", turn.onAbort);
+-    if (this.active === turn) this.active = undefined;
++    if (!retain && this.active === turn) this.active = undefined;
+     // Bind the conversation the turn actually produced: the next turn
+     // reuses only when it asks for this exact conversation (or a fresh
+     // process when none is bound). Unterminated line remnants belong to no
+@@ -597,7 +628,7 @@ export class AgyProviderDriver {
+     this.lineBuffer = "";
+     const phase = turn.phase;
+     turn.phase = undefined;
+-    phase?.resolve({
++    const end: DriverTurnEnd = {
+       kind: "done",
+       outcome: {
+         text: overrides?.text ?? turn.text,
+@@ -608,31 +639,35 @@ export class AgyProviderDriver {
+         activity: turn.activity,
+         deniedActions: turn.runResult.denied_actions,
+       },
+-    });
+-    this.armIdleTimer();
++    };
++    if (retain) turn.pendingTerminal = { kind: "done", end };
++    else phase?.resolve(end);
++    if (!retain) this.armIdleTimer();
+   }
+ 
+   private settleError(turn: ActiveTurn, error: Error): void {
+     if (turn.settled) return;
++    const retain = turn.suspended && !turn.phase;
+     turn.settled = true;
+     turn.suspended = false;
+-    this.clearSuspendedTimer(turn);
++    if (!retain) this.clearSuspendedTimer(turn);
+     if (turn.timer) {
+       clearTimeout(turn.timer);
+       turn.timer = undefined;
+     }
+     if (turn.onAbort) turn.signal.removeEventListener("abort", turn.onAbort);
+-    if (this.active === turn) this.active = undefined;
++    if (!retain && this.active === turn) this.active = undefined;
+     const phase = turn.phase;
+     turn.phase = undefined;
+-    phase?.reject(error);
+-    this.armIdleTimer();
++    if (retain) turn.pendingTerminal = { kind: "error", error };
++    else phase?.reject(error);
++    if (!retain) this.armIdleTimer();
+   }
+ 
+   private failActive(message: string): void {
+     const turn = this.active;
+     if (!turn || turn.settled) return;
+-    this.settleError(turn, new Error(message));
++    this.abandonTurn(turn, new Error(message));
+   }
+ 
+   private async runTurn(
+@@ -647,12 +682,12 @@ export class AgyProviderDriver {
+         return;
+       }
+       this.clearIdleTimer();
+-      // A suspended turn belongs to another Pi turn in flight: concurrent
+-      // bridged sessions in one directory are unsupported — fail fast
+-      // instead of stealing (or killing) the parked child.
+-      if (this.active && this.active.suspended && !this.active.settled) {
++      // A parked turn retains ownership through resumed running and terminal
++      // delivery. The queue covers only its first phase; never steal its child
++      // or its pending terminal result after that phase releases the queue.
++      if (this.active) {
+         throw new Error(
+-          "another agy turn is suspended awaiting Pi tools in this directory",
++          "another agy turn owns this driver (running or suspended awaiting Pi tools)",
+         );
+       }
+       this.ensureProcess(profile, options.resumeConversationId);
+@@ -689,23 +724,7 @@ export class AgyProviderDriver {
+       }
+ 
+       const killFor = (flag: "aborted" | "timedOut", message: string): void => {
+-        if (turn.settled) return;
+-        // A turn cannot be cancelled headless without killing the child; the
+-        // next turn respawns lazily. Partial text settles with a flag, never
+-        // as a clean result. A stale signal during suspension abandons the
+-        // turn: parks are orphaned loudly instead of stranding agy.
+-        if (turn.suspended) {
+-          this.killChild();
+-          this.failParksOrphaned(message);
+-          this.settleError(turn, new Error(message));
+-          return;
+-        }
+-        this.killChild();
+-        if (turn.text) {
+-          this.settleDone(turn, flag === "aborted" ? { aborted: true } : { timedOut: true });
+-        } else {
+-          this.settleError(turn, new Error(message));
+-        }
++        this.interruptTurn(turn, flag, message);
+       };
+ 
+       const onAbort = (): void => killFor("aborted", "agy provider turn was cancelled");
+diff --git a/extensions/lib/provider-mcp.ts b/extensions/lib/provider-mcp.ts
+index a8fdb41..82a5f96 100644
+--- a/extensions/lib/provider-mcp.ts
++++ b/extensions/lib/provider-mcp.ts
+@@ -174,8 +174,10 @@ export interface McpBridgeHandle {
+   completePark: (callId: string, result: BridgeToolResult) => boolean;
+   /** Fail every parked call (teardown, cancelled turns). */
+   failAllParks: (message: string) => void;
++  /** Release call IDs whose owning provider operation can no longer poll them. */
++  discardParks: (callIds: Iterable<string>) => void;
+   /** Point-in-time description for status surfaces. */
+-  describe: () => { configDir: string; url: string; toolCount: number };
++  describe: () => { configDir: string; url: string; toolCount: number; pendingResults: number };
+ }
+ 
+ /** A Pi tool projected for agy: MCP-safe advertised name, real Pi identity. */
+@@ -659,6 +661,21 @@ export async function startMcpBridge(
+     return true;
+   };
+ 
++  const discardParks = (callIds: Iterable<string>): void => {
++    for (const callId of callIds) {
++      const resolve = parks.get(callId);
++      parks.delete(callId);
++      const owner = parkOwners.get(callId);
++      if (owner) {
++        parkOwners.delete(callId);
++        owner.parks = Math.max(0, owner.parks - 1);
++      }
++      // Settle any outstanding HTTP request, then drop its poll payload too.
++      resolve?.({ text: "Pi provider operation completed.", isError: true });
++      escalations.delete(callId);
++    }
++  };
++
+   const stop = async (): Promise<void> => {
+     stopping = true;
+     failAllParks("Pi tool bridge stopped.");
+@@ -710,6 +727,7 @@ export async function startMcpBridge(
+         configDir,
+         url: `http://127.0.0.1:${port}${BRIDGE_MCP_PATH}`,
+         toolCount: bridgedTools.length + BUILTIN_TOOL_COUNT,
++        pendingResults: escalations.size,
+       }),
+       setTools: (tools: BridgeToolDef[]) => {
+         bridgedTools = tools;
+@@ -719,6 +737,7 @@ export async function startMcpBridge(
+       },
+       completePark,
+       failAllParks,
++      discardParks,
+     };
+   } catch {
+     try {
+diff --git a/extensions/lib/provider.ts b/extensions/lib/provider.ts
+index f1044f6..49ff72f 100644
+--- a/extensions/lib/provider.ts
++++ b/extensions/lib/provider.ts
+@@ -93,9 +93,14 @@ export interface ProviderToolPark {
+   args: Record<string, unknown>;
+ }
+ 
++/** A parked phase may publish only while its originating operation still owns it. */
++export interface ProviderTurnOwnership {
++  assertValid: () => void;
++}
++
+ export type ProviderRunEnd =
+   | { kind: "done"; result: ProviderTurnResult }
+-  | { kind: "parked"; park: ProviderToolPark };
++  | { kind: "parked"; park: ProviderToolPark; ownership?: ProviderTurnOwnership };
+ 
+ export interface ProviderToolDelivery {
+   callId: string;
+@@ -116,7 +121,7 @@ export interface ProviderTurnRunner {
+     signal?: AbortSignal,
+     timeoutMs?: number,
+   ) => Promise<ProviderRunEnd>;
+-  cancel: () => void;
++  cancel: (ownership?: ProviderTurnOwnership) => void;
+ }
+ 
+ export interface ProviderTurnResult {
+@@ -144,87 +149,113 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
+   const existing = providerRunners.get(key);
+   if (existing) return existing;
+   const driver = getProviderDriver(dir);
++  interface Operation extends ProviderTurnOwnership {
++    failure?: Error;
++    parks: Set<string>;
++    bridge?: McpBridgeHandle;
++  }
++  let operation: Operation | undefined;
++  const release = (owned: Operation, error: Error): void => {
++    owned.failure ??= error;
++    if (operation === owned) operation = undefined;
++    owned.bridge?.discardParks(owned.parks);
++    owned.parks.clear();
++    const stale = suspendedByDir.get(key);
++    if (stale?.ownership === owned) {
++      suspendedByDir.delete(key);
++      void runImageCleanups(stale.imageCleanups);
++    }
++  };
++  const finishPhase = (owned: Operation, end: Parameters<typeof toRunEnd>[0]): ProviderRunEnd => {
++    owned.assertValid();
++    const result = toRunEnd(end);
++    if (result.kind === "parked") return { ...result, ownership: owned };
++    release(owned, new Error("agy provider operation completed"));
++    return result;
++  };
+   const runner: ProviderTurnRunner = {
+     run: (request) => {
+       const lockStart = Date.now();
+-      return withDirLock(
+-        request.dir,
+-        async () => {
++      return withDirLock(request.dir, async () => {
++        // Reserve before any await or bridge mutation. Resumes stay lock-free,
++        // so the workspace lock alone cannot protect this operation's catalog.
++        if (operation) throw new Error("another agy turn owns this driver (running or suspended awaiting Pi tools)");
++        const owned: Operation = {
++          parks: new Set(),
++          assertValid: () => { if (owned.failure) throw owned.failure; },
++        };
++        operation = owned;
++        try {
+           const waited = Date.now() - lockStart;
+           const remaining = Math.max(5_000, request.timeoutMs - waited);
+-          // Bridge startup never fails a turn: without a handle the driver
+-          // simply spawns plain and parks are refused at the bridge.
+           const bridge = await ensureProviderBridge(request.dir).catch(() => undefined);
+-          // Process-stable staging root: agy can open staged images even
+-          // with permissions enforced (no per-turn fingerprint churn).
++          owned.bridge = bridge;
+           const imageRoot = await ensureImageStagingRoot().catch(() => undefined);
++          owned.assertValid();
+           const fingerprint = bridgeToolsFingerprint(request.bridgedTools);
++          driver.onParksOrphaned = (message) => {
++            bridge?.failAllParks(message);
++            // The latch also survives the gap before the stream publishes a
++            // suspension: a resolved parked phase cannot resurrect an orphan.
++            release(owned, new Error(message));
++          };
+           if (bridge) {
+             bridge.setTools(request.bridgedTools);
+-            bridge.setParkHandler((park) =>
+-              driver.notifyPark({ callId: park.callId, toolName: park.toolName, args: park.args }),
+-            );
+-            driver.onParksOrphaned = (message) => {
+-              bridge.failAllParks(message);
+-              // Abandoned suspensions (wall timer, teardown kills) reclaim
+-              // their staging here; nothing else will consume them.
+-              const stale = suspendedByDir.get(path.resolve(request.dir));
+-              if (stale) {
+-                suspendedByDir.delete(path.resolve(request.dir));
+-                void runImageCleanups(stale.imageCleanups);
+-              }
+-            };
++            bridge.setParkHandler((park) => {
++              if (owned.failure) return false;
++              owned.parks.add(park.callId);
++              const accepted = driver.notifyPark(park);
++              if (!accepted) owned.parks.delete(park.callId);
++              return accepted;
++            });
+           }
+-          const end = await driver.turn(
+-            {
+-              dir: request.dir,
+-              fullModel: request.fullModel,
+-              effort: request.effort,
+-              skipPermissions: request.skipPermissions,
+-              bridgeDir: bridge?.configDir,
+-              bridgeTools: bridge ? fingerprint : undefined,
+-              imageRoot,
+-            },
+-            {
+-              prompt: request.prompt,
+-              resumeConversationId: request.resumeConversationId,
+-              signal: request.signal,
+-              timeoutMs: remaining,
+-              onText: request.callbacks?.onText,
+-              onActivity: request.callbacks?.onActivity,
+-            },
+-          );
+-          return toRunEnd(end);
+-        },
+-        request.signal,
+-        request.timeoutMs,
+-      );
++          const end = await driver.turn({
++            dir: request.dir, fullModel: request.fullModel, effort: request.effort,
++            skipPermissions: request.skipPermissions, bridgeDir: bridge?.configDir,
++            bridgeTools: bridge ? fingerprint : undefined, imageRoot,
++          }, {
++            prompt: request.prompt, resumeConversationId: request.resumeConversationId,
++            signal: request.signal, timeoutMs: remaining,
++            onText: request.callbacks?.onText, onActivity: request.callbacks?.onActivity,
++          });
++          return finishPhase(owned, end);
++        } catch (error) {
++          release(owned, error instanceof Error ? error : new Error(String(error)));
++          throw error;
++        }
++      }, request.signal, request.timeoutMs);
+     },
+     resume: async (deliveries, callbacks, resumeSignal, resumeTimeoutMs) => {
+-      // Deliberately lock-free: resume continues an already-running child
+-      // (no spawn) and taking the lock here deadlocks whenever the parked
+-      // tool call itself started a lock-holding background run — the resume
+-      // would wait on the very run it must complete to proceed. The
+-      // suspended-gap race this opens (a foreign delegation run editing
+-      // under a live provider child) is inherent to persistent processes;
+-      // same-directory concurrency stays the agent's to coordinate, and
+-      // fresh provider turns still serialize on the lock.
+-      const bridge = providerBridges.get(path.resolve(dir));
++      // Deliberately lock-free: a parked Pi tool may itself hold the workspace
++      // lock. Taking it here would wait on the work this resume must complete.
++      const owned = operation;
++      if (!owned) throw new Error("agy provider driver has no suspended operation");
++      owned.assertValid();
++      const bridge = owned.bridge;
+       if (!bridge) throw new Error("agy provider turn has no bridge to resume on");
+-      for (const delivery of deliveries) {
+-        bridge.completePark(delivery.callId, { text: delivery.text, isError: delivery.isError });
++      if (!deliveries.length || deliveries.some((delivery) => !owned.parks.has(delivery.callId))) {
++        throw new Error("agy provider tool delivery does not belong to the suspended operation");
++      }
++      try {
++        for (const delivery of deliveries) {
++          bridge.completePark(delivery.callId, { text: delivery.text, isError: delivery.isError });
++        }
++        const end = await driver.continueTurn({
++          signal: resumeSignal, timeoutMs: resumeTimeoutMs,
++          onText: callbacks?.onText, onActivity: callbacks?.onActivity,
++        });
++        return finishPhase(owned, end);
++      } catch (error) {
++        release(owned, error instanceof Error ? error : new Error(String(error)));
++        throw error;
+       }
+-      const end = await driver.continueTurn({
+-        signal: resumeSignal,
+-        timeoutMs: resumeTimeoutMs,
+-        onText: callbacks?.onText,
+-        onActivity: callbacks?.onActivity,
+-      });
+-      return toRunEnd(end);
+     },
+-    cancel: () => {
++    cancel: (ownership) => {
++      const owned = operation;
++      if (!owned || (ownership && ownership !== owned)) return;
+       driver.cancelSuspended("agy provider turn was cancelled");
+-      providerBridges.get(path.resolve(dir))?.failAllParks("agy provider turn was cancelled");
++      owned.bridge?.failAllParks("agy provider turn was cancelled");
++      release(owned, new Error("agy provider turn was cancelled"));
+     },
+   };
+   providerRunners.set(key, runner);
+@@ -327,7 +358,7 @@ export interface ProviderStatus {
+     boundConversationId?: string;
+   };
+   /** Bridge description, when a bridge is running for the directory. */
+-  bridge?: { toolCount: number };
++  bridge?: { toolCount: number; pendingResults: number };
+   /** Suspended turns awaiting Pi tool results. */
+   suspended: ProviderStatusSuspended[];
+   /** Live image staging dirs process-wide. */
+@@ -364,7 +395,7 @@ export function getProviderStatus(dir: string): ProviderStatus {
+             boundConversationId: snapshot.boundConversationId,
+           }
+         : undefined,
+-      bridge: bridge ? { toolCount: bridge.describe().toolCount } : undefined,
++      bridge: bridge ? { toolCount: bridge.describe().toolCount, pendingResults: bridge.describe().pendingResults } : undefined,
+       suspended,
+       stagedImages: getLiveImageStagingCount(),
+     };
+@@ -491,6 +522,7 @@ function hasUserMessageAfterToolCall(messages: ProviderTranscriptMessage[], tool
+ 
+ interface SuspendedTurn {
+   runner: ProviderTurnRunner;
++  ownership?: ProviderTurnOwnership;
+   toolCallId: string;
+   park: ProviderToolPark;
+   modelId: string;
+@@ -648,6 +680,7 @@ export function createAgyStreamSimple(
+         const bodies = prior ? collectParkedDeliveries(messages, prior.toolCallId) : [];
+         let end: ProviderRunEnd;
+         if (prior && bodies.length > 0) {
++          prior.ownership?.assertValid();
+           suspendedByDir.delete(skey);
+           // Images riding on the delivered tool results are staged too:
+           // the resumed agy turn reads them by path. Owned by this
+@@ -677,7 +710,7 @@ export function createAgyStreamSimple(
+             // The suspended turn is gone (agy moved on without us): fail the
+             // parks so nothing strands, then surface the failure loudly.
+             try {
+-              runner.cancel();
++              runner.cancel(prior.ownership);
+             } catch {
+               // Cancel is best effort next to the real error.
+             }
+@@ -694,7 +727,7 @@ export function createAgyStreamSimple(
+             // of bricking the directory behind the suspended guard.
+             suspendedByDir.delete(skey);
+             try {
+-              runner.cancel();
++              runner.cancel(prior.ownership);
+             } catch {
+               // Cancel is best effort next to a fresh turn.
+             }
+@@ -752,17 +785,15 @@ export function createAgyStreamSimple(
+             name: end.park.toolName,
+             arguments: end.park.args,
+           };
++          end.ownership?.assertValid();
++          suspendedByDir.set(skey, {
++            runner, ownership: end.ownership, toolCallId, park: end.park,
++            modelId: model.id, imageCleanups: pendingImageCleanups,
++          });
+           output.content.push(toolCall);
+           const toolIndex = output.content.length - 1;
+           stream.push({ type: "toolcall_start", contentIndex: toolIndex, partial: output });
+           stream.push({ type: "toolcall_end", contentIndex: toolIndex, toolCall, partial: output });
+-          suspendedByDir.set(skey, {
+-            runner,
+-            toolCallId,
+-            park: end.park,
+-            modelId: model.id,
+-            imageCleanups: pendingImageCleanups,
+-          });
+           output.usage.totalTokens =
+             output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+           output.stopReason = "toolUse";
+diff --git a/tests/provider-driver.test.ts b/tests/provider-driver.test.ts
+index 16455f6..a1c5720 100644
+--- a/tests/provider-driver.test.ts
++++ b/tests/provider-driver.test.ts
+@@ -1,12 +1,14 @@
+ import assert from "node:assert/strict";
++import { PassThrough } from "node:stream";
+ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
+-import { afterEach, describe, it } from "node:test";
++import { afterEach, describe, it, mock } from "node:test";
+ 
+-import { awaitWithWatchdog, nativeSetTimeout } from "./timing-helpers.js";
++import { withTimingFakeAgy, awaitWithWatchdog, nativeSetTimeout, nativeClearTimeout } from "./timing-helpers.js";
+ import {
+   AgyProviderDriver,
++  SUSPENDED_TURN_MAX_MS,
+   type DriverTurnEnd,
+   type ProviderDriverOutcome,
+   type ProviderDriverProfile,
+@@ -467,3 +469,211 @@ describe("persistent provider driver", () => {
+     });
+   });
+ });
++
++// Deterministic driver probes: no real process, pid, credentials, or inference.
++describe("parked turn ownership and abandonment", () => {
++  for (const differentProfile of [false, true]) {
++    it(`rejects fresh turns during resumed running (different profile: ${differentProfile})`, { timeout: 5000 }, async () => {
++      await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
++        const driver = track(new AgyProviderDriver());
++        const first = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
++        await Promise.resolve();
++        const child = [...children][0];
++        assert.equal(driver.notifyPark({ callId: "a", toolName: "read", args: {} }), true);
++        await awaitWithWatchdog(first, "first parked phase");
++        const resumed = driver.continueTurn();
++        void resumed.catch(() => undefined);
++        const competing = driver.turn(differentProfile ? { ...profile, fullModel: "other" } : profile, turnOptions({ timeoutMs: 500 }));
++        // Observe the rejection without leaving an unhandled promise on failure.
++        const rejected = assert.rejects(awaitWithWatchdog(competing, "competing turn", 100), /another agy turn/);
++        void rejected.catch(() => undefined);
++        await Promise.resolve();
++        await Promise.resolve();
++        child.stdout.write(JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "owned A" } }) + "\n");
++        await rejected;
++        assert.equal(expectDone(await awaitWithWatchdog(resumed, "original resume")).text, "owned A");
++      });
++    });
++  }
++
++  for (const status of ["SUCCESS", "FAILED"]) {
++    it(`retains parked terminal ${status} for exactly one continuation`, { timeout: 5000 }, async () => {
++      await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
++        const driver = track(new AgyProviderDriver());
++        let orphans = 0;
++        driver.onParksOrphaned = () => { orphans++; };
++        const first = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
++        await Promise.resolve();
++        const child = [...children][0];
++        driver.notifyPark({ callId: "a", toolName: "read", args: {} });
++        await awaitWithWatchdog(first, "first parked phase");
++        child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "authoritative", error: "failure" } }) + "\n");
++        // Child close after a terminal envelope must not orphan its owned result.
++        child.close();
++        await assert.rejects(awaitWithWatchdog(driver.turn(profile, turnOptions({ timeoutMs: 500 })), "pending terminal ownership", 100), /another agy turn/);
++        const resumed = Promise.resolve().then(() => driver.continueTurn({ signal: AbortSignal.abort() }));
++        if (status === "SUCCESS") assert.equal(expectDone(await awaitWithWatchdog(resumed, "retained driver result")).text, "authoritative");
++        else await assert.rejects(awaitWithWatchdog(resumed, "retained failure"), /FAILED/);
++        assert.equal(orphans, 0);
++        assert.throws(() => driver.continueTurn(), /no suspended turn/);
++      });
++    });
++  }
++
++  for (const subsequent of [false, true]) {
++    for (const failure of ["abort", "close", "error", "cancel", "shutdown"]) {
++      it(`orphans ${subsequent ? "subsequent" : "first"} park exactly once on ${failure}`, { timeout: 5000 }, async () => {
++        await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
++          const driver = track(new AgyProviderDriver());
++          let orphans = 0;
++          driver.onParksOrphaned = () => { orphans++; };
++          const old = new AbortController();
++          const current = new AbortController();
++          const first = driver.turn(profile, turnOptions({ signal: old.signal, timeoutMs: 20 }));
++          await Promise.resolve();
++          const child = [...children][0];
++          child.stdout.write('{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"partial"}}\n');
++          driver.notifyPark({ callId: "a", toolName: "read", args: {} });
++          await awaitWithWatchdog(first, "first parked phase");
++          if (subsequent) {
++            const next = driver.continueTurn({ signal: current.signal, timeoutMs: 20 });
++            driver.notifyPark({ callId: "b", toolName: "read", args: {} });
++            await awaitWithWatchdog(next, "next driver phase");
++            old.abort();
++            assert.equal(orphans, 0);
++          }
++          if (failure === "abort") (subsequent ? current : old).abort();
++          if (failure === "close") child.close(3);
++          if (failure === "error") child.emit("error", new Error("fake failure"));
++          if (failure === "cancel") driver.cancelSuspended("cancelled");
++          if (failure === "shutdown") await driver.close();
++          assert.equal(orphans, 1);
++          assert.throws(() => driver.continueTurn(), /no suspended turn|closed/);
++          driver.cancelSuspended("again");
++          if (failure !== "shutdown") {
++            const next = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
++            await Promise.resolve();
++            old.abort(); current.abort();
++            await new Promise((resolve) => nativeSetTimeout(resolve, 35));
++            const fresh = [...children].find((item) => item !== child)!;
++            assert.equal(fresh.killRequested, false);
++            fresh.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"later"}}\n');
++            assert.equal(expectDone(await awaitWithWatchdog(next, "later driver turn")).text, "later");
++          }
++          await driver.close();
++          assert.equal(orphans, 1);
++        });
++      });
++    }
++  }
++});
++
++
++describe("pending terminal abandonment deadline", () => {
++  for (const status of ["SUCCESS", "FAILED"]) {
++    for (const reason of ["deadline", "close"]) {
++      it(`releases unconsumed ${status} on ${reason} exactly once`, { timeout: 5000 }, async () => {
++        let expire!: () => void;
++        let deadlineHandle: unknown;
++        let deadlineCleared = false;
++        const clearStub = mock.method(globalThis, "clearTimeout", ((handle: ReturnType<typeof setTimeout>) => {
++          if (handle === deadlineHandle) deadlineCleared = true;
++          nativeClearTimeout(handle);
++        }) as typeof clearTimeout);
++        // Capture only the suspension deadline; invoke it deterministically.
++        // Keep its real handle so production cleanup still clears a real timer.
++        const timerStub = mock.method(globalThis, "setTimeout", ((callback: () => void, ms?: number, ...args: unknown[]) => {
++          const handle = nativeSetTimeout(callback, ms, ...args);
++          if (ms === SUSPENDED_TURN_MAX_MS) {
++            deadlineHandle = handle;
++            expire = () => { nativeClearTimeout(handle); callback(); };
++          }
++          return handle;
++        }) as typeof setTimeout);
++        try {
++          await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
++            const driver = track(new AgyProviderDriver());
++            let orphans = 0;
++            driver.onParksOrphaned = () => { orphans++; };
++            const first = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
++            await Promise.resolve();
++            const child = [...children][0];
++            driver.notifyPark({ callId: "a", toolName: "read", args: {} });
++            await awaitWithWatchdog(first, "first parked phase");
++            child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "owned" } }) + "\n");
++            assert.equal(orphans, 0);
++            assert.equal(deadlineCleared, false, "pending terminal must retain its abandonment deadline");
++            if (reason === "close") await driver.close();
++            else expire();
++            assert.equal(orphans, 1);
++            assert.throws(() => driver.continueTurn(), /no suspended turn|closed/);
++            if (reason === "deadline") {
++              const next = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
++              await Promise.resolve();
++              const fresh = [...children].find((item) => item !== child)!;
++              expire(); // An already queued obsolete deadline cannot kill its successor.
++              assert.equal(fresh.killRequested, false);
++              fresh.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"next"}}\n');
++              await awaitWithWatchdog(next, "next driver phase");
++            }
++            await driver.close();
++            assert.equal(orphans, 1);
++          });
++        } finally {
++          timerStub.mock.restore();
++          clearStub.mock.restore();
++        }
++      });
++    }
++  }
++});
++
++
++describe("retained terminal consumption reuse", () => {
++  for (const status of ["SUCCESS", "FAILED"]) {
++    it(`clears the old deadline and reuses the live child after ${status}`, { timeout: 5000 }, async () => {
++      let obsoleteDeadline!: () => void;
++      let deadlineHandle: unknown;
++      let deadlineCleared = false;
++      const clearStub = mock.method(globalThis, "clearTimeout", ((handle: ReturnType<typeof setTimeout>) => {
++        if (handle === deadlineHandle) deadlineCleared = true;
++        nativeClearTimeout(handle);
++      }) as typeof clearTimeout);
++      const timerStub = mock.method(globalThis, "setTimeout", ((callback: () => void, ms?: number, ...args: unknown[]) => {
++        const handle = nativeSetTimeout(callback, ms, ...args);
++        if (ms === SUSPENDED_TURN_MAX_MS) { obsoleteDeadline = callback; deadlineHandle = handle; }
++        return handle;
++      }) as typeof setTimeout);
++      try {
++        await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
++          const driver = track(new AgyProviderDriver());
++          let orphans = 0;
++          driver.onParksOrphaned = () => { orphans++; };
++          const oldSignal = new AbortController();
++          const first = driver.turn(profile, turnOptions({ signal: oldSignal.signal }));
++          await Promise.resolve();
++          const child = [...children][0];
++          driver.notifyPark({ callId: "a", toolName: "read", args: {} });
++          await awaitWithWatchdog(first, "reuse first park");
++          child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "terminal A",
++            ...(status === "SUCCESS" ? { conversation_id: "owned-conversation" } : {}),
++          } }) + "\n");
++          const consumed = Promise.resolve().then(() => driver.continueTurn());
++          if (status === "SUCCESS") assert.equal(expectDone(await awaitWithWatchdog(consumed, "reuse terminal")).text, "terminal A");
++          else await assert.rejects(awaitWithWatchdog(consumed, "reuse error"), /FAILED/);
++          assert.equal(deadlineCleared, true, "terminal consumption clears its abandonment timer");
++          const next = driver.turn(profile, turnOptions({ resumeConversationId: status === "SUCCESS" ? "owned-conversation" : undefined }));
++          await Promise.resolve();
++          obsoleteDeadline();
++          oldSignal.abort();
++          assert.equal(child.killRequested, false);
++          assert.equal(driver.snapshot().stats.spawns, 1);
++          assert.equal(driver.snapshot().stats.reuses, 1);
++          child.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"terminal B"}}\n');
++          assert.equal(expectDone(await awaitWithWatchdog(next, "same live child reuse")).text, "terminal B");
++          assert.equal(orphans, 0);
++        });
++      } finally { timerStub.mock.restore(); clearStub.mock.restore(); }
++    });
++  }
++});
+diff --git a/tests/provider-mcp.test.ts b/tests/provider-mcp.test.ts
+index 63fa504..c009dac 100644
+--- a/tests/provider-mcp.test.ts
++++ b/tests/provider-mcp.test.ts
+@@ -1,4 +1,7 @@
+ import assert from "node:assert/strict";
++import { PassThrough } from "node:stream";
++import { AgyProviderDriver } from "../extensions/lib/provider-driver.js";
++import { withTimingFakeAgy, awaitWithWatchdog } from "./timing-helpers.js";
+ import { mkdtemp, readFile, stat } from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
+@@ -757,3 +760,64 @@ describe("MCP bridge", () => {
+     });
+   });
+ });
++
++
++describe("bridge and driver terminal ownership", () => {
++  for (const status of ["SUCCESS", "FAILED", "ORPHAN"]) {
++    it(`handles an escalated parked ${status} without losing ownership`, { timeout: 7000 }, async () => {
++      await withIsolatedAgentDir(async () => {
++        await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
++          const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-composed-"));
++          const bridge = await startMcpBridge(dir, { escalateAfterMs: 5 });
++          assert.ok(bridge);
++          handles.push(bridge);
++          const driver = new AgyProviderDriver();
++          const client = await connectClient(bridge.url, await readToken(bridge.configDir));
++          let orphaned = 0;
++          driver.onParksOrphaned = (message) => { orphaned++; bridge.failAllParks(message); };
++          bridge.setTools([{ name: "slow", piName: "slow", description: "Slow", inputSchema: { type: "object" } }]);
++          bridge.setParkHandler((park) => driver.notifyPark(park));
++          try {
++            const first = driver.turn({ dir, fullModel: "fake", skipPermissions: false }, {
++              prompt: "test", signal: new AbortController().signal, timeoutMs: 1000,
++            });
++            await Promise.resolve();
++            const child = [...children][0];
++            const call = client.callTool({ name: "slow", arguments: {} });
++            const parked = await awaitWithWatchdog(first, "composed park");
++            assert.equal(parked.kind, "parked");
++            if (parked.kind !== "parked") throw new Error("expected park");
++            const ack = await awaitWithWatchdog(call, "escalated MCP acknowledgement");
++            assert.match(JSON.stringify(ack), /STILL RUNNING/);
++            if (status === "ORPHAN") child.close(3);
++            else child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "canonical answer" } }) + "\n");
++            const delivered = bridge.completePark(parked.park.callId, { text: "Pi tool output", isError: false });
++            if (status === "ORPHAN") {
++              assert.equal(orphaned, 1);
++              assert.equal(delivered, false);
++              assert.throws(() => driver.continueTurn(), /no suspended turn/);
++            } else {
++              assert.equal(delivered, true);
++              assert.equal(orphaned, 0);
++              const resumed = Promise.resolve().then(() => driver.continueTurn());
++              if (status === "FAILED") await assert.rejects(awaitWithWatchdog(resumed, "composed terminal failure"), /FAILED/);
++              else {
++                const done = await awaitWithWatchdog(resumed, "composed terminal success");
++                assert.equal(done.kind, "done");
++                if (done.kind === "done") assert.equal(done.outcome.text, "canonical answer");
++              }
++              assert.throws(() => driver.continueTurn(), /no suspended turn/);
++            }
++            assert.equal(bridge.completePark(parked.park.callId, { text: "duplicate", isError: false }), false);
++            const poll = await awaitWithWatchdog(client.callTool({ name: "bridge_poll_result", arguments: { callId: parked.park.callId } }), "ordinary bridge poll");
++            assert.match(JSON.stringify(poll), status === "ORPHAN" ? /exited mid-turn/ : /Pi tool output/);
++          } finally {
++            await driver.close();
++            await client.close();
++            await bridge.stop();
++          }
++        });
++      });
++    });
++  }
++});
+diff --git a/tests/provider.test.ts b/tests/provider.test.ts
+index a646739..53b1472 100644
+--- a/tests/provider.test.ts
++++ b/tests/provider.test.ts
+@@ -1,5 +1,11 @@
+ import assert from "node:assert/strict";
+-import { afterEach, describe, it } from "node:test";
++import { PassThrough } from "node:stream";
++import { withTimingFakeAgy, awaitWithWatchdog, nativeSetTimeout, type FakeChild } from "./timing-helpers.js";
++import { Client } from "@modelcontextprotocol/sdk/client/index.js";
++import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
++import { getProviderDriver, getProviderStatus } from "../extensions/lib/provider.js";
++import { BRIDGE_TOKEN_HEADER, DEFAULT_PARK_ESCALATE_MS } from "../extensions/lib/provider-mcp.js";
++import { afterEach, describe, it, mock } from "node:test";
+ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+ 
+ import {
+@@ -1213,31 +1219,27 @@ describe("provider default runner", () => {
+   });
+ 
+   it("waits for the directory lock instead of racing another run", async () => {
+-    const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-provider-lock-"));
+-    // Occupy the directory chain with a holder that never finishes.
+-    let release!: () => void;
+-    const gate = new Promise<void>((resolve) => {
+-      release = resolve;
++    await withIsolatedAgentDir(async () => {
++      await withTimingFakeAgy({ onSpawn: () => { assert.fail("lock waiter must never spawn agy"); } }, async () => {
++        const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-provider-lock-"));
++        let release!: () => void;
++        let entered!: () => void;
++        const gate = new Promise<void>((resolve) => { release = resolve; });
++        const ready = new Promise<void>((resolve) => { entered = resolve; });
++        const holder = withDirLock(dir, () => { entered(); return gate; });
++        try {
++          await awaitWithWatchdog(ready, "lock holder readiness");
++          await assert.rejects(getProviderRunner(dir).run({
++            fullModel: "gemini-3.8-flash", prompt: "blocked", dir,
++            signal: new AbortController().signal, timeoutMs: 1_500,
++            skipPermissions: false, bridgedTools: [],
++          }), /timed out waiting for a previous run/);
++        } finally {
++          release();
++          await holder;
++        }
++      });
+     });
+-    const holder = withDirLock(dir, () => gate);
+-    try {
+-      await assert.rejects(
+-        () =>
+-          getProviderRunner(dir).run({
+-            fullModel: "gemini-3.8-flash",
+-            prompt: "blocked",
+-            dir,
+-            signal: new AbortController().signal,
+-            timeoutMs: 1_500,
+-            skipPermissions: false,
+-        bridgedTools: [],
+-          }),
+-        /timed out waiting for a previous run/,
+-      );
+-    } finally {
+-      release();
+-      await holder;
+-    }
+   });
+ 
+   it("rejects terminal failures instead of returning empty text", async () => {
+@@ -1263,3 +1265,254 @@ describe("provider default runner", () => {
+     });
+   });
+ });
++
++
++describe("provider parked resource reclamation", () => {
++  for (const subsequent of [false, true]) {
++    for (const failure of ["abort", "close", "error", "cancel", "shutdown"]) {
++      it(`reclaims suspension, images and bridge on ${failure} (${subsequent ? "subsequent" : "first"} park)`, { timeout: 7000 }, async () => {
++        await withIsolatedAgentDir(async () => {
++          let configDir = "";
++          let spawned!: () => void;
++          const ready = new Promise<void>((resolve) => { spawned = resolve; });
++          await withTimingFakeAgy({ onSpawn: (args, child) => {
++            Object.assign(child, { stdin: new PassThrough() });
++            for (let i = 0; i < args.length; i++) {
++              if (args[i] === "--add-dir" && args[i + 1].includes("pi-agy-bridge")) configDir = args[i + 1];
++            }
++            spawned();
++          } }, async (children) => {
++            const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-reclaim-"));
++            const factory = createRecordingFactory();
++            const stream = createAgyStreamSimple(factory, {
++              dir, entries: [...FALLBACK_PROVIDER_MODELS],
++              tools: [{ name: "read", description: "Read", parameters: { type: "object" } }],
++            });
++            const old = new AbortController();
++            const current = new AbortController();
++            const messages: ProviderTranscriptMessage[] = [{ role: "user", content: [
++              { type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
++            ] }];
++            stream({ id: "gemini-3-8-flash" }, messages, { signal: old.signal });
++            await awaitWithWatchdog(ready, "provider spawn", 3000);
++            const child = [...children][0];
++            const originalDriver = getProviderDriver(dir);
++            const config = JSON.parse(await readFile(path.join(configDir, ".agents", "mcp_config.json"), "utf8"));
++            const server = Object.values(config.mcpServers)[0] as { serverUrl: string; headers: Record<string, string> };
++            const client = new Client({ name: "reclaim-test", version: "1" }, { capabilities: {} });
++            try {
++              await awaitWithWatchdog(client.connect(new StreamableHTTPClientTransport(new URL(server.serverUrl), {
++                requestInit: { headers: { [BRIDGE_TOKEN_HEADER]: server.headers[BRIDGE_TOKEN_HEADER] } },
++              })), "resource probe connect", 2000);
++              const listed = await awaitWithWatchdog(client.listTools(), "resource probe catalog");
++              const tool = listed.tools.find((entry) => entry.name === "read");
++              assert.ok(tool);
++              const calls = [client.callTool({ name: tool.name, arguments: {} })];
++              void calls[0].catch(() => undefined);
++              await waitForStreamEnd(factory, 0);
++              assert.equal(getProviderStatus(dir).suspended.length, 1);
++              assert.equal(getProviderStatus(dir).stagedImages, 1);
++              if (subsequent) {
++                const call = factory.events.find((event) => event.type === "toolcall_end")!.toolCall as { id: string; name: string; arguments: Record<string, unknown> };
++                const start = factory.events.length;
++                stream({ id: "gemini-3-8-flash" }, [...messages,
++                  { role: "assistant", content: [{ type: "toolCall", ...call }] },
++                  { role: "toolResult", toolCallId: call.id, toolName: call.name, content: "first result", isError: false },
++                ], { signal: current.signal });
++                await awaitWithWatchdog(calls[0], "first delivered tool");
++                calls.push(client.callTool({ name: tool.name, arguments: {} }));
++                void calls[1].catch(() => undefined);
++                await waitForStreamEnd(factory, start);
++                old.abort();
++                assert.equal(getProviderStatus(dir).suspended.length, 1);
++              }
++              if (failure === "abort") (subsequent ? current : old).abort();
++              if (failure === "close") child.close(3);
++              if (failure === "error") child.emit("error", new Error("fake process error"));
++              if (failure === "cancel") getProviderRunner(dir).cancel();
++              if (failure === "shutdown") { await closeProviderDrivers(); await client.close(); }
++              const settledCalls = await awaitWithWatchdog(Promise.allSettled(calls), "parked MCP cleanup", 2000);
++              if (failure !== "shutdown") {
++                const last = settledCalls[settledCalls.length - 1];
++                assert.equal(last.status, "fulfilled");
++                if (last.status === "fulfilled") assert.equal(last.value.isError, true);
++              }
++              // The hook removes the status entry synchronously; image removal is asynchronous.
++              assert.equal(getProviderStatus(dir).suspended.length, 0);
++              for (let n = 0; n < 100 && getProviderStatus(dir).stagedImages; n++) {
++                await new Promise((resolve) => setTimeout(resolve, 5));
++              }
++              assert.equal(getProviderStatus(dir).stagedImages, 0);
++              assert.throws(() => originalDriver.continueTurn(), failure === "shutdown" ? /closed/ : /no suspended turn/);
++            } finally {
++              await closeProviderDrivers();
++              await client.close();
++            }
++          });
++        });
++      });
++    }
++  }
++});
++
++
++/** Default runner + real authenticated MCP transport + pid-free driver fake. */
++async function withProviderLifecycleProbe(fn: (probe: {
++  dir: string; child: FakeChild; driver: ReturnType<typeof getProviderDriver>;
++  runner: ProviderTurnRunner; client: Client; factory: ReturnType<typeof createRecordingFactory>;
++  controller: AbortController; parks: Array<{ callId: string; toolName: string }>;
++}) => Promise<void>): Promise<void> {
++  await withIsolatedAgentDir(async () => {
++    let configDir = "";
++    let spawned!: () => void;
++    const ready = new Promise<void>((resolve) => { spawned = resolve; });
++    await withTimingFakeAgy({ onSpawn: (args, child) => {
++      Object.assign(child, { stdin: new PassThrough() });
++      for (let i = 0; i < args.length; i++) {
++        if (args[i] === "--add-dir" && args[i + 1].includes("pi-agy-bridge")) configDir = args[i + 1];
++      }
++      spawned();
++    } }, async (children) => {
++      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-integration-"));
++      const driver = getProviderDriver(dir);
++      const runner = getProviderRunner(dir);
++      const parks: Array<{ callId: string; toolName: string }> = [];
++      const notify = driver.notifyPark.bind(driver);
++      const parkStub = mock.method(driver, "notifyPark", (park: Parameters<typeof driver.notifyPark>[0]) => { parks.push(park); return notify(park); });
++      const factory = createRecordingFactory();
++      const controller = new AbortController();
++      const stream = createAgyStreamSimple(factory, { dir, entries: [...FALLBACK_PROVIDER_MODELS],
++        tools: [{ name: "read", description: "Read", parameters: { type: "object" } }],
++      });
++      const client = new Client({ name: "lifecycle-probe", version: "1" }, { capabilities: {} });
++      try {
++        stream({ id: "gemini-3-8-flash" }, [{ role: "user", content: [
++          { type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
++        ] }], { signal: controller.signal });
++        await awaitWithWatchdog(ready, "default runner spawn", 3000);
++        const config = JSON.parse(await readFile(path.join(configDir, ".agents", "mcp_config.json"), "utf8"));
++        const server = Object.values(config.mcpServers)[0] as { serverUrl: string; headers: Record<string, string> };
++        await awaitWithWatchdog(client.connect(new StreamableHTTPClientTransport(new URL(server.serverUrl), {
++          requestInit: { headers: { [BRIDGE_TOKEN_HEADER]: server.headers[BRIDGE_TOKEN_HEADER] } },
++        })), "probe MCP connect", 2000);
++        await fn({ dir, driver, runner, client, factory, controller, parks, child: [...children][0] });
++      } finally {
++        controller.abort();
++        await awaitWithWatchdog(closeProviderDrivers(), "probe shutdown", 3000);
++        await client.close();
++        parkStub.mock.restore();
++      }
++    });
++  });
++}
++
++function callProbeTool(client: Client, name = "read") {
++  const result = awaitWithWatchdog(client.callTool({ name, arguments: {} }), "probe MCP tool", 2500);
++  void result.catch(() => undefined);
++  return result;
++}
++
++describe("default runner integration ownership", () => {
++  for (const catalog of ["different-name", "different-mapping"]) {
++    it(`preserves owner catalog and handler on rejected ${catalog} start`, { timeout: 7000 }, async () => {
++      await withProviderLifecycleProbe(async ({ dir, driver, runner, client, factory, parks }) => {
++        const firstCall = callProbeTool(client);
++        await waitForStreamEnd(factory, 0);
++        const resumed = awaitWithWatchdog(runner.resume([{ callId: parks[0].callId, text: "first", isError: false }]), "owner next park", 2000);
++        void resumed.catch(() => undefined);
++        await firstCall;
++        await assert.rejects(runner.run({ dir, fullModel: "other", prompt: "foreign", signal: new AbortController().signal,
++          timeoutMs: 1000, skipPermissions: false, bridgedTools: [{ name: catalog === "different-name" ? "write" : "read",
++            piName: "foreign", description: "foreign", inputSchema: { type: "object" } }],
++        }), /another agy turn/);
++        const tools = await awaitWithWatchdog(client.listTools(), "owner catalog");
++        assert.ok(tools.tools.some((tool) => tool.name === "read"));
++        assert.equal(tools.tools.some((tool) => tool.name === "write"), false);
++        const secondCall = callProbeTool(client);
++        const next = await resumed;
++        assert.equal(next.kind, "parked");
++        if (next.kind === "parked") assert.equal(next.park.toolName, "read");
++        assert.equal(driver.snapshot().stats.spawns, 1);
++        runner.cancel();
++        const failed = await secondCall;
++        assert.equal(failed.isError, true);
++      });
++    });
++  }
++
++  for (const failure of ["abort", "close", "error"]) {
++    it(`refuses suspension publication when ${failure} follows park acceptance before lock release`, { timeout: 7000 }, async () => {
++      await withProviderLifecycleProbe(async ({ dir, driver, child, client, factory, controller }) => {
++        const notify = driver.notifyPark.bind(driver);
++        const stub = mock.method(driver, "notifyPark", (park: Parameters<typeof driver.notifyPark>[0]) => {
++          const accepted = notify(park);
++          assert.equal(accepted, true);
++          // notifyPark resolved the phase, but no promise continuation or lock
++          // release has run: orphan before the stream can publish its record.
++          if (failure === "abort") controller.abort();
++          if (failure === "close") child.close(3);
++          if (failure === "error") child.emit("error", new Error("publication gap"));
++          return accepted;
++        });
++        try {
++          const call = callProbeTool(client);
++          await waitForStreamEnd(factory, 0);
++          assert.equal((await call).isError, true);
++          assert.equal(factory.events.some((event) => event.type === "toolcall_start" || event.type === "toolcall_end"), false);
++          assert.ok(factory.events.some((event) => event.type === "error"));
++          assert.equal(getProviderStatus(dir).suspended.length, 0);
++          await awaitWithWatchdog((async () => {
++            while (getProviderStatus(dir).stagedImages) await new Promise((resolve) => nativeSetTimeout(resolve, 5));
++          })(), "publication image cleanup");
++          assert.equal(getProviderStatus(dir).stagedImages, 0);
++          assert.throws(() => driver.continueTurn(), /no suspended turn/);
++        } finally { stub.mock.restore(); }
++      });
++    });
++  }
++
++  for (const status of ["SUCCESS", "FAILED"]) {
++    it(`discards unpolled escalations when retained ${status} is consumed`, { timeout: 7000 }, async () => {
++      const timerStub = mock.method(globalThis, "setTimeout", ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) =>
++        nativeSetTimeout(callback, ms === DEFAULT_PARK_ESCALATE_MS ? 5 : ms, ...args)) as typeof setTimeout);
++      try {
++        await withProviderLifecycleProbe(async ({ dir, child, runner, client, factory, parks }) => {
++          const ack = callProbeTool(client);
++          await waitForStreamEnd(factory, 0);
++          assert.match(JSON.stringify(await ack), /STILL RUNNING/);
++          assert.equal(getProviderStatus(dir).bridge?.pendingResults, 1);
++          child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "owned final" } }) + "\n");
++          const resumed = runner.resume([{ callId: parks[0].callId, text: "large tool payload".repeat(1000), isError: false }]);
++          if (status === "FAILED") await assert.rejects(awaitWithWatchdog(resumed, "retained failure"), /FAILED/);
++          else assert.equal((await awaitWithWatchdog(resumed, "retained success")).kind, "done");
++          // Inspect without polling: polling itself would consume and hide a leak.
++          const bridge = getProviderStatus(dir).bridge;
++          assert.equal(bridge?.pendingResults, 0);
++        });
++      } finally { timerStub.mock.restore(); }
++    });
++  }
++});
++
++
++it("keeps ordinary escalation polling available until the owning operation ends", { timeout: 7000 }, async () => {
++  const timerStub = mock.method(globalThis, "setTimeout", ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) =>
++    nativeSetTimeout(callback, ms === DEFAULT_PARK_ESCALATE_MS ? 5 : ms, ...args)) as typeof setTimeout);
++  try {
++    await withProviderLifecycleProbe(async ({ dir, child, runner, client, factory, parks }) => {
++      const ack = callProbeTool(client);
++      await waitForStreamEnd(factory, 0);
++      assert.match(JSON.stringify(await ack), /STILL RUNNING/);
++      const resumed = awaitWithWatchdog(runner.resume([{ callId: parks[0].callId, text: "ordinary output", isError: false }]), "ordinary resumed terminal");
++      void resumed.catch(() => undefined);
++      assert.equal(getProviderStatus(dir).bridge?.pendingResults, 1);
++      const poll = await awaitWithWatchdog(client.callTool({ name: "bridge_poll_result", arguments: { callId: parks[0].callId } }), "ordinary live polling");
++      assert.match(JSON.stringify(poll), /ordinary output/);
++      assert.equal(getProviderStatus(dir).bridge?.pendingResults, 0);
++      child.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"after polling"}}\n');
++      const done = await resumed;
++      assert.equal(done.kind, "done");
++      if (done.kind === "done") assert.equal(done.result.text, "after polling");
++    });
++  } finally { timerStub.mock.restore(); }
++});

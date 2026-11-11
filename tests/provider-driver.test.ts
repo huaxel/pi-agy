@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
+import { PassThrough } from "node:stream";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, it } from "node:test";
+import { afterEach, describe, it, mock } from "node:test";
 
-import { awaitWithWatchdog, nativeSetTimeout } from "./timing-helpers.js";
+import { withTimingFakeAgy, awaitWithWatchdog, nativeSetTimeout, nativeClearTimeout } from "./timing-helpers.js";
 import {
   AgyProviderDriver,
+  SUSPENDED_TURN_MAX_MS,
   type DriverTurnEnd,
   type ProviderDriverOutcome,
   type ProviderDriverProfile,
@@ -466,4 +468,212 @@ describe("persistent provider driver", () => {
       assert.equal(await controls.spawnCount(), 2);
     });
   });
+});
+
+// Deterministic driver probes: no real process, pid, credentials, or inference.
+describe("parked turn ownership and abandonment", () => {
+  for (const differentProfile of [false, true]) {
+    it(`rejects fresh turns during resumed running (different profile: ${differentProfile})`, { timeout: 5000 }, async () => {
+      await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+        const driver = track(new AgyProviderDriver());
+        const first = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
+        await Promise.resolve();
+        const child = [...children][0];
+        assert.equal(driver.notifyPark({ callId: "a", toolName: "read", args: {} }), true);
+        await awaitWithWatchdog(first, "first parked phase");
+        const resumed = driver.continueTurn();
+        void resumed.catch(() => undefined);
+        const competing = driver.turn(differentProfile ? { ...profile, fullModel: "other" } : profile, turnOptions({ timeoutMs: 500 }));
+        // Observe the rejection without leaving an unhandled promise on failure.
+        const rejected = assert.rejects(awaitWithWatchdog(competing, "competing turn", 100), /another agy turn/);
+        void rejected.catch(() => undefined);
+        await Promise.resolve();
+        await Promise.resolve();
+        child.stdout.write(JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "owned A" } }) + "\n");
+        await rejected;
+        assert.equal(expectDone(await awaitWithWatchdog(resumed, "original resume")).text, "owned A");
+      });
+    });
+  }
+
+  for (const status of ["SUCCESS", "FAILED"]) {
+    it(`retains parked terminal ${status} for exactly one continuation`, { timeout: 5000 }, async () => {
+      await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+        const driver = track(new AgyProviderDriver());
+        let orphans = 0;
+        driver.onParksOrphaned = () => { orphans++; };
+        const first = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
+        await Promise.resolve();
+        const child = [...children][0];
+        driver.notifyPark({ callId: "a", toolName: "read", args: {} });
+        await awaitWithWatchdog(first, "first parked phase");
+        child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "authoritative", error: "failure" } }) + "\n");
+        // Child close after a terminal envelope must not orphan its owned result.
+        child.close();
+        await assert.rejects(awaitWithWatchdog(driver.turn(profile, turnOptions({ timeoutMs: 500 })), "pending terminal ownership", 100), /another agy turn/);
+        const resumed = Promise.resolve().then(() => driver.continueTurn({ signal: AbortSignal.abort() }));
+        if (status === "SUCCESS") assert.equal(expectDone(await awaitWithWatchdog(resumed, "retained driver result")).text, "authoritative");
+        else await assert.rejects(awaitWithWatchdog(resumed, "retained failure"), /FAILED/);
+        assert.equal(orphans, 0);
+        assert.throws(() => driver.continueTurn(), /no suspended turn/);
+      });
+    });
+  }
+
+  for (const subsequent of [false, true]) {
+    for (const failure of ["abort", "close", "error", "cancel", "shutdown"]) {
+      it(`orphans ${subsequent ? "subsequent" : "first"} park exactly once on ${failure}`, { timeout: 5000 }, async () => {
+        await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+          const driver = track(new AgyProviderDriver());
+          let orphans = 0;
+          driver.onParksOrphaned = () => { orphans++; };
+          const old = new AbortController();
+          const current = new AbortController();
+          const first = driver.turn(profile, turnOptions({ signal: old.signal, timeoutMs: 20 }));
+          await Promise.resolve();
+          const child = [...children][0];
+          child.stdout.write('{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"partial"}}\n');
+          driver.notifyPark({ callId: "a", toolName: "read", args: {} });
+          await awaitWithWatchdog(first, "first parked phase");
+          if (subsequent) {
+            const next = driver.continueTurn({ signal: current.signal, timeoutMs: 20 });
+            driver.notifyPark({ callId: "b", toolName: "read", args: {} });
+            await awaitWithWatchdog(next, "next driver phase");
+            old.abort();
+            assert.equal(orphans, 0);
+          }
+          if (failure === "abort") (subsequent ? current : old).abort();
+          if (failure === "close") child.close(3);
+          if (failure === "error") child.emit("error", new Error("fake failure"));
+          if (failure === "cancel") driver.cancelSuspended("cancelled");
+          if (failure === "shutdown") await driver.close();
+          assert.equal(orphans, 1);
+          assert.throws(() => driver.continueTurn(), /no suspended turn|closed/);
+          driver.cancelSuspended("again");
+          if (failure !== "shutdown") {
+            const next = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
+            await Promise.resolve();
+            old.abort(); current.abort();
+            await new Promise((resolve) => nativeSetTimeout(resolve, 35));
+            const fresh = [...children].find((item) => item !== child)!;
+            assert.equal(fresh.killRequested, false);
+            fresh.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"later"}}\n');
+            assert.equal(expectDone(await awaitWithWatchdog(next, "later driver turn")).text, "later");
+          }
+          await driver.close();
+          assert.equal(orphans, 1);
+        });
+      });
+    }
+  }
+});
+
+
+describe("pending terminal abandonment deadline", () => {
+  for (const status of ["SUCCESS", "FAILED"]) {
+    for (const reason of ["deadline", "close"]) {
+      it(`releases unconsumed ${status} on ${reason} exactly once`, { timeout: 5000 }, async () => {
+        let expire!: () => void;
+        let deadlineHandle: unknown;
+        let deadlineCleared = false;
+        const clearStub = mock.method(globalThis, "clearTimeout", ((handle: ReturnType<typeof setTimeout>) => {
+          if (handle === deadlineHandle) deadlineCleared = true;
+          nativeClearTimeout(handle);
+        }) as typeof clearTimeout);
+        // Capture only the suspension deadline; invoke it deterministically.
+        // Keep its real handle so production cleanup still clears a real timer.
+        const timerStub = mock.method(globalThis, "setTimeout", ((callback: () => void, ms?: number, ...args: unknown[]) => {
+          const handle = nativeSetTimeout(callback, ms, ...args);
+          if (ms === SUSPENDED_TURN_MAX_MS) {
+            deadlineHandle = handle;
+            expire = () => { nativeClearTimeout(handle); callback(); };
+          }
+          return handle;
+        }) as typeof setTimeout);
+        try {
+          await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+            const driver = track(new AgyProviderDriver());
+            let orphans = 0;
+            driver.onParksOrphaned = () => { orphans++; };
+            const first = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
+            await Promise.resolve();
+            const child = [...children][0];
+            driver.notifyPark({ callId: "a", toolName: "read", args: {} });
+            await awaitWithWatchdog(first, "first parked phase");
+            child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "owned" } }) + "\n");
+            assert.equal(orphans, 0);
+            assert.equal(deadlineCleared, false, "pending terminal must retain its abandonment deadline");
+            if (reason === "close") await driver.close();
+            else expire();
+            assert.equal(orphans, 1);
+            assert.throws(() => driver.continueTurn(), /no suspended turn|closed/);
+            if (reason === "deadline") {
+              const next = driver.turn(profile, turnOptions({ timeoutMs: 500 }));
+              await Promise.resolve();
+              const fresh = [...children].find((item) => item !== child)!;
+              expire(); // An already queued obsolete deadline cannot kill its successor.
+              assert.equal(fresh.killRequested, false);
+              fresh.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"next"}}\n');
+              await awaitWithWatchdog(next, "next driver phase");
+            }
+            await driver.close();
+            assert.equal(orphans, 1);
+          });
+        } finally {
+          timerStub.mock.restore();
+          clearStub.mock.restore();
+        }
+      });
+    }
+  }
+});
+
+
+describe("retained terminal consumption reuse", () => {
+  for (const status of ["SUCCESS", "FAILED"]) {
+    it(`clears the old deadline and reuses the live child after ${status}`, { timeout: 5000 }, async () => {
+      let obsoleteDeadline!: () => void;
+      let deadlineHandle: unknown;
+      let deadlineCleared = false;
+      const clearStub = mock.method(globalThis, "clearTimeout", ((handle: ReturnType<typeof setTimeout>) => {
+        if (handle === deadlineHandle) deadlineCleared = true;
+        nativeClearTimeout(handle);
+      }) as typeof clearTimeout);
+      const timerStub = mock.method(globalThis, "setTimeout", ((callback: () => void, ms?: number, ...args: unknown[]) => {
+        const handle = nativeSetTimeout(callback, ms, ...args);
+        if (ms === SUSPENDED_TURN_MAX_MS) { obsoleteDeadline = callback; deadlineHandle = handle; }
+        return handle;
+      }) as typeof setTimeout);
+      try {
+        await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+          const driver = track(new AgyProviderDriver());
+          let orphans = 0;
+          driver.onParksOrphaned = () => { orphans++; };
+          const oldSignal = new AbortController();
+          const first = driver.turn(profile, turnOptions({ signal: oldSignal.signal }));
+          await Promise.resolve();
+          const child = [...children][0];
+          driver.notifyPark({ callId: "a", toolName: "read", args: {} });
+          await awaitWithWatchdog(first, "reuse first park");
+          child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "terminal A",
+            ...(status === "SUCCESS" ? { conversation_id: "owned-conversation" } : {}),
+          } }) + "\n");
+          const consumed = Promise.resolve().then(() => driver.continueTurn());
+          if (status === "SUCCESS") assert.equal(expectDone(await awaitWithWatchdog(consumed, "reuse terminal")).text, "terminal A");
+          else await assert.rejects(awaitWithWatchdog(consumed, "reuse error"), /FAILED/);
+          assert.equal(deadlineCleared, true, "terminal consumption clears its abandonment timer");
+          const next = driver.turn(profile, turnOptions({ resumeConversationId: status === "SUCCESS" ? "owned-conversation" : undefined }));
+          await Promise.resolve();
+          obsoleteDeadline();
+          oldSignal.abort();
+          assert.equal(child.killRequested, false);
+          assert.equal(driver.snapshot().stats.spawns, 1);
+          assert.equal(driver.snapshot().stats.reuses, 1);
+          child.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"terminal B"}}\n');
+          assert.equal(expectDone(await awaitWithWatchdog(next, "same live child reuse")).text, "terminal B");
+          assert.equal(orphans, 0);
+        });
+      } finally { timerStub.mock.restore(); clearStub.mock.restore(); }
+    });
+  }
 });

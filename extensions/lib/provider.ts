@@ -93,9 +93,14 @@ export interface ProviderToolPark {
   args: Record<string, unknown>;
 }
 
+/** A parked phase may publish only while its originating operation still owns it. */
+export interface ProviderTurnOwnership {
+  assertValid: () => void;
+}
+
 export type ProviderRunEnd =
   | { kind: "done"; result: ProviderTurnResult }
-  | { kind: "parked"; park: ProviderToolPark };
+  | { kind: "parked"; park: ProviderToolPark; ownership?: ProviderTurnOwnership };
 
 export interface ProviderToolDelivery {
   callId: string;
@@ -116,7 +121,7 @@ export interface ProviderTurnRunner {
     signal?: AbortSignal,
     timeoutMs?: number,
   ) => Promise<ProviderRunEnd>;
-  cancel: () => void;
+  cancel: (ownership?: ProviderTurnOwnership) => void;
 }
 
 export interface ProviderTurnResult {
@@ -144,87 +149,113 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
   const existing = providerRunners.get(key);
   if (existing) return existing;
   const driver = getProviderDriver(dir);
+  interface Operation extends ProviderTurnOwnership {
+    failure?: Error;
+    parks: Set<string>;
+    bridge?: McpBridgeHandle;
+  }
+  let operation: Operation | undefined;
+  const release = (owned: Operation, error: Error): void => {
+    owned.failure ??= error;
+    if (operation === owned) operation = undefined;
+    owned.bridge?.discardParks(owned.parks);
+    owned.parks.clear();
+    const stale = suspendedByDir.get(key);
+    if (stale?.ownership === owned) {
+      suspendedByDir.delete(key);
+      void runImageCleanups(stale.imageCleanups);
+    }
+  };
+  const finishPhase = (owned: Operation, end: Parameters<typeof toRunEnd>[0]): ProviderRunEnd => {
+    owned.assertValid();
+    const result = toRunEnd(end);
+    if (result.kind === "parked") return { ...result, ownership: owned };
+    release(owned, new Error("agy provider operation completed"));
+    return result;
+  };
   const runner: ProviderTurnRunner = {
     run: (request) => {
       const lockStart = Date.now();
-      return withDirLock(
-        request.dir,
-        async () => {
+      return withDirLock(request.dir, async () => {
+        // Reserve before any await or bridge mutation. Resumes stay lock-free,
+        // so the workspace lock alone cannot protect this operation's catalog.
+        if (operation) throw new Error("another agy turn owns this driver (running or suspended awaiting Pi tools)");
+        const owned: Operation = {
+          parks: new Set(),
+          assertValid: () => { if (owned.failure) throw owned.failure; },
+        };
+        operation = owned;
+        try {
           const waited = Date.now() - lockStart;
           const remaining = Math.max(5_000, request.timeoutMs - waited);
-          // Bridge startup never fails a turn: without a handle the driver
-          // simply spawns plain and parks are refused at the bridge.
           const bridge = await ensureProviderBridge(request.dir).catch(() => undefined);
-          // Process-stable staging root: agy can open staged images even
-          // with permissions enforced (no per-turn fingerprint churn).
+          owned.bridge = bridge;
           const imageRoot = await ensureImageStagingRoot().catch(() => undefined);
+          owned.assertValid();
           const fingerprint = bridgeToolsFingerprint(request.bridgedTools);
+          driver.onParksOrphaned = (message) => {
+            bridge?.failAllParks(message);
+            // The latch also survives the gap before the stream publishes a
+            // suspension: a resolved parked phase cannot resurrect an orphan.
+            release(owned, new Error(message));
+          };
           if (bridge) {
             bridge.setTools(request.bridgedTools);
-            bridge.setParkHandler((park) =>
-              driver.notifyPark({ callId: park.callId, toolName: park.toolName, args: park.args }),
-            );
-            driver.onParksOrphaned = (message) => {
-              bridge.failAllParks(message);
-              // Abandoned suspensions (wall timer, teardown kills) reclaim
-              // their staging here; nothing else will consume them.
-              const stale = suspendedByDir.get(path.resolve(request.dir));
-              if (stale) {
-                suspendedByDir.delete(path.resolve(request.dir));
-                void runImageCleanups(stale.imageCleanups);
-              }
-            };
+            bridge.setParkHandler((park) => {
+              if (owned.failure) return false;
+              owned.parks.add(park.callId);
+              const accepted = driver.notifyPark(park);
+              if (!accepted) owned.parks.delete(park.callId);
+              return accepted;
+            });
           }
-          const end = await driver.turn(
-            {
-              dir: request.dir,
-              fullModel: request.fullModel,
-              effort: request.effort,
-              skipPermissions: request.skipPermissions,
-              bridgeDir: bridge?.configDir,
-              bridgeTools: bridge ? fingerprint : undefined,
-              imageRoot,
-            },
-            {
-              prompt: request.prompt,
-              resumeConversationId: request.resumeConversationId,
-              signal: request.signal,
-              timeoutMs: remaining,
-              onText: request.callbacks?.onText,
-              onActivity: request.callbacks?.onActivity,
-            },
-          );
-          return toRunEnd(end);
-        },
-        request.signal,
-        request.timeoutMs,
-      );
+          const end = await driver.turn({
+            dir: request.dir, fullModel: request.fullModel, effort: request.effort,
+            skipPermissions: request.skipPermissions, bridgeDir: bridge?.configDir,
+            bridgeTools: bridge ? fingerprint : undefined, imageRoot,
+          }, {
+            prompt: request.prompt, resumeConversationId: request.resumeConversationId,
+            signal: request.signal, timeoutMs: remaining,
+            onText: request.callbacks?.onText, onActivity: request.callbacks?.onActivity,
+          });
+          return finishPhase(owned, end);
+        } catch (error) {
+          release(owned, error instanceof Error ? error : new Error(String(error)));
+          throw error;
+        }
+      }, request.signal, request.timeoutMs);
     },
     resume: async (deliveries, callbacks, resumeSignal, resumeTimeoutMs) => {
-      // Deliberately lock-free: resume continues an already-running child
-      // (no spawn) and taking the lock here deadlocks whenever the parked
-      // tool call itself started a lock-holding background run — the resume
-      // would wait on the very run it must complete to proceed. The
-      // suspended-gap race this opens (a foreign delegation run editing
-      // under a live provider child) is inherent to persistent processes;
-      // same-directory concurrency stays the agent's to coordinate, and
-      // fresh provider turns still serialize on the lock.
-      const bridge = providerBridges.get(path.resolve(dir));
+      // Deliberately lock-free: a parked Pi tool may itself hold the workspace
+      // lock. Taking it here would wait on the work this resume must complete.
+      const owned = operation;
+      if (!owned) throw new Error("agy provider driver has no suspended operation");
+      owned.assertValid();
+      const bridge = owned.bridge;
       if (!bridge) throw new Error("agy provider turn has no bridge to resume on");
-      for (const delivery of deliveries) {
-        bridge.completePark(delivery.callId, { text: delivery.text, isError: delivery.isError });
+      if (!deliveries.length || deliveries.some((delivery) => !owned.parks.has(delivery.callId))) {
+        throw new Error("agy provider tool delivery does not belong to the suspended operation");
       }
-      const end = await driver.continueTurn({
-        signal: resumeSignal,
-        timeoutMs: resumeTimeoutMs,
-        onText: callbacks?.onText,
-        onActivity: callbacks?.onActivity,
-      });
-      return toRunEnd(end);
+      try {
+        for (const delivery of deliveries) {
+          bridge.completePark(delivery.callId, { text: delivery.text, isError: delivery.isError });
+        }
+        const end = await driver.continueTurn({
+          signal: resumeSignal, timeoutMs: resumeTimeoutMs,
+          onText: callbacks?.onText, onActivity: callbacks?.onActivity,
+        });
+        return finishPhase(owned, end);
+      } catch (error) {
+        release(owned, error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      }
     },
-    cancel: () => {
+    cancel: (ownership) => {
+      const owned = operation;
+      if (!owned || (ownership && ownership !== owned)) return;
       driver.cancelSuspended("agy provider turn was cancelled");
-      providerBridges.get(path.resolve(dir))?.failAllParks("agy provider turn was cancelled");
+      owned.bridge?.failAllParks("agy provider turn was cancelled");
+      release(owned, new Error("agy provider turn was cancelled"));
     },
   };
   providerRunners.set(key, runner);
@@ -327,7 +358,7 @@ export interface ProviderStatus {
     boundConversationId?: string;
   };
   /** Bridge description, when a bridge is running for the directory. */
-  bridge?: { toolCount: number };
+  bridge?: { toolCount: number; pendingResults: number };
   /** Suspended turns awaiting Pi tool results. */
   suspended: ProviderStatusSuspended[];
   /** Live image staging dirs process-wide. */
@@ -364,7 +395,7 @@ export function getProviderStatus(dir: string): ProviderStatus {
             boundConversationId: snapshot.boundConversationId,
           }
         : undefined,
-      bridge: bridge ? { toolCount: bridge.describe().toolCount } : undefined,
+      bridge: bridge ? { toolCount: bridge.describe().toolCount, pendingResults: bridge.describe().pendingResults } : undefined,
       suspended,
       stagedImages: getLiveImageStagingCount(),
     };
@@ -491,6 +522,7 @@ function hasUserMessageAfterToolCall(messages: ProviderTranscriptMessage[], tool
 
 interface SuspendedTurn {
   runner: ProviderTurnRunner;
+  ownership?: ProviderTurnOwnership;
   toolCallId: string;
   park: ProviderToolPark;
   modelId: string;
@@ -648,6 +680,7 @@ export function createAgyStreamSimple(
         const bodies = prior ? collectParkedDeliveries(messages, prior.toolCallId) : [];
         let end: ProviderRunEnd;
         if (prior && bodies.length > 0) {
+          prior.ownership?.assertValid();
           suspendedByDir.delete(skey);
           // Images riding on the delivered tool results are staged too:
           // the resumed agy turn reads them by path. Owned by this
@@ -677,7 +710,7 @@ export function createAgyStreamSimple(
             // The suspended turn is gone (agy moved on without us): fail the
             // parks so nothing strands, then surface the failure loudly.
             try {
-              runner.cancel();
+              runner.cancel(prior.ownership);
             } catch {
               // Cancel is best effort next to the real error.
             }
@@ -694,7 +727,7 @@ export function createAgyStreamSimple(
             // of bricking the directory behind the suspended guard.
             suspendedByDir.delete(skey);
             try {
-              runner.cancel();
+              runner.cancel(prior.ownership);
             } catch {
               // Cancel is best effort next to a fresh turn.
             }
@@ -752,17 +785,15 @@ export function createAgyStreamSimple(
             name: end.park.toolName,
             arguments: end.park.args,
           };
+          end.ownership?.assertValid();
+          suspendedByDir.set(skey, {
+            runner, ownership: end.ownership, toolCallId, park: end.park,
+            modelId: model.id, imageCleanups: pendingImageCleanups,
+          });
           output.content.push(toolCall);
           const toolIndex = output.content.length - 1;
           stream.push({ type: "toolcall_start", contentIndex: toolIndex, partial: output });
           stream.push({ type: "toolcall_end", contentIndex: toolIndex, toolCall, partial: output });
-          suspendedByDir.set(skey, {
-            runner,
-            toolCallId,
-            park: end.park,
-            modelId: model.id,
-            imageCleanups: pendingImageCleanups,
-          });
           output.usage.totalTokens =
             output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
           output.stopReason = "toolUse";

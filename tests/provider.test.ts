@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { afterEach, describe, it } from "node:test";
+import { PassThrough } from "node:stream";
+import { withTimingFakeAgy, awaitWithWatchdog, nativeSetTimeout, type FakeChild } from "./timing-helpers.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { getProviderDriver, getProviderStatus } from "../extensions/lib/provider.js";
+import { BRIDGE_TOKEN_HEADER, DEFAULT_PARK_ESCALATE_MS } from "../extensions/lib/provider-mcp.js";
+import { afterEach, describe, it, mock } from "node:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import {
@@ -1213,31 +1219,27 @@ describe("provider default runner", () => {
   });
 
   it("waits for the directory lock instead of racing another run", async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-provider-lock-"));
-    // Occupy the directory chain with a holder that never finishes.
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
+    await withIsolatedAgentDir(async () => {
+      await withTimingFakeAgy({ onSpawn: () => { assert.fail("lock waiter must never spawn agy"); } }, async () => {
+        const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-provider-lock-"));
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const ready = new Promise<void>((resolve) => { entered = resolve; });
+        const holder = withDirLock(dir, () => { entered(); return gate; });
+        try {
+          await awaitWithWatchdog(ready, "lock holder readiness");
+          await assert.rejects(getProviderRunner(dir).run({
+            fullModel: "gemini-3.8-flash", prompt: "blocked", dir,
+            signal: new AbortController().signal, timeoutMs: 1_500,
+            skipPermissions: false, bridgedTools: [],
+          }), /timed out waiting for a previous run/);
+        } finally {
+          release();
+          await holder;
+        }
+      });
     });
-    const holder = withDirLock(dir, () => gate);
-    try {
-      await assert.rejects(
-        () =>
-          getProviderRunner(dir).run({
-            fullModel: "gemini-3.8-flash",
-            prompt: "blocked",
-            dir,
-            signal: new AbortController().signal,
-            timeoutMs: 1_500,
-            skipPermissions: false,
-        bridgedTools: [],
-          }),
-        /timed out waiting for a previous run/,
-      );
-    } finally {
-      release();
-      await holder;
-    }
   });
 
   it("rejects terminal failures instead of returning empty text", async () => {
@@ -1262,4 +1264,255 @@ describe("provider default runner", () => {
       );
     });
   });
+});
+
+
+describe("provider parked resource reclamation", () => {
+  for (const subsequent of [false, true]) {
+    for (const failure of ["abort", "close", "error", "cancel", "shutdown"]) {
+      it(`reclaims suspension, images and bridge on ${failure} (${subsequent ? "subsequent" : "first"} park)`, { timeout: 7000 }, async () => {
+        await withIsolatedAgentDir(async () => {
+          let configDir = "";
+          let spawned!: () => void;
+          const ready = new Promise<void>((resolve) => { spawned = resolve; });
+          await withTimingFakeAgy({ onSpawn: (args, child) => {
+            Object.assign(child, { stdin: new PassThrough() });
+            for (let i = 0; i < args.length; i++) {
+              if (args[i] === "--add-dir" && args[i + 1].includes("pi-agy-bridge")) configDir = args[i + 1];
+            }
+            spawned();
+          } }, async (children) => {
+            const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-reclaim-"));
+            const factory = createRecordingFactory();
+            const stream = createAgyStreamSimple(factory, {
+              dir, entries: [...FALLBACK_PROVIDER_MODELS],
+              tools: [{ name: "read", description: "Read", parameters: { type: "object" } }],
+            });
+            const old = new AbortController();
+            const current = new AbortController();
+            const messages: ProviderTranscriptMessage[] = [{ role: "user", content: [
+              { type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+            ] }];
+            stream({ id: "gemini-3-8-flash" }, messages, { signal: old.signal });
+            await awaitWithWatchdog(ready, "provider spawn", 3000);
+            const child = [...children][0];
+            const originalDriver = getProviderDriver(dir);
+            const config = JSON.parse(await readFile(path.join(configDir, ".agents", "mcp_config.json"), "utf8"));
+            const server = Object.values(config.mcpServers)[0] as { serverUrl: string; headers: Record<string, string> };
+            const client = new Client({ name: "reclaim-test", version: "1" }, { capabilities: {} });
+            try {
+              await awaitWithWatchdog(client.connect(new StreamableHTTPClientTransport(new URL(server.serverUrl), {
+                requestInit: { headers: { [BRIDGE_TOKEN_HEADER]: server.headers[BRIDGE_TOKEN_HEADER] } },
+              })), "resource probe connect", 2000);
+              const listed = await awaitWithWatchdog(client.listTools(), "resource probe catalog");
+              const tool = listed.tools.find((entry) => entry.name === "read");
+              assert.ok(tool);
+              const calls = [client.callTool({ name: tool.name, arguments: {} })];
+              void calls[0].catch(() => undefined);
+              await waitForStreamEnd(factory, 0);
+              assert.equal(getProviderStatus(dir).suspended.length, 1);
+              assert.equal(getProviderStatus(dir).stagedImages, 1);
+              if (subsequent) {
+                const call = factory.events.find((event) => event.type === "toolcall_end")!.toolCall as { id: string; name: string; arguments: Record<string, unknown> };
+                const start = factory.events.length;
+                stream({ id: "gemini-3-8-flash" }, [...messages,
+                  { role: "assistant", content: [{ type: "toolCall", ...call }] },
+                  { role: "toolResult", toolCallId: call.id, toolName: call.name, content: "first result", isError: false },
+                ], { signal: current.signal });
+                await awaitWithWatchdog(calls[0], "first delivered tool");
+                calls.push(client.callTool({ name: tool.name, arguments: {} }));
+                void calls[1].catch(() => undefined);
+                await waitForStreamEnd(factory, start);
+                old.abort();
+                assert.equal(getProviderStatus(dir).suspended.length, 1);
+              }
+              if (failure === "abort") (subsequent ? current : old).abort();
+              if (failure === "close") child.close(3);
+              if (failure === "error") child.emit("error", new Error("fake process error"));
+              if (failure === "cancel") getProviderRunner(dir).cancel();
+              if (failure === "shutdown") { await closeProviderDrivers(); await client.close(); }
+              const settledCalls = await awaitWithWatchdog(Promise.allSettled(calls), "parked MCP cleanup", 2000);
+              if (failure !== "shutdown") {
+                const last = settledCalls[settledCalls.length - 1];
+                assert.equal(last.status, "fulfilled");
+                if (last.status === "fulfilled") assert.equal(last.value.isError, true);
+              }
+              // The hook removes the status entry synchronously; image removal is asynchronous.
+              assert.equal(getProviderStatus(dir).suspended.length, 0);
+              for (let n = 0; n < 100 && getProviderStatus(dir).stagedImages; n++) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              assert.equal(getProviderStatus(dir).stagedImages, 0);
+              assert.throws(() => originalDriver.continueTurn(), failure === "shutdown" ? /closed/ : /no suspended turn/);
+            } finally {
+              await closeProviderDrivers();
+              await client.close();
+            }
+          });
+        });
+      });
+    }
+  }
+});
+
+
+/** Default runner + real authenticated MCP transport + pid-free driver fake. */
+async function withProviderLifecycleProbe(fn: (probe: {
+  dir: string; child: FakeChild; driver: ReturnType<typeof getProviderDriver>;
+  runner: ProviderTurnRunner; client: Client; factory: ReturnType<typeof createRecordingFactory>;
+  controller: AbortController; parks: Array<{ callId: string; toolName: string }>;
+}) => Promise<void>): Promise<void> {
+  await withIsolatedAgentDir(async () => {
+    let configDir = "";
+    let spawned!: () => void;
+    const ready = new Promise<void>((resolve) => { spawned = resolve; });
+    await withTimingFakeAgy({ onSpawn: (args, child) => {
+      Object.assign(child, { stdin: new PassThrough() });
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--add-dir" && args[i + 1].includes("pi-agy-bridge")) configDir = args[i + 1];
+      }
+      spawned();
+    } }, async (children) => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-integration-"));
+      const driver = getProviderDriver(dir);
+      const runner = getProviderRunner(dir);
+      const parks: Array<{ callId: string; toolName: string }> = [];
+      const notify = driver.notifyPark.bind(driver);
+      const parkStub = mock.method(driver, "notifyPark", (park: Parameters<typeof driver.notifyPark>[0]) => { parks.push(park); return notify(park); });
+      const factory = createRecordingFactory();
+      const controller = new AbortController();
+      const stream = createAgyStreamSimple(factory, { dir, entries: [...FALLBACK_PROVIDER_MODELS],
+        tools: [{ name: "read", description: "Read", parameters: { type: "object" } }],
+      });
+      const client = new Client({ name: "lifecycle-probe", version: "1" }, { capabilities: {} });
+      try {
+        stream({ id: "gemini-3-8-flash" }, [{ role: "user", content: [
+          { type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+        ] }], { signal: controller.signal });
+        await awaitWithWatchdog(ready, "default runner spawn", 3000);
+        const config = JSON.parse(await readFile(path.join(configDir, ".agents", "mcp_config.json"), "utf8"));
+        const server = Object.values(config.mcpServers)[0] as { serverUrl: string; headers: Record<string, string> };
+        await awaitWithWatchdog(client.connect(new StreamableHTTPClientTransport(new URL(server.serverUrl), {
+          requestInit: { headers: { [BRIDGE_TOKEN_HEADER]: server.headers[BRIDGE_TOKEN_HEADER] } },
+        })), "probe MCP connect", 2000);
+        await fn({ dir, driver, runner, client, factory, controller, parks, child: [...children][0] });
+      } finally {
+        controller.abort();
+        await awaitWithWatchdog(closeProviderDrivers(), "probe shutdown", 3000);
+        await client.close();
+        parkStub.mock.restore();
+      }
+    });
+  });
+}
+
+function callProbeTool(client: Client, name = "read") {
+  const result = awaitWithWatchdog(client.callTool({ name, arguments: {} }), "probe MCP tool", 2500);
+  void result.catch(() => undefined);
+  return result;
+}
+
+describe("default runner integration ownership", () => {
+  for (const catalog of ["different-name", "different-mapping"]) {
+    it(`preserves owner catalog and handler on rejected ${catalog} start`, { timeout: 7000 }, async () => {
+      await withProviderLifecycleProbe(async ({ dir, driver, runner, client, factory, parks }) => {
+        const firstCall = callProbeTool(client);
+        await waitForStreamEnd(factory, 0);
+        const resumed = awaitWithWatchdog(runner.resume([{ callId: parks[0].callId, text: "first", isError: false }]), "owner next park", 2000);
+        void resumed.catch(() => undefined);
+        await firstCall;
+        await assert.rejects(runner.run({ dir, fullModel: "other", prompt: "foreign", signal: new AbortController().signal,
+          timeoutMs: 1000, skipPermissions: false, bridgedTools: [{ name: catalog === "different-name" ? "write" : "read",
+            piName: "foreign", description: "foreign", inputSchema: { type: "object" } }],
+        }), /another agy turn/);
+        const tools = await awaitWithWatchdog(client.listTools(), "owner catalog");
+        assert.ok(tools.tools.some((tool) => tool.name === "read"));
+        assert.equal(tools.tools.some((tool) => tool.name === "write"), false);
+        const secondCall = callProbeTool(client);
+        const next = await resumed;
+        assert.equal(next.kind, "parked");
+        if (next.kind === "parked") assert.equal(next.park.toolName, "read");
+        assert.equal(driver.snapshot().stats.spawns, 1);
+        runner.cancel();
+        const failed = await secondCall;
+        assert.equal(failed.isError, true);
+      });
+    });
+  }
+
+  for (const failure of ["abort", "close", "error"]) {
+    it(`refuses suspension publication when ${failure} follows park acceptance before lock release`, { timeout: 7000 }, async () => {
+      await withProviderLifecycleProbe(async ({ dir, driver, child, client, factory, controller }) => {
+        const notify = driver.notifyPark.bind(driver);
+        const stub = mock.method(driver, "notifyPark", (park: Parameters<typeof driver.notifyPark>[0]) => {
+          const accepted = notify(park);
+          assert.equal(accepted, true);
+          // notifyPark resolved the phase, but no promise continuation or lock
+          // release has run: orphan before the stream can publish its record.
+          if (failure === "abort") controller.abort();
+          if (failure === "close") child.close(3);
+          if (failure === "error") child.emit("error", new Error("publication gap"));
+          return accepted;
+        });
+        try {
+          const call = callProbeTool(client);
+          await waitForStreamEnd(factory, 0);
+          assert.equal((await call).isError, true);
+          assert.equal(factory.events.some((event) => event.type === "toolcall_start" || event.type === "toolcall_end"), false);
+          assert.ok(factory.events.some((event) => event.type === "error"));
+          assert.equal(getProviderStatus(dir).suspended.length, 0);
+          await awaitWithWatchdog((async () => {
+            while (getProviderStatus(dir).stagedImages) await new Promise((resolve) => nativeSetTimeout(resolve, 5));
+          })(), "publication image cleanup");
+          assert.equal(getProviderStatus(dir).stagedImages, 0);
+          assert.throws(() => driver.continueTurn(), /no suspended turn/);
+        } finally { stub.mock.restore(); }
+      });
+    });
+  }
+
+  for (const status of ["SUCCESS", "FAILED"]) {
+    it(`discards unpolled escalations when retained ${status} is consumed`, { timeout: 7000 }, async () => {
+      const timerStub = mock.method(globalThis, "setTimeout", ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) =>
+        nativeSetTimeout(callback, ms === DEFAULT_PARK_ESCALATE_MS ? 5 : ms, ...args)) as typeof setTimeout);
+      try {
+        await withProviderLifecycleProbe(async ({ dir, child, runner, client, factory, parks }) => {
+          const ack = callProbeTool(client);
+          await waitForStreamEnd(factory, 0);
+          assert.match(JSON.stringify(await ack), /STILL RUNNING/);
+          assert.equal(getProviderStatus(dir).bridge?.pendingResults, 1);
+          child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "owned final" } }) + "\n");
+          const resumed = runner.resume([{ callId: parks[0].callId, text: "large tool payload".repeat(1000), isError: false }]);
+          if (status === "FAILED") await assert.rejects(awaitWithWatchdog(resumed, "retained failure"), /FAILED/);
+          else assert.equal((await awaitWithWatchdog(resumed, "retained success")).kind, "done");
+          // Inspect without polling: polling itself would consume and hide a leak.
+          const bridge = getProviderStatus(dir).bridge;
+          assert.equal(bridge?.pendingResults, 0);
+        });
+      } finally { timerStub.mock.restore(); }
+    });
+  }
+});
+
+
+it("keeps ordinary escalation polling available until the owning operation ends", { timeout: 7000 }, async () => {
+  const timerStub = mock.method(globalThis, "setTimeout", ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) =>
+    nativeSetTimeout(callback, ms === DEFAULT_PARK_ESCALATE_MS ? 5 : ms, ...args)) as typeof setTimeout);
+  try {
+    await withProviderLifecycleProbe(async ({ dir, child, runner, client, factory, parks }) => {
+      const ack = callProbeTool(client);
+      await waitForStreamEnd(factory, 0);
+      assert.match(JSON.stringify(await ack), /STILL RUNNING/);
+      const resumed = awaitWithWatchdog(runner.resume([{ callId: parks[0].callId, text: "ordinary output", isError: false }]), "ordinary resumed terminal");
+      void resumed.catch(() => undefined);
+      assert.equal(getProviderStatus(dir).bridge?.pendingResults, 1);
+      const poll = await awaitWithWatchdog(client.callTool({ name: "bridge_poll_result", arguments: { callId: parks[0].callId } }), "ordinary live polling");
+      assert.match(JSON.stringify(poll), /ordinary output/);
+      assert.equal(getProviderStatus(dir).bridge?.pendingResults, 0);
+      child.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"after polling"}}\n');
+      const done = await resumed;
+      assert.equal(done.kind, "done");
+      if (done.kind === "done") assert.equal(done.result.text, "after polling");
+    });
+  } finally { timerStub.mock.restore(); }
 });

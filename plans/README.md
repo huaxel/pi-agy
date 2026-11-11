@@ -1,5 +1,20 @@
 # pi-agy improvement plans
 
+## Provider lifecycle fixes — 015
+
+User requested fixes for the state-machine audit at `82af24b`. **DONE —
+implemented, independently approved, integrated; 124/124 focused and 455/455
+full tests, typecheck and packaging passed in the original checkout.**
+[Current acceptance/evidence](evidence/015-provider-state-fixes.md),
+[reviewed patch](patches/015-provider-state-ownership.patch).
+No commit, push or publication of 015. Earlier 012–014 changes were committed
+and pushed in `82af24b` / tag `v0.7.10`; historical checkpoints below retain
+then-current statements. Current HEAD is `82af24b`.
+
+Fixes cover exclusive turn ownership, retained parked terminal delivery,
+repeat-safe orphan cleanup, catalog admission, suspension-publication races and
+owned escalation-payload disposal. One independent review revision was required.
+
 ## Incremental simplification follow-up — 2026-11-11
 
 User selected **simplify both incrementally** at commit `8a5d592`.

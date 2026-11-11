@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { PassThrough } from "node:stream";
+import { AgyProviderDriver } from "../extensions/lib/provider-driver.js";
+import { withTimingFakeAgy, awaitWithWatchdog } from "./timing-helpers.js";
 import { mkdtemp, readFile, stat } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -756,4 +759,65 @@ describe("MCP bridge", () => {
       await assert.rejects(stat(path.join(configDir, ".agents", "mcp_config.json")));
     });
   });
+});
+
+
+describe("bridge and driver terminal ownership", () => {
+  for (const status of ["SUCCESS", "FAILED", "ORPHAN"]) {
+    it(`handles an escalated parked ${status} without losing ownership`, { timeout: 7000 }, async () => {
+      await withIsolatedAgentDir(async () => {
+        await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+          const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-composed-"));
+          const bridge = await startMcpBridge(dir, { escalateAfterMs: 5 });
+          assert.ok(bridge);
+          handles.push(bridge);
+          const driver = new AgyProviderDriver();
+          const client = await connectClient(bridge.url, await readToken(bridge.configDir));
+          let orphaned = 0;
+          driver.onParksOrphaned = (message) => { orphaned++; bridge.failAllParks(message); };
+          bridge.setTools([{ name: "slow", piName: "slow", description: "Slow", inputSchema: { type: "object" } }]);
+          bridge.setParkHandler((park) => driver.notifyPark(park));
+          try {
+            const first = driver.turn({ dir, fullModel: "fake", skipPermissions: false }, {
+              prompt: "test", signal: new AbortController().signal, timeoutMs: 1000,
+            });
+            await Promise.resolve();
+            const child = [...children][0];
+            const call = client.callTool({ name: "slow", arguments: {} });
+            const parked = await awaitWithWatchdog(first, "composed park");
+            assert.equal(parked.kind, "parked");
+            if (parked.kind !== "parked") throw new Error("expected park");
+            const ack = await awaitWithWatchdog(call, "escalated MCP acknowledgement");
+            assert.match(JSON.stringify(ack), /STILL RUNNING/);
+            if (status === "ORPHAN") child.close(3);
+            else child.stdout.write(JSON.stringify({ event: "result", result: { status, response: "canonical answer" } }) + "\n");
+            const delivered = bridge.completePark(parked.park.callId, { text: "Pi tool output", isError: false });
+            if (status === "ORPHAN") {
+              assert.equal(orphaned, 1);
+              assert.equal(delivered, false);
+              assert.throws(() => driver.continueTurn(), /no suspended turn/);
+            } else {
+              assert.equal(delivered, true);
+              assert.equal(orphaned, 0);
+              const resumed = Promise.resolve().then(() => driver.continueTurn());
+              if (status === "FAILED") await assert.rejects(awaitWithWatchdog(resumed, "composed terminal failure"), /FAILED/);
+              else {
+                const done = await awaitWithWatchdog(resumed, "composed terminal success");
+                assert.equal(done.kind, "done");
+                if (done.kind === "done") assert.equal(done.outcome.text, "canonical answer");
+              }
+              assert.throws(() => driver.continueTurn(), /no suspended turn/);
+            }
+            assert.equal(bridge.completePark(parked.park.callId, { text: "duplicate", isError: false }), false);
+            const poll = await awaitWithWatchdog(client.callTool({ name: "bridge_poll_result", arguments: { callId: parked.park.callId } }), "ordinary bridge poll");
+            assert.match(JSON.stringify(poll), status === "ORPHAN" ? /exited mid-turn/ : /Pi tool output/);
+          } finally {
+            await driver.close();
+            await client.close();
+            await bridge.stop();
+          }
+        });
+      });
+    });
+  }
 });

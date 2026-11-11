@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.11
+
+- Preserve exclusive provider-turn ownership across tool suspension, resumption, and terminal delivery; reject competing turns before they alter bridge tools.
+- Retain terminal responses received while awaiting Pi tools for exactly one continuation, with bounded abandonment and safe process reuse.
+- Reclaim orphaned bridge calls, suspended state, staged images, and unpolled escalation results on completion or abandonment, including races before suspension publication.
+- Add lifecycle and real-loopback/fake-process regression coverage; 455 tests, typecheck, and package checks pass.
+
 ## 0.7.10
 
 - Harden process-tree cancellation, provider tool forwarding, bridge reconnection, terminal response handling, and cancelled resumes.

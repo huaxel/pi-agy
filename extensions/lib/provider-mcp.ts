@@ -174,8 +174,10 @@ export interface McpBridgeHandle {
   completePark: (callId: string, result: BridgeToolResult) => boolean;
   /** Fail every parked call (teardown, cancelled turns). */
   failAllParks: (message: string) => void;
+  /** Release call IDs whose owning provider operation can no longer poll them. */
+  discardParks: (callIds: Iterable<string>) => void;
   /** Point-in-time description for status surfaces. */
-  describe: () => { configDir: string; url: string; toolCount: number };
+  describe: () => { configDir: string; url: string; toolCount: number; pendingResults: number };
 }
 
 /** A Pi tool projected for agy: MCP-safe advertised name, real Pi identity. */
@@ -659,6 +661,21 @@ export async function startMcpBridge(
     return true;
   };
 
+  const discardParks = (callIds: Iterable<string>): void => {
+    for (const callId of callIds) {
+      const resolve = parks.get(callId);
+      parks.delete(callId);
+      const owner = parkOwners.get(callId);
+      if (owner) {
+        parkOwners.delete(callId);
+        owner.parks = Math.max(0, owner.parks - 1);
+      }
+      // Settle any outstanding HTTP request, then drop its poll payload too.
+      resolve?.({ text: "Pi provider operation completed.", isError: true });
+      escalations.delete(callId);
+    }
+  };
+
   const stop = async (): Promise<void> => {
     stopping = true;
     failAllParks("Pi tool bridge stopped.");
@@ -710,6 +727,7 @@ export async function startMcpBridge(
         configDir,
         url: `http://127.0.0.1:${port}${BRIDGE_MCP_PATH}`,
         toolCount: bridgedTools.length + BUILTIN_TOOL_COUNT,
+        pendingResults: escalations.size,
       }),
       setTools: (tools: BridgeToolDef[]) => {
         bridgedTools = tools;
@@ -719,6 +737,7 @@ export async function startMcpBridge(
       },
       completePark,
       failAllParks,
+      discardParks,
     };
   } catch {
     try {

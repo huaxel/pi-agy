@@ -126,12 +126,14 @@ interface ActiveTurn {
   activity: string[];
   seenActivity: Set<string>;
   runResult: AgyRunResult;
-  /** Terminally settled (done/error/abort/timeout): the record is over. */
+  /** Process outcome is final; pendingTerminal may still own continuation delivery. */
   settled: boolean;
   /** Suspended mid-turn on a parked bridge call: child alive, timers off. */
   suspended: boolean;
   /** Live waiter for the current phase (turn() or continueTurn()). */
   phase?: TurnPhase;
+  /** Terminal envelope received during a park; owned until consumed or abandoned. */
+  pendingTerminal?: { kind: "done"; end: DriverTurnEnd } | { kind: "error"; error: Error };
   timer?: NodeJS.Timeout;
   suspendedTimer?: NodeJS.Timeout;
   onAbort?: () => void;
@@ -203,13 +205,13 @@ export class AgyProviderDriver {
       clearTimeout(turn.timer);
       turn.timer = undefined;
     }
-    // Abandoned suspensions (Pi session died without shutdown) must not
-    // hold the child forever.
+    // Keep this deadline through terminal-awaiting-consumption too: a lost
+    // Pi continuation must not hold the child, parks, images or driver forever.
     turn.suspendedTimer = setTimeout(() => {
+      if (this.active !== turn || (!turn.pendingTerminal && (turn.settled || !turn.suspended))) return;
       turn.suspendedTimer = undefined;
       this.killChild();
-      this.failParksOrphaned("agy provider turn was abandoned while awaiting Pi tools");
-      this.settleError(turn, new Error("agy provider turn was abandoned while awaiting Pi tools"));
+      this.abandonTurn(turn, new Error("agy provider turn was abandoned while awaiting Pi tools"));
     }, SUSPENDED_TURN_MAX_MS);
     (turn.suspendedTimer as unknown as { unref?: () => void }).unref?.();
     const phase = turn.phase;
@@ -234,6 +236,32 @@ export class AgyProviderDriver {
     }
   }
 
+  /** Abandonment has no future consumer: orphan parks once and release ownership. */
+  private abandonTurn(turn: ActiveTurn, error: Error): void {
+    if (this.active !== turn) return;
+    const parked = turn.suspended || !!turn.pendingTerminal;
+    // Teardown must also release a retained terminal, but must never replace it
+    // with an abort/transport failure during ordinary terminal settlement.
+    turn.pendingTerminal = undefined;
+    turn.suspended = false;
+    if (parked) this.failParksOrphaned(error.message);
+    if (turn.settled) {
+      this.active = undefined;
+      this.clearSuspendedTimer(turn);
+      this.armIdleTimer();
+    } else {
+      this.settleError(turn, error);
+    }
+  }
+
+  private interruptTurn(turn: ActiveTurn, flag: "aborted" | "timedOut", message: string): void {
+    if (turn.settled || this.active !== turn) return;
+    this.killChild();
+    if (turn.suspended) this.abandonTurn(turn, new Error(message));
+    else if (turn.text) this.settleDone(turn, flag === "aborted" ? { aborted: true } : { timedOut: true });
+    else this.settleError(turn, new Error(message));
+  }
+
   /**
    * Resume a suspended turn after its parked calls were completed.
    * Re-arms the full turn timeout (round-trips wait on user approvals) and
@@ -249,6 +277,14 @@ export class AgyProviderDriver {
   }): Promise<DriverTurnEnd> {
     const turn = this.active;
     if (this.closed) throw new Error("agy provider driver was closed");
+    if (turn?.pendingTerminal) {
+      const terminal = turn.pendingTerminal;
+      turn.pendingTerminal = undefined;
+      this.clearSuspendedTimer(turn);
+      this.active = undefined;
+      this.armIdleTimer();
+      return terminal.kind === "done" ? Promise.resolve(terminal.end) : Promise.reject(terminal.error);
+    }
     if (!turn || turn.settled || !turn.suspended) {
       throw new Error("agy provider driver has no suspended turn");
     }
@@ -266,25 +302,20 @@ export class AgyProviderDriver {
         turn.signal.removeEventListener("abort", turn.onAbort);
         turn.onAbort = undefined;
       }
-      if (options?.signal) {
-        turn.signal = options.signal;
+      {
+        if (options?.signal) turn.signal = options.signal;
         const onAbort = (): void => {
-          if (turn.settled) return;
-          this.killChild();
-          if (turn.text) this.settleDone(turn, { aborted: true });
-          else this.settleError(turn, new Error("agy provider turn was cancelled"));
+          this.interruptTurn(turn, "aborted", "agy provider turn was cancelled");
         };
         turn.onAbort = onAbort;
-        options.signal.addEventListener("abort", onAbort, { once: true });
-        if (options.signal.aborted) onAbort();
+        turn.signal.addEventListener("abort", onAbort, { once: true });
+        if (turn.signal.aborted) onAbort();
       }
       if (turn.settled) return;
       turn.timer = setTimeout(() => {
         // A resumed timeout kills the hung child like a fresh one: never
         // leave it running to be reused.
-        this.killChild();
-        if (turn.text) this.settleDone(turn, { timedOut: true });
-        else this.settleError(turn, new Error("agy provider turn timed out"));
+        this.interruptTurn(turn, "timedOut", "agy provider turn timed out");
       }, Math.max(1, Math.min(PROVIDER_TURN_TIMEOUT_MS, turn.timeoutMs)));
       (turn.timer as unknown as { unref?: () => void }).unref?.();
     });
@@ -295,8 +326,7 @@ export class AgyProviderDriver {
     const turn = this.active;
     if (!turn) return;
     this.killChild();
-    this.failParksOrphaned(message);
-    this.settleError(turn, new Error(message));
+    this.abandonTurn(turn, new Error(message));
   }
 
   snapshot(): ProviderDriverSnapshot {
@@ -313,9 +343,9 @@ export class AgyProviderDriver {
   async close(): Promise<void> {
     this.closed = true;
     this.clearIdleTimer();
-    if (this.active && !this.active.settled) {
-      // Never strand a caller: a closed driver fails its turns loudly.
-      this.settleError(this.active, new Error("agy provider driver was closed"));
+    if (this.active) {
+      // Never strand a caller or an outstanding park on shutdown.
+      this.abandonTurn(this.active, new Error("agy provider driver was closed"));
     }
     this.killChild();
   }
@@ -578,15 +608,16 @@ export class AgyProviderDriver {
     overrides?: { text?: string; aborted?: boolean; timedOut?: boolean },
   ): void {
     if (turn.settled) return;
+    const retain = turn.suspended && !turn.phase;
     turn.settled = true;
     turn.suspended = false;
-    this.clearSuspendedTimer(turn);
+    if (!retain) this.clearSuspendedTimer(turn);
     if (turn.timer) {
       clearTimeout(turn.timer);
       turn.timer = undefined;
     }
     if (turn.onAbort) turn.signal.removeEventListener("abort", turn.onAbort);
-    if (this.active === turn) this.active = undefined;
+    if (!retain && this.active === turn) this.active = undefined;
     // Bind the conversation the turn actually produced: the next turn
     // reuses only when it asks for this exact conversation (or a fresh
     // process when none is bound). Unterminated line remnants belong to no
@@ -597,7 +628,7 @@ export class AgyProviderDriver {
     this.lineBuffer = "";
     const phase = turn.phase;
     turn.phase = undefined;
-    phase?.resolve({
+    const end: DriverTurnEnd = {
       kind: "done",
       outcome: {
         text: overrides?.text ?? turn.text,
@@ -608,31 +639,35 @@ export class AgyProviderDriver {
         activity: turn.activity,
         deniedActions: turn.runResult.denied_actions,
       },
-    });
-    this.armIdleTimer();
+    };
+    if (retain) turn.pendingTerminal = { kind: "done", end };
+    else phase?.resolve(end);
+    if (!retain) this.armIdleTimer();
   }
 
   private settleError(turn: ActiveTurn, error: Error): void {
     if (turn.settled) return;
+    const retain = turn.suspended && !turn.phase;
     turn.settled = true;
     turn.suspended = false;
-    this.clearSuspendedTimer(turn);
+    if (!retain) this.clearSuspendedTimer(turn);
     if (turn.timer) {
       clearTimeout(turn.timer);
       turn.timer = undefined;
     }
     if (turn.onAbort) turn.signal.removeEventListener("abort", turn.onAbort);
-    if (this.active === turn) this.active = undefined;
+    if (!retain && this.active === turn) this.active = undefined;
     const phase = turn.phase;
     turn.phase = undefined;
-    phase?.reject(error);
-    this.armIdleTimer();
+    if (retain) turn.pendingTerminal = { kind: "error", error };
+    else phase?.reject(error);
+    if (!retain) this.armIdleTimer();
   }
 
   private failActive(message: string): void {
     const turn = this.active;
     if (!turn || turn.settled) return;
-    this.settleError(turn, new Error(message));
+    this.abandonTurn(turn, new Error(message));
   }
 
   private async runTurn(
@@ -647,12 +682,12 @@ export class AgyProviderDriver {
         return;
       }
       this.clearIdleTimer();
-      // A suspended turn belongs to another Pi turn in flight: concurrent
-      // bridged sessions in one directory are unsupported — fail fast
-      // instead of stealing (or killing) the parked child.
-      if (this.active && this.active.suspended && !this.active.settled) {
+      // A parked turn retains ownership through resumed running and terminal
+      // delivery. The queue covers only its first phase; never steal its child
+      // or its pending terminal result after that phase releases the queue.
+      if (this.active) {
         throw new Error(
-          "another agy turn is suspended awaiting Pi tools in this directory",
+          "another agy turn owns this driver (running or suspended awaiting Pi tools)",
         );
       }
       this.ensureProcess(profile, options.resumeConversationId);
@@ -689,23 +724,7 @@ export class AgyProviderDriver {
       }
 
       const killFor = (flag: "aborted" | "timedOut", message: string): void => {
-        if (turn.settled) return;
-        // A turn cannot be cancelled headless without killing the child; the
-        // next turn respawns lazily. Partial text settles with a flag, never
-        // as a clean result. A stale signal during suspension abandons the
-        // turn: parks are orphaned loudly instead of stranding agy.
-        if (turn.suspended) {
-          this.killChild();
-          this.failParksOrphaned(message);
-          this.settleError(turn, new Error(message));
-          return;
-        }
-        this.killChild();
-        if (turn.text) {
-          this.settleDone(turn, flag === "aborted" ? { aborted: true } : { timedOut: true });
-        } else {
-          this.settleError(turn, new Error(message));
-        }
+        this.interruptTurn(turn, flag, message);
       };
 
       const onAbort = (): void => killFor("aborted", "agy provider turn was cancelled");
