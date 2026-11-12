@@ -6,6 +6,8 @@
  * `cli.ts` re-exports the public surface so existing importers are untouched.
  */
 
+import { validateModelSelector } from "./model-selection.js";
+
 import { getModelCatalog, normalizeAgyAgentName } from "./inspect.js";
 import type { AgyModel, AgyOptions } from "./cli.js";
 
@@ -65,7 +67,8 @@ export function buildAgyArgs(options: AgyOptions): string[] {
     throw new Error("agy cannot use --continue and --conversation together");
   }
 
-  const model = resolveAgyModelId(options.model, options.tier);
+  validateModelSelector(options);
+  const model = options.model_id ?? resolveAgyModelId(options.model, options.tier);
   const agent = normalizeAgyAgentName(options.agent);
   const unbucketedSec = Math.ceil((options.timeout_ms + PRINT_TIMEOUT_BUFFER_MS) / 1000);
   const timeoutSec = Math.ceil(unbucketedSec / PRINT_TIMEOUT_BUCKET_S) * PRINT_TIMEOUT_BUCKET_S;
@@ -86,7 +89,7 @@ export function buildAgyArgs(options: AgyOptions): string[] {
     "--disable-slash-commands",
     ...(mode === "sandbox" ? ["--sandbox"] : ["--mode", mode]),
     ...(writes && skipPermissions ? ["--dangerously-skip-permissions"] : []),
-    ...(options.effort && supportsAgyEffort(options.model, options.tier)
+    ...(options.effort && (options.model_id ? options.model_id.startsWith("gpt-oss-") : supportsAgyEffort(options.model, options.tier))
       ? ["--effort", options.effort]
       : []),
     ...(agent ? ["--agent", agent] : []),

@@ -1,5 +1,18 @@
 # pi-agy improvement plans
 
+## Full /agy command model discovery — 018
+
+**DONE — integrated locally, independently approved; uncommitted/unpublished.**
+User's remaining issue was the separate /agy picker: even successful discovery
+still rendered only fixed alias rows. Full raw roster, exact-ID execution and
+resume now work, with visible failures/last-good fallback and model=<id> syntax.
+Advisor isolated and original gates:106/106 focused,490/490 full,types/45-entrypack.
+[Current diagnosis/acceptance](evidence/018-agy-command-model-discovery.md),
+[independent review](evidence/018-command-models-independent-review.md).
+User subsequently authorized commit/push/publication as v0.7.13 and updating Pi's
+installed extension. The implementation checkpoint above predates that release.
+Baseline89a805a; release and managed-update outcomes are reported separately.
+
 ## Automatic full model catalog refresh — 017
 
 User clarified that the goal includes new Sonnet/Opus generations, not just

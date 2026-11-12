@@ -191,3 +191,34 @@ describe("session store", () => {
 });
 
 
+
+
+it("stores raw CLI metadata without changing native keys or legacy alias records", async () => {
+  const { validateAgyModelId } = await import("../extensions/lib/provider-models.js");
+  const { saveSession, getSession, getHistory } = await import("../extensions/lib/sessions.js");
+  const dir = await mkdtemp(path.join(os.tmpdir(),"agy-raw-session-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    await saveSession("/provider", "native-conv", "gemini-3-8-flash", undefined, "task", "agent", validateAgyModelId("gemini-3.8-flash-medium"));
+    const latest = await getSession("/provider");
+    assert.equal(latest?.last_model,"gemini-3-8-flash");
+    assert.equal(latest?.last_raw_model_id,"gemini-3.8-flash-medium");
+    assert.equal((await getHistory("/provider"))[0].raw_model_id,"gemini-3.8-flash-medium");
+    await saveSession("/provider","legacy-alias-conv","sonnet");
+    assert.equal((await getSession("/provider"))?.last_raw_model_id,undefined);
+    const history = await getHistory("/provider");
+    assert.equal(history[0].model,"sonnet");
+    assert.equal(history[0].raw_model_id,undefined);
+    assert.equal(history[1].raw_model_id,"gemini-3.8-flash-medium");
+  } finally { if(previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; }
+});
+
+it("ignores invalid raw-model history metadata without turning it into an alias", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(),"agy-invalid-raw-session-"));
+  const target = path.join(dir,"agy-sessions.json");
+  await writeFile(target,JSON.stringify({"/p":{history:[{conversation_id:"bad-raw",model:"sonnet",raw_model_id:"--help",updated_at:"now"}]}}));
+  const store = createSessionStore(target);
+  assert.deepEqual(await store.getHistory("/p"),[]);
+  assert.match(await readFile(target,"utf8"),/bad-raw/);
+});

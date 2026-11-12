@@ -1,3 +1,4 @@
+import type { AgyModelSelector } from "./model-selection.js";
 export { detectVerifyCommand, detectVerifyCommandFromPackageJson } from "./verify.js";
 export { parseJsonResponse } from "./parse.js";
 
@@ -22,10 +23,8 @@ export type AgyEffort = "low" | "medium" | "high";
 
 export type { AgyQuotaEntry, AgyUsageSnapshot } from "./usage.js";
 
-export interface AgyOptions {
+export type AgyOptions = AgyModelSelector & {
   prompt: string;
-  model?: AgyModel;
-  tier?: "flash" | "flash-lo" | "pro";
   effort?: AgyEffort;
   /** Optional custom agent name passed to `agy --agent`. */
   agent?: string;

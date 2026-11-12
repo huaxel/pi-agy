@@ -1,0 +1,1057 @@
+diff --git a/extensions/command-run.ts b/extensions/command-run.ts
+index 2fba3d7..af683b7 100644
+--- a/extensions/command-run.ts
++++ b/extensions/command-run.ts
+@@ -1,5 +1,6 @@
++import { storedModelSelection, type AgyModelSelection } from "./lib/model-selection.js";
+ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+-import { isAgyModel, resolveAgyModelId, type AgyModel } from "./lib/cli.js";
++import { resolveAgyModelId } from "./lib/cli.js";
+ import { buildAgyContextFromEntries, effectiveResumeContextMode, type AgyContextMode } from "./lib/context.js";
+ import { describePreRunDirt } from "./lib/postflight.js";
+ import { DEFAULT_TIMEOUT_MS } from "./lib/command-args.js";
+@@ -10,9 +11,8 @@ import { AGY_RUN_ENTRY_TYPE, type AgyRunReceipt } from "./lib/render.js";
+ import { getHistory } from "./lib/sessions.js";
+ import { normalizeConversationSelection, type ConversationSelection } from "./lib/request.js";
+ 
+-export interface InteractiveRun {
++export type InteractiveRun = AgyModelSelection & {
+   mode: "plan" | "accept-edits" | "sandbox";
+-  model: AgyModel;
+   agent?: string;
+   prompt: string;
+   conversation_id?: string;
+@@ -40,7 +40,7 @@ export async function runSessionsPicker(
+ 
+   const options = history.map((entry, index) => {
+     const id = entry.conversation_id.slice(0, 8);
+-    const model = entry.model ?? "unknown model";
++    const model = entry.raw_model_id ?? entry.model ?? "unknown model";
+     const agent = entry.agent ? ` · agent ${entry.agent}` : "";
+     const summary = entry.summary ? `${entry.summary.slice(0, 50)} · ` : "";
+     return `${index + 1}. ${summary}${model}${agent} · ${describeWhen(entry.updated_at)} · ${id}…`;
+@@ -69,9 +69,14 @@ export async function runSessionsPicker(
+     return;
+   }
+ 
++  const modelSelection = storedModelSelection(entry.model, entry.raw_model_id);
++  if (!modelSelection) {
++    ctx.ui.notify("agy: recorded model is missing, invalid, or ambiguous; resume with an explicit model=<id> using /agy continue", "error");
++    return;
++  }
+   await executeConfirmedRun(pi, ctx, {
+     mode,
+-    model: isAgyModel(entry.model) ? entry.model : "flash-medium",
++    ...modelSelection,
+     agent: entry.agent,
+     prompt: text.trim(),
+     conversation_id: entry.conversation_id,
+@@ -110,7 +115,7 @@ export async function executeConfirmedRun(
+   if (run.mode === "accept-edits") {
+     const dirt = await describePreRunDirt(cwd, ctx.signal).catch(() => null);
+     const { title, body } = buildAcceptEditsConfirm({
+-      modelLabel: `${run.model} (${resolveAgyModelId(run.model)})`,
++      modelLabel: run.model_id ?? `${run.model} (${resolveAgyModelId(run.model)})`,
+       agent: run.agent,
+       cwd,
+       prompt: run.prompt,
+@@ -129,11 +134,11 @@ export async function executeConfirmedRun(
+   // a second LLM turn and the command works even when tools are limited.
+   const status = createStatusThrottler(ctx);
+   try {
+-    status(`starting (${run.model} · ${run.mode}${run.agent ? ` · agent ${run.agent}` : ""})`);
++    status(`starting (${run.model_id ?? run.model} · ${run.mode}${run.agent ? ` · agent ${run.agent}` : ""})`);
+     const result = await executeAgyTask(
+       {
+         prompt: run.prompt,
+-        model: run.model,
++        ...(run.model_id ? { model_id: run.model_id } : { model: run.model, tier: run.tier }),
+         agent: run.agent,
+         mode: run.mode,
+         dir: cwd,
+diff --git a/extensions/commands.ts b/extensions/commands.ts
+index e6f61cc..3a05711 100644
+--- a/extensions/commands.ts
++++ b/extensions/commands.ts
+@@ -1,25 +1,21 @@
+-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
++import path from "node:path";
++import { inspectAgyModelIds } from "./lib/inspect.js";
++import { storedModelSelection, type AgyModelSelection } from "./lib/model-selection.js";
++import type { AgyModelId } from "./lib/provider-models.js";
++import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+ 
+ import {
+-  inspectAgyModels,
+-  isAgyModel,
++  parseModelCatalog,
++  updateModelCatalog,
+   normalizeAgyAgentName,
+   resolveAgyModelId,
+ } from "./lib/cli.js";
+-import { truncate } from "./lib/output.js";
+ import { AGY_RUN_ENTRY_TYPE, renderAgyRunReceipt } from "./lib/render.js";
+ import { getSession } from "./lib/sessions.js";
+ 
+ import { MODEL_ALIASES, MODEL_KEYS, MODE_KEYS, parseAgyCommandArgs } from "./lib/command-args.js";
+ import { executeConfirmedRun, MODE_OPTIONS, optionKey, runSessionsPicker, type InteractiveRun } from "./command-run.js";
+ import { showAgents, showBridge, showDoctor, showUsage } from "./command-info.js";
+-import { buildAcceptEditsConfirm } from "./lib/confirm.js";
+-
+-function modelOptions(): string[] {
+-  return Object.keys(MODEL_ALIASES).map((alias) =>
+-    `${alias} — ${resolveAgyModelId(MODEL_ALIASES[alias])}`,
+-  );
+-}
+ 
+ export { parseAgyCommandArgs, type AgyCommandArgs } from "./lib/command-args.js";
+ 
+@@ -29,14 +25,25 @@ export { parseAgyCommandArgs, type AgyCommandArgs } from "./lib/command-args.js"
+  * confirmed parameters stay authoritative with no second LLM turn.
+  */
+ export function registerAgyCommand(pi: ExtensionAPI): void {
++  const rosters = new Map<string, { ids?: AgyModelId[]; request: number }>();
++  let completionCwd: string | undefined;
+   pi.registerEntryRenderer?.(AGY_RUN_ENTRY_TYPE, (entry, options, theme) =>
+     renderAgyRunReceipt(entry.data, options, theme),
+   );
+ 
+   pi.registerCommand("agy", {
+     description:
+-      "Run agy directly: /agy [mode] [model] [agent=name] [continue] [context=summary|recent] [timeout=10m] <prompt>; use /agy agents to list custom agents.",
++      "Run agy directly: /agy [mode] [model|model=id] [agent=name] [continue] [context=summary|recent] [timeout=10m] <prompt>; use /agy agents to list custom agents.",
+     getArgumentCompletions: (prefix: string) => {
++      const exactPrefix = /(?:^|\s)model=(\S*)$/.exec(prefix);
++      if (exactPrefix) {
++        // Pi replaces the whole argument prefix with item.value, not just
++        // the current token. Preserve every preceding option and separator.
++        const beforeId = prefix.slice(0, prefix.length - exactPrefix[1].length);
++        return (rosters.get(completionCwd ?? "")?.ids ?? [])
++          .filter(id => id.startsWith(exactPrefix[1]))
++          .map(id => ({ value: `${beforeId}${id}`, label: `${id} (last successful discovery)` }));
++      }
+       const tokens = prefix.trim().split(/\s+/).filter(Boolean);
+       const p = prefix.toLowerCase();
+ 
+@@ -51,6 +58,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
+           ...(tokens[0] === "usage" || tokens[0] === "quota"
+             ? []
+             : [
++                { value: "model=", label: "model=" },
+                 { value: "agent=", label: "agent=" },
+                 { value: "continue", label: "continue" },
+                 { value: "timeout=10m", label: "timeout=10m" },
+@@ -82,6 +90,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
+           "context=summary",
+           "context=recent",
+           "timeout=10m",
++          "model=",
+         ].filter((k) => k.startsWith(p));
+         return [
+           ...modes.map((m) => ({ value: m, label: m })),
+@@ -92,6 +101,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
+       return null;
+     },
+     handler: async (args, ctx) => {
++      completionCwd = path.resolve(ctx.cwd);
+       if (ctx.mode !== "tui") {
+         ctx.ui.notify("/agy requires interactive (TUI) mode", "error");
+         return;
+@@ -152,33 +162,56 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
+         mode = optionKey(pick) as InteractiveRun["mode"];
+       }
+ 
+-      let model = parsed.model;
++      let modelSelection: AgyModelSelection | undefined = parsed.model_id
++        ? { model_id: parsed.model_id }
++        : parsed.model ? { model: parsed.model } : undefined;
+       let agent = parsed.agent;
+-      if (parsed.continue && (!model || !agent)) {
++      if (parsed.continue && (!modelSelection || !agent)) {
+         const prior = await getSession(ctx.cwd);
+-        if (!model && prior?.last_model && isAgyModel(prior.last_model)) model = prior.last_model;
++        if (!modelSelection) modelSelection = storedModelSelection(prior?.last_model, prior?.last_raw_model_id);
+         if (!agent && prior?.last_agent) {
+-          try {
+-            agent = normalizeAgyAgentName(prior.last_agent);
+-          } catch {
++          try { agent = normalizeAgyAgentName(prior.last_agent); } catch {
+             // Ignore malformed legacy session metadata.
+           }
+         }
+       }
+-      if (!model) {
+-        // Refresh once when opening the picker so labels show the concrete IDs
+-        // exposed by this account, while retaining the stable alias interface.
++      if (!modelSelection) {
++        const key = path.resolve(ctx.cwd);
++        let state = rosters.get(key);
++        if (!state) {
++          state = { request: 0 };
++          rosters.set(key, state);
++        }
++        const request = ++state.request;
++        let live = false;
+         try {
+-          await inspectAgyModels(ctx.cwd, ctx.signal);
+-        } catch {
+-          // Keep the picker usable with the built-in fallback aliases.
++          const ids = await inspectAgyModelIds(ctx.cwd, ctx.signal);
++          if (ctx.signal?.aborted || state.request !== request) return;
++          updateModelCatalog(parseModelCatalog(ids.join("\n")));
++          state.ids = ids;
++          live = true;
++        } catch (error) {
++          if (ctx.signal?.aborted || state.request !== request) return;
++          const message = error instanceof Error ? error.message : String(error);
++          ctx.ui.notify(`agy model discovery failed: ${message}. ${state.ids ? "Using last successful roster; availability is unverified." : "Using built-in alias fallback; availability is unverified."}`, "warning");
+         }
+-        const pick = await ctx.ui.select("agy model", modelOptions());
+-        if (!pick) {
++        const choices: Array<{ label: string; selection: AgyModelSelection }> = [
++          ...(state.ids ?? []).map(id => ({ label: id, selection: { model_id: id } })),
++          ...Object.entries(MODEL_ALIASES).map(([alias, model]) => ({
++            label: `${alias} — alias shortcut (${resolveAgyModelId(model)}; availability unverified)`,
++            selection: { model },
++          })),
++        ];
++        const title = live ? "agy model (discovered IDs; alias shortcuts below)"
++          : state.ids ? "agy model (last successful roster; availability unverified)"
++          : "agy model (built-in alias fallback; availability unverified)";
++        const pick = await ctx.ui.select(title, choices.map(choice => choice.label));
++        if (ctx.signal?.aborted || state.request !== request) return;
++        modelSelection = choices.find(choice => choice.label === pick)?.selection;
++        if (!modelSelection) {
+           ctx.ui.notify("agy: cancelled", "info");
+           return;
+         }
+-        model = MODEL_ALIASES[optionKey(pick)] ?? "flash-medium";
+       }
+ 
+       let prompt = parsed.prompt;
+@@ -193,7 +226,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
+ 
+       await executeConfirmedRun(pi, ctx, {
+         mode,
+-        model,
++        ...modelSelection,
+         agent,
+         prompt,
+         continue: parsed.continue,
+diff --git a/extensions/lib/args.ts b/extensions/lib/args.ts
+index ad40b16..16a5e19 100644
+--- a/extensions/lib/args.ts
++++ b/extensions/lib/args.ts
+@@ -6,6 +6,8 @@
+  * `cli.ts` re-exports the public surface so existing importers are untouched.
+  */
+ 
++import { validateModelSelector } from "./model-selection.js";
++
+ import { getModelCatalog, normalizeAgyAgentName } from "./inspect.js";
+ import type { AgyModel, AgyOptions } from "./cli.js";
+ 
+@@ -65,7 +67,8 @@ export function buildAgyArgs(options: AgyOptions): string[] {
+     throw new Error("agy cannot use --continue and --conversation together");
+   }
+ 
+-  const model = resolveAgyModelId(options.model, options.tier);
++  validateModelSelector(options);
++  const model = options.model_id ?? resolveAgyModelId(options.model, options.tier);
+   const agent = normalizeAgyAgentName(options.agent);
+   const unbucketedSec = Math.ceil((options.timeout_ms + PRINT_TIMEOUT_BUFFER_MS) / 1000);
+   const timeoutSec = Math.ceil(unbucketedSec / PRINT_TIMEOUT_BUCKET_S) * PRINT_TIMEOUT_BUCKET_S;
+@@ -86,7 +89,7 @@ export function buildAgyArgs(options: AgyOptions): string[] {
+     "--disable-slash-commands",
+     ...(mode === "sandbox" ? ["--sandbox"] : ["--mode", mode]),
+     ...(writes && skipPermissions ? ["--dangerously-skip-permissions"] : []),
+-    ...(options.effort && supportsAgyEffort(options.model, options.tier)
++    ...(options.effort && (options.model_id ? options.model_id.startsWith("gpt-oss-") : supportsAgyEffort(options.model, options.tier))
+       ? ["--effort", options.effort]
+       : []),
+     ...(agent ? ["--agent", agent] : []),
+diff --git a/extensions/lib/cli.ts b/extensions/lib/cli.ts
+index a77f790..78a38d7 100644
+--- a/extensions/lib/cli.ts
++++ b/extensions/lib/cli.ts
+@@ -1,3 +1,4 @@
++import type { AgyModelSelector } from "./model-selection.js";
+ export { detectVerifyCommand, detectVerifyCommandFromPackageJson } from "./verify.js";
+ export { parseJsonResponse } from "./parse.js";
+ 
+@@ -22,10 +23,8 @@ export type AgyEffort = "low" | "medium" | "high";
+ 
+ export type { AgyQuotaEntry, AgyUsageSnapshot } from "./usage.js";
+ 
+-export interface AgyOptions {
++export type AgyOptions = AgyModelSelector & {
+   prompt: string;
+-  model?: AgyModel;
+-  tier?: "flash" | "flash-lo" | "pro";
+   effort?: AgyEffort;
+   /** Optional custom agent name passed to `agy --agent`. */
+   agent?: string;
+diff --git a/extensions/lib/command-args.ts b/extensions/lib/command-args.ts
+index 826df19..3c1ad87 100644
+--- a/extensions/lib/command-args.ts
++++ b/extensions/lib/command-args.ts
+@@ -6,6 +6,8 @@
+  * parser for its existing test importers.
+  */
+ 
++import { validateAgyModelId, type AgyModelId } from "./provider-models.js";
++
+ import { normalizeAgyAgentName, type AgyModel } from "./cli.js";
+ import type { AgyContextMode } from "./context.js";
+ 
+@@ -32,6 +34,7 @@ export const MAX_TIMEOUT_MS = 600_000;
+ export interface AgyCommandArgs {
+   mode?: "plan" | "accept-edits" | "sandbox";
+   model?: AgyModel;
++  model_id?: AgyModelId;
+   agent?: string;
+   prompt?: string;
+   continue?: boolean;
+@@ -56,8 +59,16 @@ export function parseAgyCommandArgs(args: string): AgyCommandArgs {
+     const timeout = parseTimeoutToken(token.value);
+     if (MODE_KEYS.includes(value as (typeof MODE_KEYS)[number])) {
+       parsed.mode = value as AgyCommandArgs["mode"];
+-    } else if (MODEL_ALIASES[value]) {
++    } else if (Object.hasOwn(MODEL_ALIASES, value)) {
++      if (parsed.model_id !== undefined) parsed.error = "model and model= cannot be combined";
+       parsed.model = MODEL_ALIASES[value];
++    } else if (value.startsWith("model=")) {
++      try {
++        if (parsed.model !== undefined || parsed.model_id !== undefined) throw new Error("model= cannot be combined with another model selector");
++        parsed.model_id = validateAgyModelId(token.value.slice("model=".length));
++      } catch (error) {
++        parsed.error = error instanceof Error ? error.message : String(error);
++      }
+     } else if (value === "continue") {
+       parsed.continue = true;
+     } else if (value.startsWith("agent=")) {
+diff --git a/extensions/lib/execute.ts b/extensions/lib/execute.ts
+index 42c9e77..c03eb44 100644
+--- a/extensions/lib/execute.ts
++++ b/extensions/lib/execute.ts
+@@ -1,3 +1,5 @@
++import { validateModelSelector, type AgyModelSelector } from "./model-selection.js";
++import type { AgyModelId } from "./provider-models.js";
+ import { stat } from "node:fs/promises";
+ 
+ import {
+@@ -39,10 +41,8 @@ import { normalizeConversationSelection } from "./request.js";
+ 
+ export type AgyMode = "plan" | "accept-edits" | "sandbox";
+ 
+-export interface AgyExecutionOptions {
++export type AgyExecutionOptions = AgyModelSelector & {
+   prompt: string;
+-  model?: AgyModel;
+-  tier?: "flash" | "flash-lo" | "pro";
+   effort?: AgyEffort;
+   agent?: string;
+   mode: AgyMode;
+@@ -60,7 +60,7 @@ export interface AgyExecutionOptions {
+ 
+ export interface AgyExecutionDetails {
+   mode: AgyMode;
+-  model: AgyModel | "flash-medium";
++  model: AgyModel | AgyModelId;
+   dir: string;
+   conversation_id?: string;
+   verify_cmd: string | null;
+@@ -104,17 +104,17 @@ export async function executeAgyTask(
+     () => budgetController.abort(),
+     Math.max(options.timeout_ms, 0),
+   );
+-  let effectiveModel: AgyModel | "flash-medium" = "flash-medium";
++  let effectiveModel: AgyModel | AgyModelId = "flash-medium";
+ 
+   try {
+     const config = await loadAgyConfig(undefined, abortSignal);
+     // Explicit model → legacy tier → configured default → flash-medium.
+     const selectedModel = resolveAgyModelAlias(options.model, options.tier);
+-    const resolvedModel = selectedModel ?? (await resolveDefaultModel(config, abortSignal));
++    const resolvedModel = selectedModel ?? (options.model_id ? undefined : await resolveDefaultModel(config, abortSignal));
+     let model: AgyModel = resolvedModel ?? "flash-medium";
+-    effectiveModel = model;
++    effectiveModel = options.model_id ?? model;
+     const autoModelSelection =
+-      !selectedModel && !config.defaultModel && !config.defaultModelCommand;
++      !options.model_id && !selectedModel && !config.defaultModel && !config.defaultModelCommand;
+     const skipPermissions = config.skipPermissions !== false;
+ 
+     return await withDirLock(
+@@ -177,7 +177,7 @@ export async function executeAgyTask(
+         const run = await runWithTransientRetry(async (trackProgress) => {
+           const remainingMs = remainingBudget(startedAt, options.timeout_ms);
+           quota = await runPreflight(options.dir, abortSignal, remainingMs);
+-          const selectedModelId = resolveAgyModelId(model, options.tier);
++          const selectedModelId = options.model_id ?? resolveAgyModelId(model, options.tier);
+           const selectedQuotas = findAgyQuotaEntries(quota, selectedModelId);
+           quotaStatus = quota
+             ? selectedQuotas.length === 0
+@@ -223,7 +223,7 @@ export async function executeAgyTask(
+           return spawnAgyStream(
+             {
+               prompt: finalPrompt,
+-              model,
++              ...(options.model_id ? { model_id: options.model_id } : { model }),
+               effort: options.effort,
+               agent,
+               mode: options.mode,
+@@ -250,6 +250,7 @@ export async function executeAgyTask(
+               AbortSignal.timeout(10_000),
+               conversationSummary(options.prompt),
+               agent,
++              options.model_id,
+             );
+           } catch (error) {
+             const reason = error instanceof Error ? error.message : String(error);
+@@ -264,7 +265,7 @@ export async function executeAgyTask(
+         const subagentSummary = formatAgySubagentObservations(run.subagents);
+         if (subagentSummary) text = `${text}\n\n## ${subagentSummary}`;
+         const quotaSummary = quota?.models.length
+-          ? formatAgyUsage(quota, resolveAgyModelId(model, options.tier))
++          ? formatAgyUsage(quota, options.model_id ?? resolveAgyModelId(model, options.tier))
+           : undefined;
+         if (quotaSummary) text = `${text}\n\n## agy quota snapshot\n${quotaSummary}`;
+         let changedFiles: string[] | undefined;
+@@ -331,6 +332,7 @@ export async function executeAgyTask(
+           AbortSignal.timeout(10_000),
+           conversationSummary(options.prompt),
+           agent,
++          options.model_id,
+         );
+         conversationPersisted = true;
+       } catch {
+@@ -353,6 +355,7 @@ export async function executeAgyTask(
+ 
+ export function validateAgyExecutionOptions(options: AgyExecutionOptions): void {
+   if (!options.prompt?.trim()) throw new Error("agy prompt must not be empty");
++  validateModelSelector(options);
+   normalizeAgyAgentName(options.agent);
+   if (!Number.isFinite(options.timeout_ms) || options.timeout_ms <= 0) {
+     throw new Error("agy timeout_ms must be a positive finite number");
+diff --git a/extensions/lib/inspect.ts b/extensions/lib/inspect.ts
+index 276280c..5458a6d 100644
+--- a/extensions/lib/inspect.ts
++++ b/extensions/lib/inspect.ts
+@@ -5,6 +5,8 @@
+  * so existing importers are untouched.
+  */
+ 
++import { parseAgyModelIds, type AgyModelId } from "./provider-models.js";
++
+ import { compareModelIds } from "./model-sort.js";
+ import { runPreflightCommand } from "./spawn.js";
+ import { parseAgyUsage, usageError, type AgyUsageSnapshot } from "./usage.js";
+@@ -113,6 +115,18 @@ export async function inspectAgyModels(
+   return catalog;
+ }
+ 
++/** Raw delegation roster; successful empty/malformed output is not availability. */
++export async function inspectAgyModelIds(
++  cwd: string, signal?: AbortSignal, timeoutMs?: number,
++): Promise<AgyModelId[]> {
++  const output = await runPreflightCommand(
++    ["models"], cwd, signal, "agy model discovery", true, timeoutMs,
++  );
++  const ids = parseAgyModelIds(output);
++  if (!ids.length) throw new Error("agy models returned no valid model IDs");
++  return ids;
++}
++
+ export async function checkAgyConnectivity(
+   cwd: string,
+   signal?: AbortSignal,
+diff --git a/extensions/lib/provider-models.ts b/extensions/lib/provider-models.ts
+index f736ff8..83eb8ce 100644
+--- a/extensions/lib/provider-models.ts
++++ b/extensions/lib/provider-models.ts
+@@ -49,6 +49,28 @@ const MODEL_LINE_RE = /^[A-Za-z0-9][A-Za-z0-9._]*-[A-Za-z0-9._-]*$/;
+ const NONHYPHEN_MODEL_ID_RE = /^[a-z0-9](?:[a-z0-9._]*[a-z0-9_])?$/;
+ const NON_MODEL_TOKEN_RE = /^(?:id|model|models|name|label|status|available|fetching|loading|error|warning|info|auth|authentication|unauthorized|forbidden|login|success)$/;
+ 
++/** Exact CLI IDs, validated with the same token rules used by native discovery. */
++declare const agyModelId: unique symbol;
++export type AgyModelId = string & { readonly [agyModelId]: true };
++
++export function isAgyModelId(value: unknown): value is AgyModelId {
++  return typeof value === "string" && !/[\s\x00-\x1f\x7f-\x9f]/.test(value) && (
++    MODEL_LINE_RE.test(value) ||
++    (NONHYPHEN_MODEL_ID_RE.test(value) && !NON_MODEL_TOKEN_RE.test(value))
++  );
++}
++
++export function validateAgyModelId(value: unknown): AgyModelId {
++  if (!isAgyModelId(value)) throw new Error("agy model ID must be a nonempty CLI ID without whitespace or leading flags");
++  return value;
++}
++
++/** Preserve full first-column IDs and tiers; never slugify or group delegation IDs. */
++export function parseAgyModelIds(raw: string): AgyModelId[] {
++  const ids = raw.split("\n").map(line => line.trim().split(/\s+/)[0]);
++  return [...new Set(ids.filter(isAgyModelId))];
++}
++
+ /**
+  * Families verified to accept base-slug + `--effort`. Only these collapse to
+  * a base entry with a thinking toggle; every other family keeps agy's exact
+@@ -146,12 +168,7 @@ export function thinkingMapForEfforts(
+  */
+ export function parseProviderCatalog(raw: string): AgyProviderModelEntry[] {
+   const groups = new Map<string, { lines: string[]; tiers: Set<AgyProviderEffort> }>();
+-  for (const line of raw.split("\n")) {
+-    const slug = line.trim().split(/\s+/)[0] ?? "";
+-    if (
+-      !MODEL_LINE_RE.test(slug) &&
+-      (!NONHYPHEN_MODEL_ID_RE.test(slug) || NON_MODEL_TOKEN_RE.test(slug))
+-    ) continue;
++  for (const slug of parseAgyModelIds(raw)) {
+     const match = TIER_RE.exec(slug);
+     const base = match ? match[1] : slug;
+     const tier = match ? (match[2] as AgyProviderEffort) : null;
+diff --git a/extensions/lib/provider.ts b/extensions/lib/provider.ts
+index 99a747a..b1eb0fc 100644
+--- a/extensions/lib/provider.ts
++++ b/extensions/lib/provider.ts
+@@ -51,6 +51,8 @@ import { getSession, saveSession } from "./sessions.js";
+ import { AgyProviderDriver, PROVIDER_TURN_TIMEOUT_MS } from "./provider-driver.js";
+ import {
+   toProviderEffort,
++  validateAgyModelId,
++  type AgyModelId,
+   type AgyProviderEffort,
+   type AgyProviderModelEntry,
+   type AgyThinkingLevel,
+@@ -521,6 +523,8 @@ function hasUserMessageAfterToolCall(messages: ProviderTranscriptMessage[], tool
+ }
+ 
+ interface SuspendedTurn {
++  /** Original executed selector, retained across reasoning/catalog changes and re-parks. */
++  rawModelId: AgyModelId;
+   runner: ProviderTurnRunner;
+   ownership?: ProviderTurnOwnership;
+   toolCallId: string;
+@@ -679,7 +683,9 @@ export function createAgyStreamSimple(
+         const prior = suspendedByDir.get(skey);
+         const bodies = prior ? collectParkedDeliveries(messages, prior.toolCallId) : [];
+         let end: ProviderRunEnd;
++        let executedRawModelId: AgyModelId;
+         if (prior && bodies.length > 0) {
++          executedRawModelId = prior.rawModelId;
+           prior.ownership?.assertValid();
+           suspendedByDir.delete(skey);
+           // Images riding on the delivered tool results are staged too:
+@@ -751,6 +757,11 @@ export function createAgyStreamSimple(
+           const staged = await stageImages(collectImageBlocks(messages));
+           pendingImageCleanups.push(staged.cleanup);
+           const prompt = renderProviderPrompt(messages, systemPrompt || undefined, staged.paths);
++          // Capture before execution: later invocations can resolve a different
++          // profile while this child remains parked on its original target.
++          executedRawModelId = validateAgyModelId(
++            turnModel.effort ? `${turnModel.full}-${turnModel.effort}` : turnModel.full,
++          );
+           end = await runner.run({
+             fullModel: turnModel.full,
+             effort: turnModel.effort,
+@@ -788,6 +799,7 @@ export function createAgyStreamSimple(
+           end.ownership?.assertValid();
+           suspendedByDir.set(skey, {
+             runner, ownership: end.ownership, toolCallId, park: end.park,
++            rawModelId: executedRawModelId,
+             modelId: model.id, imageCleanups: pendingImageCleanups,
+           });
+           output.content.push(toolCall);
+@@ -837,7 +849,10 @@ export function createAgyStreamSimple(
+             // Preserve a delegation-recorded agent: provider turns must not
+             // wipe the agent that /agy continue would otherwise restore.
+             const prior = await getSession(dir).catch(() => undefined);
+-            await saveSession(dir, result.conversationId, model.id, undefined, summary, prior?.last_agent);
++            // Native resume still keys on model.id. Delegation needs the exact
++            // CLI ID, including the concrete Gemini tier represented by the
++            // catalog's base + effort pair (never the normalized Pi ID).
++            await saveSession(dir, result.conversationId, model.id, undefined, summary, prior?.last_agent, executedRawModelId);
+           } catch {
+             // Recording failures must never fail a completed turn.
+           }
+diff --git a/extensions/lib/sessions.ts b/extensions/lib/sessions.ts
+index 63bbee7..4f09056 100644
+--- a/extensions/lib/sessions.ts
++++ b/extensions/lib/sessions.ts
+@@ -1,3 +1,4 @@
++import { isAgyModelId, validateAgyModelId, type AgyModelId } from "./provider-models.js";
+ import {
+   chmod,
+   mkdir,
+@@ -16,6 +17,8 @@ import { randomUUID } from "node:crypto";
+ export interface AgyConversationEntry {
+   conversation_id: string;
+   model?: string;
++  /** Exact delegation CLI ID; model remains the alias or native provider resume key. */
++  raw_model_id?: AgyModelId;
+   agent?: string;
+   updated_at: string;
+   /** Short task excerpt so humans and agents can tell conversations apart. */
+@@ -25,6 +28,7 @@ export interface AgyConversationEntry {
+ export interface AgySessionRecord {
+   last_conversation_id?: string;
+   last_model?: string;
++  last_raw_model_id?: AgyModelId;
+   last_agent?: string;
+   updated_at?: string;
+   /** Recent conversations for the directory, most recent first. */
+@@ -72,6 +76,7 @@ export interface AgySessionStore {
+     signal?: AbortSignal,
+     summary?: string,
+     agent?: string,
++    rawModelId?: AgyModelId,
+   ): Promise<void>;
+ }
+ 
+@@ -155,7 +160,8 @@ export function createSessionStore(
+             (entry) =>
+               entry &&
+               typeof entry.conversation_id === "string" &&
+-              typeof entry.updated_at === "string",
++              typeof entry.updated_at === "string" &&
++                (entry.raw_model_id === undefined || isAgyModelId(entry.raw_model_id)),
+           )
+           .map((entry) => {
+             const normalized: AgyConversationEntry = {
+@@ -163,6 +169,7 @@ export function createSessionStore(
+               updated_at: entry.updated_at,
+             };
+             if (typeof entry.model === "string") normalized.model = entry.model;
++            if (entry.raw_model_id !== undefined) normalized.raw_model_id = entry.raw_model_id;
+             if (typeof entry.agent === "string") {
+               const agent = entry.agent.trim();
+               if (agent && agent.length <= 128 && !/[\x00-\x1f\x7f]/.test(agent)) {
+@@ -255,7 +262,9 @@ export function createSessionStore(
+     signal?: AbortSignal,
+     summary?: string,
+     agent?: string,
++    rawModelId?: AgyModelId,
+   ): Promise<void> {
++    if (rawModelId !== undefined) validateAgyModelId(rawModelId);
+     const operation = waitForMutation(signal).then(() =>
+       withStoreLock(async () => {
+         const store = await loadStore(signal);
+@@ -265,10 +274,11 @@ export function createSessionStore(
+         store[key] = {
+           last_conversation_id: conversationId,
+           last_model: model,
++          ...(rawModelId ? { last_raw_model_id: rawModelId } : {}),
+           last_agent: agent,
+           updated_at: updatedAt,
+           history: [
+-            { conversation_id: conversationId, model, agent, updated_at: updatedAt, summary },
++            { conversation_id: conversationId, model, ...(rawModelId ? { raw_model_id: rawModelId } : {}), agent, updated_at: updatedAt, summary },
+             ...(Array.isArray(record.history) ? record.history : []).filter(
+               (entry) =>
+                 entry &&
+@@ -307,6 +317,7 @@ export function saveSession(
+   signal?: AbortSignal,
+   summary?: string,
+   agent?: string,
++  rawModelId?: AgyModelId,
+ ): Promise<void> {
+-  return defaultStore.saveSession(dir, conversationId, model, signal, summary, agent);
++  return defaultStore.saveSession(dir, conversationId, model, signal, summary, agent, rawModelId);
+ }
+diff --git a/tests/sessions.test.ts b/tests/sessions.test.ts
+index 05b08b9..c0341c7 100644
+--- a/tests/sessions.test.ts
++++ b/tests/sessions.test.ts
+@@ -191,3 +191,34 @@ describe("session store", () => {
+ });
+ 
+ 
++
++
++it("stores raw CLI metadata without changing native keys or legacy alias records", async () => {
++  const { validateAgyModelId } = await import("../extensions/lib/provider-models.js");
++  const { saveSession, getSession, getHistory } = await import("../extensions/lib/sessions.js");
++  const dir = await mkdtemp(path.join(os.tmpdir(),"agy-raw-session-"));
++  const previous = process.env.PI_CODING_AGENT_DIR;
++  process.env.PI_CODING_AGENT_DIR = dir;
++  try {
++    await saveSession("/provider", "native-conv", "gemini-3-8-flash", undefined, "task", "agent", validateAgyModelId("gemini-3.8-flash-medium"));
++    const latest = await getSession("/provider");
++    assert.equal(latest?.last_model,"gemini-3-8-flash");
++    assert.equal(latest?.last_raw_model_id,"gemini-3.8-flash-medium");
++    assert.equal((await getHistory("/provider"))[0].raw_model_id,"gemini-3.8-flash-medium");
++    await saveSession("/provider","legacy-alias-conv","sonnet");
++    assert.equal((await getSession("/provider"))?.last_raw_model_id,undefined);
++    const history = await getHistory("/provider");
++    assert.equal(history[0].model,"sonnet");
++    assert.equal(history[0].raw_model_id,undefined);
++    assert.equal(history[1].raw_model_id,"gemini-3.8-flash-medium");
++  } finally { if(previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; }
++});
++
++it("ignores invalid raw-model history metadata without turning it into an alias", async () => {
++  const dir = await mkdtemp(path.join(os.tmpdir(),"agy-invalid-raw-session-"));
++  const target = path.join(dir,"agy-sessions.json");
++  await writeFile(target,JSON.stringify({"/p":{history:[{conversation_id:"bad-raw",model:"sonnet",raw_model_id:"--help",updated_at:"now"}]}}));
++  const store = createSessionStore(target);
++  assert.deepEqual(await store.getHistory("/p"),[]);
++  assert.match(await readFile(target,"utf8"),/bad-raw/);
++});
+diff --git a/extensions/lib/model-selection.ts b/extensions/lib/model-selection.ts
+new file mode 100644
+index 0000000..cedff2a
+--- /dev/null
++++ b/extensions/lib/model-selection.ts
+@@ -0,0 +1,31 @@
++import { isAgyModel, type AgyModel } from "./cli.js";
++import { validateAgyModelId, type AgyModelId } from "./provider-models.js";
++
++/** Keep closed aliases exhaustive; concrete IDs are a separate, exclusive selector. */
++export type AgyModelSelector =
++  | { model?: AgyModel; tier?: "flash" | "flash-lo" | "pro"; model_id?: never }
++  | { model_id: AgyModelId; model?: never; tier?: never };
++
++/** Interactive runs always have an explicit selection; executor callers may use defaults. */
++export type AgyModelSelection = AgyModelSelector & ({ model: AgyModel } | { model_id: AgyModelId });
++
++export function validateModelSelector(selection: AgyModelSelector): void {
++  if (selection.model_id !== undefined) {
++    validateAgyModelId(selection.model_id);
++    if (selection.model !== undefined || selection.tier !== undefined) {
++      throw new Error("agy model_id cannot be combined with model or tier");
++    }
++  }
++}
++
++/** Legacy provider keys may be slugified: never guess a distorted hyphenated ID. */
++export function storedModelSelection(value: unknown, rawModelId?: unknown): AgyModelSelection | undefined {
++  try {
++    if (rawModelId !== undefined) return { model_id: validateAgyModelId(rawModelId) };
++    if (isAgyModel(value)) return { model: value };
++    const id = validateAgyModelId(value);
++    // Dots cannot come from Pi slugification; bare IDs survive it unchanged.
++    if (id.includes(".") || !id.includes("-")) return { model_id: id };
++  } catch { /* Missing or malformed legacy metadata requires explicit selection. */ }
++  return undefined;
++}
+diff --git a/tests/command-models.test.ts b/tests/command-models.test.ts
+new file mode 100644
+index 0000000..b172fc9
+--- /dev/null
++++ b/tests/command-models.test.ts
+@@ -0,0 +1,312 @@
++import assert from "node:assert/strict";
++import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
++import { it } from "node:test";
++import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
++import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
++import { registerAgyCommand, parseAgyCommandArgs } from "../extensions/commands.js";
++import { buildAgyArgs } from "../extensions/lib/cli.js";
++import { isAgyModelId, parseAgyModelIds, parseProviderCatalog, validateAgyModelId } from "../extensions/lib/provider-models.js";
++import { createAgyStreamSimple } from "../extensions/lib/provider.js";
++import { storedModelSelection } from "../extensions/lib/model-selection.js";
++import { resetPreflightCache } from "../extensions/lib/preflight.js";
++
++const roster = ["sonnet", "argon", "claude-sonnet-5-5", "claude-opus-5-5-thinking", "unknown.future", "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"];
++async function harness(fn: (h: any) => Promise<void>) {
++  const dir = await mkdtemp(path.join(os.tmpdir(), "agy-command-models-"));
++  const oldPath = process.env.PATH, oldAgent = process.env.PI_CODING_AGENT_DIR;
++  await writeFile(path.join(dir, "state.json"), JSON.stringify({ roster: roster.join("\n") }));
++  await writeFile(path.join(dir, "agy"), `#!${process.execPath}
++const fs = require('node:fs'), p = require('node:path');
++const dir = __dirname, args = process.argv.slice(2);
++fs.appendFileSync(p.join(dir, 'calls.jsonl'), JSON.stringify(args)+'\\n');
++const state = JSON.parse(fs.readFileSync(p.join(dir,'state.json'),'utf8'));
++if(args[0] === 'models' && state.hold) { fs.writeFileSync(p.join(dir,'waiting'),''); const timer = setInterval(() => { if(fs.existsSync(p.join(dir,'release'))) { clearInterval(timer); console.log(state.roster); } },5); }
++else if(args[0] === 'models') { if(state.error) { console.error(state.error); process.exit(1); } console.log(state.roster); }
++else if(args[0] === '--version') console.log('agy 1.2.0');
++else if(args.includes('/usage')) console.log(JSON.stringify(state.usage || {}));
++else console.log(JSON.stringify({event:'result', conversation_id:'conv-exact', result:{response:'done',status:'SUCCESS'}}));
++`);
++  await chmod(path.join(dir, "agy"), 0o755);
++  process.env.PATH = `${dir}${path.delimiter}${oldPath}`;
++  process.env.PI_CODING_AGENT_DIR = path.join(dir, "agent");
++  let command: RegisteredCommand;
++  const receipts: any[] = [], notices: string[] = [], confirms: string[] = [], statuses: string[] = [];
++  let options: string[] = [], title = "", chosen: string | undefined;
++  registerAgyCommand({ registerCommand: (_: string, c: RegisteredCommand) => { command = c; }, appendEntry: (_: string, r: unknown) => receipts.push(r) } as unknown as ExtensionAPI);
++  const ctx = { mode: "tui", cwd: dir, waitForIdle: async () => {}, sessionManager: { buildContextEntries: () => [] }, ui: {
++    select: async (t: string, opts: string[]) => { title = t; options = opts; return chosen ? opts.find(o => o === chosen || o.startsWith(chosen + " — ")) : undefined; },
++    editor: async () => "follow up", confirm: async (_: string, body: string) => { confirms.push(body); return true; },
++    notify: (n: string) => notices.push(n), setStatus: (_: string, s?: string) => { if(s) statuses.push(s); },
++  }} as unknown as ExtensionCommandContext;
++  const h = { dir, receipts, notices, confirms, statuses, ctx,
++    run: async (args = "plan", pick?: string, overrides = {}) => { chosen = pick; await command!.handler(args, { ...ctx, ...overrides }); return { options, title }; },
++    complete: async (prefix: string) => command!.getArgumentCompletions?.(prefix),
++    state: async (state: unknown) => { resetPreflightCache(); await writeFile(path.join(dir,"state.json"), JSON.stringify(state)); },
++    calls: async () => (await readFile(path.join(dir,"calls.jsonl"),"utf8")).trim().split("\n").map(s => JSON.parse(s)),
++  };
++  try { await fn(h); } finally { process.env.PATH = oldPath; if(oldAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldAgent; resetPreflightCache(); }
++}
++
++it("registered /agy offers full raw roster, refreshing and reporting failure truthfully", async () => harness(async h => {
++  let view = await h.run();
++  for(const id of roster) assert.ok(view.options.includes(id), `missing ${id}: ${view.options}`);
++  assert.deepEqual(await h.calls(), [["models"]]);
++  assert.ok((await h.complete("plan model=arg")).some((c: any) => c.value === "plan model=argon"));
++  await h.state({roster: "new.future\nargon"});
++  view = await h.run();
++  assert.ok(view.options.includes("new.future"));
++  assert.ok(!view.options.includes("claude-sonnet-5-5"));
++  await h.state({error: "authentication failed; login required"});
++  view = await h.run();
++  assert.match(h.notices.join("\n"), /authentication failed/);
++  assert.match(view.title, /last successful/i);
++  assert.ok(view.options.includes("new.future"));
++  for(const raw of ["", "Models:\n--bad\n!!!"]) {
++    await h.state({roster: raw});
++    view = await h.run();
++    assert.match(view.title, /last successful/i);
++    assert.ok(view.options.includes("new.future"));
++  }
++  await h.state({roster: "recovered"});
++  view = await h.run();
++  assert.ok(view.options.includes("recovered"));
++  assert.ok(!view.options.includes("new.future"));
++}));
++
++it("first discovery failure visibly offers alias fallback and retries", async () => harness(async h => {
++  await h.state({error:"login required"});
++  const view = await h.run();
++  assert.match(view.title, /alias fallback/i);
++  assert.match(h.notices.join("\n"), /login required/);
++  assert.ok(view.options.some((o: string) => o.startsWith("flash — ")));
++  await h.state({roster: "argon"});
++  assert.ok((await h.run()).options.includes("argon"));
++}));
++
++for (const id of roster) it(`picker passes ${id} unchanged through confirmation, argv, receipt and persistence`, async () => harness(async h => {
++  await h.run("accept-edits task text", id);
++  const inference = (await h.calls()).find((a: string[]) => a.includes("--model"));
++  assert.ok(inference, h.notices.join("\n"));
++  assert.equal(inference[inference.indexOf("--model")+1], id);
++  assert.ok(!inference.includes("--effort"));
++  assert.ok(h.confirms.some((s: string) => s.includes(id)));
++  assert.ok(h.statuses.some((s: string) => s.includes(id)));
++  assert.equal(h.receipts[0].details.model, id);
++  const store = JSON.parse(await readFile(path.join(h.dir,"agent/agy-sessions.json"),"utf8"));
++  assert.equal(store[h.dir].last_model, id);
++  assert.equal(store[h.dir].last_raw_model_id, id);
++  assert.equal(store[h.dir].history[0].model, id);
++  assert.equal(store[h.dir].history[0].raw_model_id, id);
++  await h.run("plan continue more");
++  let calls = (await h.calls()).filter((a: string[]) => a.includes("--model"));
++  assert.equal(calls.at(-1)[1], id);
++  // Select the recorded session, then a plan mode, without changing its ID.
++  h.ctx.ui.select = async (title: string, opts: string[]) => title === "agy mode" ? opts.find(o => o.startsWith("plan —")) : opts[0];
++  await h.run("sessions");
++  calls = (await h.calls()).filter((a: string[]) => a.includes("--model"));
++  assert.equal(calls.at(-1)[1], id);
++  assert.ok(calls.at(-1).includes("conv-exact"));
++}));
++
++it("explicit model= preserves IDs and prompt grammar; rejects unsafe IDs and conflicts", () => {
++  assert.deepEqual(parseAgyCommandArgs("plan model=unknown.future examine\nthis"), {mode:"plan", model_id:"unknown.future", prompt:"examine\nthis"});
++  for(const input of ["model=--help task", "model= task", "model=argon\u0000 task", "model=argon model=other task", "flash model=argon task"]) assert.ok(parseAgyCommandArgs(input).error, input);
++  assert.equal(parseAgyCommandArgs("argon explain this").prompt, "argon explain this");
++  assert.equal(parseAgyCommandArgs("review model=argon later").prompt, "review model=argon later");
++  assert.equal(parseAgyCommandArgs("sonnet review").model, "sonnet");
++});
++
++it("explicit exact ID cannot be substituted on exhausted quota", async () => harness(async h => {
++  await h.state({roster:roster.join("\n"),usage:{models:[{model:"claude-sonnet-5-5", remaining_fraction:0},{model:"gemini-3.8-flash-medium",remaining_fraction:1}]}});
++  await h.run("plan model=claude-sonnet-5-5 inspect");
++  assert.match(h.notices.join("\n"), /quota exhausted for claude-sonnet-5-5/);
++  assert.ok(!(await h.calls()).some((a: string[]) => a.includes("--model")));
++  assert.equal(h.receipts.length,0);
++}));
++
++
++it("shared raw parser and exact selector reject unsafe token domains", () => {
++  for (const id of ["argon", "unknown.future", "a.b-c", "claude-sonnet-5-5", "gemini-3.8-flash-low"]) {
++    assert.equal(validateAgyModelId(id), id);
++    const args = buildAgyArgs({prompt:"task",model_id:validateAgyModelId(id),dir:"/tmp",timeout_ms:1000});
++    assert.equal(args[1],id);
++  }
++  for (const id of ["", "--model", "-p", " argon", "argon ", "argon\n", "argon\r", "argon\t", "claude-sonnet-5-5\n", "claude-sonnet-5-5\r", "claude-sonnet-5-5\t", "claude-sonnet-5-5 ", "claude-sonnet-5-5\u0000", "a/b", "a\u0000", "Models:", "error", "auth"]) {
++    assert.equal(isAgyModelId(id),false,JSON.stringify(id));
++    assert.throws(() => validateAgyModelId(id));
++  }
++  assert.deepEqual(parseAgyModelIds("Models:\nargon  Argon\nunknown.future Future\nclaude-sonnet-5-5\tSonnet label\nargon\n--bad\n!!!"),["argon","unknown.future","claude-sonnet-5-5"]);
++  assert.throws(() => buildAgyArgs({prompt:"task",model_id:validateAgyModelId("argon"), model:"sonnet",dir:"/tmp",timeout_ms:1000} as any), /cannot be combined/);
++});
++
++
++async function waitForFile(file: string) {
++  const deadline = Date.now() + 3000;
++  while (true) {
++    try { await readFile(file); return; } catch (error) {
++      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || Date.now() > deadline) throw error;
++      await new Promise(resolve => setTimeout(resolve, 5));
++    }
++  }
++}
++
++it("late discovery cannot replace a newer roster", async () => harness(async h => {
++  await h.state({roster:"old.future",hold:true});
++  const old = h.run();
++  await waitForFile(path.join(h.dir,"waiting"));
++  await h.state({roster:"new.future"});
++  await h.run();
++  await writeFile(path.join(h.dir,"release"),"");
++  await old;
++  assert.deepEqual((await h.complete("model=")).map((c: any) => c.value),["model=new.future"]);
++}));
++
++it("cancelled discovery retains last successful roster", async () => harness(async h => {
++  await h.run();
++  await h.state({roster:"cancelled.future",hold:true});
++  const controller = new AbortController();
++  const pending = h.run("plan",undefined,{signal:controller.signal});
++  await waitForFile(path.join(h.dir,"waiting"));
++  controller.abort();
++  await pending;
++  const values = (await h.complete("model=")).map((c: any) => c.value);
++  assert.ok(values.includes("model=argon"));
++  assert.ok(!values.includes("model=cancelled.future"));
++}));
++
++it("failure in another cwd never receives the first cwd roster", async () => harness(async h => {
++  await h.run();
++  await h.state({error:"login required"});
++  const other = await mkdtemp(path.join(os.tmpdir(),"agy-model-other-"));
++  const view = await h.run("plan",undefined,{cwd:other});
++  assert.match(view.title,/alias fallback/i);
++  assert.ok(!view.options.includes("argon"));
++  assert.deepEqual(await h.complete("model="),[]);
++}));
++
++it("direct exact selection and bare aliases preserve prompt and current alias resolution", async () => harness(async h => {
++  const view = await h.run();
++  assert.ok(view.options.some((o: string) => o.startsWith("sonnet — alias shortcut (claude-sonnet-5-5")));
++  await h.run("plan sonnet inspect this");
++  await h.run("plan model=unknown.future argon is prompt text");
++  const calls = (await h.calls()).filter((a: string[]) => a.includes("--model"));
++  assert.equal(calls[0][1],"claude-sonnet-5-5");
++  assert.equal(h.receipts[0].details.model,"sonnet");
++  assert.equal(calls[1][1],"unknown.future");
++  assert.match(calls[1][calls[1].indexOf("-p")+1],/argon is prompt text/);
++}));
++
++it("write permission rejection and picker cancellation never execute", async () => harness(async h => {
++  h.ctx.ui.confirm = async () => false;
++  await h.run("accept-edits model=argon task");
++  assert.equal(h.receipts.length,0);
++  await h.run();
++  assert.ok(!(await h.calls()).some((a: string[]) => a.includes("--model")));
++}));
++
++it("legacy model restoration never guesses normalized provider IDs", () => {
++  assert.deepEqual(storedModelSelection("sonnet"),{model:"sonnet"});
++  assert.deepEqual(storedModelSelection("sonnet","sonnet"),{model_id:"sonnet"});
++  assert.deepEqual(storedModelSelection("argon"),{model_id:"argon"});
++  assert.deepEqual(storedModelSelection("unknown.future"),{model_id:"unknown.future"});
++  for (const id of ["gemini-3-8-flash", "claude-sonnet-5-5", "--help", "bad id"]) assert.equal(storedModelSelection(id),undefined);
++  assert.equal(storedModelSelection("sonnet","--help"),undefined);
++});
++
++for (const raw of ["unknown.future", "gemini-3.8-flash-medium"]) it(`provider persistence keeps native resume key and supplies exact /agy resume ID: ${raw}`, async () => harness(async h => {
++  const entries = parseProviderCatalog(roster.join("\n"));
++  const entry = entries.find(e => e.full === raw)!;
++  const modelId = raw.startsWith("gemini") ? entries.find(e => e.full === "gemini-3.8-flash")!.id : entry.id;
++  const seen: any[] = [];
++  async function providerTurn(priorAssistant = false) {
++    let finish!: () => void;
++    const done = new Promise<void>(resolve => { finish = resolve; });
++    const events: any[] = [];
++    const stream = createAgyStreamSimple({createStream: () => ({push: e => events.push(e),end: () => finish()}),getSystemPrompt: () => ""}, {
++      dir:h.dir,entries,runner:{run:async request => { seen.push(request); return {kind:"done", result:{text:"ok",truncated:false,conversationId:"provider-conv",activity:[]}}; },resume:async () => {throw new Error("unexpected park");},cancel:() => {}},
++    });
++    stream({id:modelId},[...(priorAssistant ? [{role:"assistant" as const,content:"prior"}] : []),{role:"user",content:"task"}],{reasoning:"medium"});
++    await done;
++    assert.ok(!events.some(e => e.type === "error"),JSON.stringify(events));
++  }
++  await providerTurn();
++  const store = JSON.parse(await readFile(path.join(h.dir,"agent/agy-sessions.json"),"utf8"));
++  assert.equal(store[h.dir].last_model,modelId);
++  assert.equal(store[h.dir].last_raw_model_id,raw);
++  await providerTurn(true); // New provider instance must still resume via model.id.
++  assert.equal(seen[1].resumeConversationId,"provider-conv");
++  h.ctx.ui.select = async (title: string, opts: string[]) => title === "agy mode" ? opts.find(o => o.startsWith("plan —")) : opts[0];
++  await h.run("sessions");
++  const calls = (await h.calls()).filter((a: string[]) => a.includes("--model"));
++  assert.equal(calls.at(-1)[1],raw);
++  assert.ok(calls.at(-1).includes("provider-conv"));
++}));
++
++it("parked provider persistence retains its original raw selector across reasoning and catalog changes", async () => harness(async h => {
++  const entries = parseProviderCatalog("gemini-3.8-flash-low\ngemini-3.8-flash-high");
++  const events: any[] = [];
++  let finish!: () => void;
++  let done: Promise<void>;
++  let resumes = 0;
++  const stream = createAgyStreamSimple({createStream: () => {
++    done = new Promise<void>(resolve => {finish = resolve;});
++    return {push:e => events.push(e),end:() => finish()};
++  },getSystemPrompt:() => ""}, {
++    dir:h.dir,entries,runner:{
++      run:async request => { assert.equal(request.fullModel,"gemini-3.8-flash"); assert.equal(request.effort,"low"); return {kind:"parked",park:{callId:"park-original",toolName:"read",args:{}}}; },
++      resume:async () => ++resumes === 1 ? {kind:"parked",park:{callId:"park-again",toolName:"read",args:{}}} : {kind:"done",result:{text:"done",truncated:false,conversationId:"parked-conv",activity:[]}},
++      cancel:() => {},
++    },
++  });
++  const messages: any[] = [{role:"user",content:"inspect"}];
++  stream({id:"gemini-3-8-flash"},messages,{reasoning:"low"});
++  await done!;
++  // The same Pi ID can resolve to a different raw target after refresh.
++  entries[0].full = "gemini-9.9-flash";
++  for (const reasoning of ["high", "medium"] as const) {
++    const call = events.filter(e => e.type === "toolcall_end").at(-1).toolCall;
++    messages.push({role:"assistant",content:[call]},{role:"toolResult",toolCallId:call.id,toolName:"read",content:"result"});
++    stream({id:"gemini-3-8-flash"},messages,{reasoning});
++    await done!;
++  }
++  const store = JSON.parse(await readFile(path.join(h.dir,"agent/agy-sessions.json"),"utf8"));
++  assert.equal(store[h.dir].last_model,"gemini-3-8-flash");
++  assert.equal(store[h.dir].last_raw_model_id,"gemini-3.8-flash-low");
++  assert.equal(store[h.dir].history[0].raw_model_id,"gemini-3.8-flash-low");
++}));
++
++
++it("native exact-ID completion preserves the entire argument prefix and following prompt", async () => harness(async h => {
++  await h.run(); // Populate last-good roster using only the fake discovery CLI.
++  const provider = new CombinedAutocompleteProvider([
++    {name:"agy", getArgumentCompletions: prefix => h.complete(prefix)},
++  ], h.dir);
++  const callsBefore = await h.calls();
++  for (const leading of ["", "plan ", "plan continue timeout=90s context=recent ", "plan  continue\ttimeout=90s context=recent  "]) {
++    for (const [partial, id] of [["arg", "argon"], ["unknown.f", "unknown.future"], ["", "argon"]]) {
++      const argumentPrefix = `${leading}model=${partial}`;
++      const beforeCursor = `/agy ${argumentPrefix}`;
++      const line = `${beforeCursor} inspect this`;
++      const suggestions = await provider.getSuggestions([line],0,beforeCursor.length,{signal:new AbortController().signal});
++      assert.ok(suggestions);
++      assert.equal(suggestions.prefix,argumentPrefix);
++      const item = suggestions.items.find(candidate => candidate.label.startsWith(`${id} (`));
++      assert.ok(item);
++      assert.equal(item.value,`${leading}model=${id}`);
++      const applied = provider.applyCompletion([line],0,beforeCursor.length,item,suggestions.prefix);
++      assert.deepEqual(applied.lines,[`/agy ${leading}model=${id} inspect this`]);
++      assert.equal(applied.cursorCol,`/agy ${leading}model=${id}`.length);
++      const parsed = parseAgyCommandArgs(applied.lines[0].slice("/agy ".length));
++      assert.equal(parsed.model_id,id);
++      assert.equal(parsed.prompt,"inspect this");
++      assert.equal(parsed.error,undefined);
++      assert.equal(parsed.mode,leading ? "plan" : undefined);
++      assert.equal(parsed.continue,leading.includes("continue") ? true : undefined);
++      assert.equal(parsed.timeout_ms,leading.includes("timeout=") ? 90_000 : undefined);
++      assert.equal(parsed.context,leading.includes("context=") ? "recent" : undefined);
++    }
++  }
++  assert.deepEqual(await h.calls(),callsBefore); // Completion must remain cache-only.
++}));

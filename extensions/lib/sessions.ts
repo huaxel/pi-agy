@@ -1,3 +1,4 @@
+import { isAgyModelId, validateAgyModelId, type AgyModelId } from "./provider-models.js";
 import {
   chmod,
   mkdir,
@@ -16,6 +17,8 @@ import { randomUUID } from "node:crypto";
 export interface AgyConversationEntry {
   conversation_id: string;
   model?: string;
+  /** Exact delegation CLI ID; model remains the alias or native provider resume key. */
+  raw_model_id?: AgyModelId;
   agent?: string;
   updated_at: string;
   /** Short task excerpt so humans and agents can tell conversations apart. */
@@ -25,6 +28,7 @@ export interface AgyConversationEntry {
 export interface AgySessionRecord {
   last_conversation_id?: string;
   last_model?: string;
+  last_raw_model_id?: AgyModelId;
   last_agent?: string;
   updated_at?: string;
   /** Recent conversations for the directory, most recent first. */
@@ -72,6 +76,7 @@ export interface AgySessionStore {
     signal?: AbortSignal,
     summary?: string,
     agent?: string,
+    rawModelId?: AgyModelId,
   ): Promise<void>;
 }
 
@@ -155,7 +160,8 @@ export function createSessionStore(
             (entry) =>
               entry &&
               typeof entry.conversation_id === "string" &&
-              typeof entry.updated_at === "string",
+              typeof entry.updated_at === "string" &&
+                (entry.raw_model_id === undefined || isAgyModelId(entry.raw_model_id)),
           )
           .map((entry) => {
             const normalized: AgyConversationEntry = {
@@ -163,6 +169,7 @@ export function createSessionStore(
               updated_at: entry.updated_at,
             };
             if (typeof entry.model === "string") normalized.model = entry.model;
+            if (entry.raw_model_id !== undefined) normalized.raw_model_id = entry.raw_model_id;
             if (typeof entry.agent === "string") {
               const agent = entry.agent.trim();
               if (agent && agent.length <= 128 && !/[\x00-\x1f\x7f]/.test(agent)) {
@@ -255,7 +262,9 @@ export function createSessionStore(
     signal?: AbortSignal,
     summary?: string,
     agent?: string,
+    rawModelId?: AgyModelId,
   ): Promise<void> {
+    if (rawModelId !== undefined) validateAgyModelId(rawModelId);
     const operation = waitForMutation(signal).then(() =>
       withStoreLock(async () => {
         const store = await loadStore(signal);
@@ -265,10 +274,11 @@ export function createSessionStore(
         store[key] = {
           last_conversation_id: conversationId,
           last_model: model,
+          ...(rawModelId ? { last_raw_model_id: rawModelId } : {}),
           last_agent: agent,
           updated_at: updatedAt,
           history: [
-            { conversation_id: conversationId, model, agent, updated_at: updatedAt, summary },
+            { conversation_id: conversationId, model, ...(rawModelId ? { raw_model_id: rawModelId } : {}), agent, updated_at: updatedAt, summary },
             ...(Array.isArray(record.history) ? record.history : []).filter(
               (entry) =>
                 entry &&
@@ -307,6 +317,7 @@ export function saveSession(
   signal?: AbortSignal,
   summary?: string,
   agent?: string,
+  rawModelId?: AgyModelId,
 ): Promise<void> {
-  return defaultStore.saveSession(dir, conversationId, model, signal, summary, agent);
+  return defaultStore.saveSession(dir, conversationId, model, signal, summary, agent, rawModelId);
 }

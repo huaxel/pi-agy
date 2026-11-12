@@ -24,10 +24,11 @@ Useful options include:
 - `background=true` to return a handle, then use `agy_tasks` to poll, collect, or cancel
 - `context=summary|recent` to optionally pass bounded Pi conversation context (default: none)
 
-The `/agy` command runs tasks from Pi's TUI and can also list agents, inspect quota, diagnose setup, and select saved conversations. For example:
+The `/agy` command runs tasks from Pi's TUI and can also list agents, inspect quota, diagnose setup, and select saved conversations. Its model picker refreshes the full concrete ID list from `agy models` each time it opens; alias shortcuts remain available. Discovery failures show the reason and mark cached or fallback choices as unverified. Use `model=<id>` for an exact CLI model ID; bare aliases such as `sonnet` still work. For example:
 
 ```text
 /agy plan flash investigate the failing tests
+/agy plan model=argon investigate the failing tests
 /agy continue fix the remaining issues
 /agy sessions
 /agy doctor

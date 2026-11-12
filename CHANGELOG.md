@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.13
+
+- Refresh the separate `/agy` delegation picker with every discovered concrete model ID, not just fixed aliases; preserve exact names and Gemini tier variants.
+- Add explicit `/agy model=<id>` selection and native completion that preserves preceding options and following task text. Existing alias shortcuts remain available.
+- Preserve concrete model IDs through confirmation, execution, quotas, receipts, and conversation resume; retain original executed targets across parked provider turns without changing native resume keys.
+- Report discovery failures and distinguish last-good rosters from built-in alias fallbacks. Keep canceled and superseded discovery from replacing newer state.
+- Full 490-test gate, typecheck, and package checks pass. Live discovery still requires authenticated agy.
+
 ## 0.7.12
 
 - Refresh the full Antigravity model catalog automatically at session startup and whenever Pi opens `/model`, using Pi's native refresh lifecycle instead of a one-time discovery probe.

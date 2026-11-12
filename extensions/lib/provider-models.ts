@@ -49,6 +49,28 @@ const MODEL_LINE_RE = /^[A-Za-z0-9][A-Za-z0-9._]*-[A-Za-z0-9._-]*$/;
 const NONHYPHEN_MODEL_ID_RE = /^[a-z0-9](?:[a-z0-9._]*[a-z0-9_])?$/;
 const NON_MODEL_TOKEN_RE = /^(?:id|model|models|name|label|status|available|fetching|loading|error|warning|info|auth|authentication|unauthorized|forbidden|login|success)$/;
 
+/** Exact CLI IDs, validated with the same token rules used by native discovery. */
+declare const agyModelId: unique symbol;
+export type AgyModelId = string & { readonly [agyModelId]: true };
+
+export function isAgyModelId(value: unknown): value is AgyModelId {
+  return typeof value === "string" && !/[\s\x00-\x1f\x7f-\x9f]/.test(value) && (
+    MODEL_LINE_RE.test(value) ||
+    (NONHYPHEN_MODEL_ID_RE.test(value) && !NON_MODEL_TOKEN_RE.test(value))
+  );
+}
+
+export function validateAgyModelId(value: unknown): AgyModelId {
+  if (!isAgyModelId(value)) throw new Error("agy model ID must be a nonempty CLI ID without whitespace or leading flags");
+  return value;
+}
+
+/** Preserve full first-column IDs and tiers; never slugify or group delegation IDs. */
+export function parseAgyModelIds(raw: string): AgyModelId[] {
+  const ids = raw.split("\n").map(line => line.trim().split(/\s+/)[0]);
+  return [...new Set(ids.filter(isAgyModelId))];
+}
+
 /**
  * Families verified to accept base-slug + `--effort`. Only these collapse to
  * a base entry with a thinking toggle; every other family keeps agy's exact
@@ -146,12 +168,7 @@ export function thinkingMapForEfforts(
  */
 export function parseProviderCatalog(raw: string): AgyProviderModelEntry[] {
   const groups = new Map<string, { lines: string[]; tiers: Set<AgyProviderEffort> }>();
-  for (const line of raw.split("\n")) {
-    const slug = line.trim().split(/\s+/)[0] ?? "";
-    if (
-      !MODEL_LINE_RE.test(slug) &&
-      (!NONHYPHEN_MODEL_ID_RE.test(slug) || NON_MODEL_TOKEN_RE.test(slug))
-    ) continue;
+  for (const slug of parseAgyModelIds(raw)) {
     const match = TIER_RE.exec(slug);
     const base = match ? match[1] : slug;
     const tier = match ? (match[2] as AgyProviderEffort) : null;

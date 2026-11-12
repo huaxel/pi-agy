@@ -51,6 +51,8 @@ import { getSession, saveSession } from "./sessions.js";
 import { AgyProviderDriver, PROVIDER_TURN_TIMEOUT_MS } from "./provider-driver.js";
 import {
   toProviderEffort,
+  validateAgyModelId,
+  type AgyModelId,
   type AgyProviderEffort,
   type AgyProviderModelEntry,
   type AgyThinkingLevel,
@@ -521,6 +523,8 @@ function hasUserMessageAfterToolCall(messages: ProviderTranscriptMessage[], tool
 }
 
 interface SuspendedTurn {
+  /** Original executed selector, retained across reasoning/catalog changes and re-parks. */
+  rawModelId: AgyModelId;
   runner: ProviderTurnRunner;
   ownership?: ProviderTurnOwnership;
   toolCallId: string;
@@ -679,7 +683,9 @@ export function createAgyStreamSimple(
         const prior = suspendedByDir.get(skey);
         const bodies = prior ? collectParkedDeliveries(messages, prior.toolCallId) : [];
         let end: ProviderRunEnd;
+        let executedRawModelId: AgyModelId;
         if (prior && bodies.length > 0) {
+          executedRawModelId = prior.rawModelId;
           prior.ownership?.assertValid();
           suspendedByDir.delete(skey);
           // Images riding on the delivered tool results are staged too:
@@ -751,6 +757,11 @@ export function createAgyStreamSimple(
           const staged = await stageImages(collectImageBlocks(messages));
           pendingImageCleanups.push(staged.cleanup);
           const prompt = renderProviderPrompt(messages, systemPrompt || undefined, staged.paths);
+          // Capture before execution: later invocations can resolve a different
+          // profile while this child remains parked on its original target.
+          executedRawModelId = validateAgyModelId(
+            turnModel.effort ? `${turnModel.full}-${turnModel.effort}` : turnModel.full,
+          );
           end = await runner.run({
             fullModel: turnModel.full,
             effort: turnModel.effort,
@@ -788,6 +799,7 @@ export function createAgyStreamSimple(
           end.ownership?.assertValid();
           suspendedByDir.set(skey, {
             runner, ownership: end.ownership, toolCallId, park: end.park,
+            rawModelId: executedRawModelId,
             modelId: model.id, imageCleanups: pendingImageCleanups,
           });
           output.content.push(toolCall);
@@ -837,7 +849,10 @@ export function createAgyStreamSimple(
             // Preserve a delegation-recorded agent: provider turns must not
             // wipe the agent that /agy continue would otherwise restore.
             const prior = await getSession(dir).catch(() => undefined);
-            await saveSession(dir, result.conversationId, model.id, undefined, summary, prior?.last_agent);
+            // Native resume still keys on model.id. Delegation needs the exact
+            // CLI ID, including the concrete Gemini tier represented by the
+            // catalog's base + effort pair (never the normalized Pi ID).
+            await saveSession(dir, result.conversationId, model.id, undefined, summary, prior?.last_agent, executedRawModelId);
           } catch {
             // Recording failures must never fail a completed turn.
           }

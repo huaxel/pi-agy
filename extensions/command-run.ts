@@ -1,5 +1,6 @@
+import { storedModelSelection, type AgyModelSelection } from "./lib/model-selection.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { isAgyModel, resolveAgyModelId, type AgyModel } from "./lib/cli.js";
+import { resolveAgyModelId } from "./lib/cli.js";
 import { buildAgyContextFromEntries, effectiveResumeContextMode, type AgyContextMode } from "./lib/context.js";
 import { describePreRunDirt } from "./lib/postflight.js";
 import { DEFAULT_TIMEOUT_MS } from "./lib/command-args.js";
@@ -10,9 +11,8 @@ import { AGY_RUN_ENTRY_TYPE, type AgyRunReceipt } from "./lib/render.js";
 import { getHistory } from "./lib/sessions.js";
 import { normalizeConversationSelection, type ConversationSelection } from "./lib/request.js";
 
-export interface InteractiveRun {
+export type InteractiveRun = AgyModelSelection & {
   mode: "plan" | "accept-edits" | "sandbox";
-  model: AgyModel;
   agent?: string;
   prompt: string;
   conversation_id?: string;
@@ -40,7 +40,7 @@ export async function runSessionsPicker(
 
   const options = history.map((entry, index) => {
     const id = entry.conversation_id.slice(0, 8);
-    const model = entry.model ?? "unknown model";
+    const model = entry.raw_model_id ?? entry.model ?? "unknown model";
     const agent = entry.agent ? ` · agent ${entry.agent}` : "";
     const summary = entry.summary ? `${entry.summary.slice(0, 50)} · ` : "";
     return `${index + 1}. ${summary}${model}${agent} · ${describeWhen(entry.updated_at)} · ${id}…`;
@@ -69,9 +69,14 @@ export async function runSessionsPicker(
     return;
   }
 
+  const modelSelection = storedModelSelection(entry.model, entry.raw_model_id);
+  if (!modelSelection) {
+    ctx.ui.notify("agy: recorded model is missing, invalid, or ambiguous; resume with an explicit model=<id> using /agy continue", "error");
+    return;
+  }
   await executeConfirmedRun(pi, ctx, {
     mode,
-    model: isAgyModel(entry.model) ? entry.model : "flash-medium",
+    ...modelSelection,
     agent: entry.agent,
     prompt: text.trim(),
     conversation_id: entry.conversation_id,
@@ -110,7 +115,7 @@ export async function executeConfirmedRun(
   if (run.mode === "accept-edits") {
     const dirt = await describePreRunDirt(cwd, ctx.signal).catch(() => null);
     const { title, body } = buildAcceptEditsConfirm({
-      modelLabel: `${run.model} (${resolveAgyModelId(run.model)})`,
+      modelLabel: run.model_id ?? `${run.model} (${resolveAgyModelId(run.model)})`,
       agent: run.agent,
       cwd,
       prompt: run.prompt,
@@ -129,11 +134,11 @@ export async function executeConfirmedRun(
   // a second LLM turn and the command works even when tools are limited.
   const status = createStatusThrottler(ctx);
   try {
-    status(`starting (${run.model} · ${run.mode}${run.agent ? ` · agent ${run.agent}` : ""})`);
+    status(`starting (${run.model_id ?? run.model} · ${run.mode}${run.agent ? ` · agent ${run.agent}` : ""})`);
     const result = await executeAgyTask(
       {
         prompt: run.prompt,
-        model: run.model,
+        ...(run.model_id ? { model_id: run.model_id } : { model: run.model, tier: run.tier }),
         agent: run.agent,
         mode: run.mode,
         dir: cwd,

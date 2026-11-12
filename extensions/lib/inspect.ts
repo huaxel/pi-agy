@@ -5,6 +5,8 @@
  * so existing importers are untouched.
  */
 
+import { parseAgyModelIds, type AgyModelId } from "./provider-models.js";
+
 import { compareModelIds } from "./model-sort.js";
 import { runPreflightCommand } from "./spawn.js";
 import { parseAgyUsage, usageError, type AgyUsageSnapshot } from "./usage.js";
@@ -111,6 +113,18 @@ export async function inspectAgyModels(
   const catalog = parseModelCatalog(output);
   if (Object.keys(catalog).length > 0) updateModelCatalog(catalog);
   return catalog;
+}
+
+/** Raw delegation roster; successful empty/malformed output is not availability. */
+export async function inspectAgyModelIds(
+  cwd: string, signal?: AbortSignal, timeoutMs?: number,
+): Promise<AgyModelId[]> {
+  const output = await runPreflightCommand(
+    ["models"], cwd, signal, "agy model discovery", true, timeoutMs,
+  );
+  const ids = parseAgyModelIds(output);
+  if (!ids.length) throw new Error("agy models returned no valid model IDs");
+  return ids;
 }
 
 export async function checkAgyConnectivity(

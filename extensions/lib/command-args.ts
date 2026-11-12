@@ -6,6 +6,8 @@
  * parser for its existing test importers.
  */
 
+import { validateAgyModelId, type AgyModelId } from "./provider-models.js";
+
 import { normalizeAgyAgentName, type AgyModel } from "./cli.js";
 import type { AgyContextMode } from "./context.js";
 
@@ -32,6 +34,7 @@ export const MAX_TIMEOUT_MS = 600_000;
 export interface AgyCommandArgs {
   mode?: "plan" | "accept-edits" | "sandbox";
   model?: AgyModel;
+  model_id?: AgyModelId;
   agent?: string;
   prompt?: string;
   continue?: boolean;
@@ -56,8 +59,16 @@ export function parseAgyCommandArgs(args: string): AgyCommandArgs {
     const timeout = parseTimeoutToken(token.value);
     if (MODE_KEYS.includes(value as (typeof MODE_KEYS)[number])) {
       parsed.mode = value as AgyCommandArgs["mode"];
-    } else if (MODEL_ALIASES[value]) {
+    } else if (Object.hasOwn(MODEL_ALIASES, value)) {
+      if (parsed.model_id !== undefined) parsed.error = "model and model= cannot be combined";
       parsed.model = MODEL_ALIASES[value];
+    } else if (value.startsWith("model=")) {
+      try {
+        if (parsed.model !== undefined || parsed.model_id !== undefined) throw new Error("model= cannot be combined with another model selector");
+        parsed.model_id = validateAgyModelId(token.value.slice("model=".length));
+      } catch (error) {
+        parsed.error = error instanceof Error ? error.message : String(error);
+      }
     } else if (value === "continue") {
       parsed.continue = true;
     } else if (value.startsWith("agent=")) {

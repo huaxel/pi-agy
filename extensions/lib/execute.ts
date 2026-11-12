@@ -1,3 +1,5 @@
+import { validateModelSelector, type AgyModelSelector } from "./model-selection.js";
+import type { AgyModelId } from "./provider-models.js";
 import { stat } from "node:fs/promises";
 
 import {
@@ -39,10 +41,8 @@ import { normalizeConversationSelection } from "./request.js";
 
 export type AgyMode = "plan" | "accept-edits" | "sandbox";
 
-export interface AgyExecutionOptions {
+export type AgyExecutionOptions = AgyModelSelector & {
   prompt: string;
-  model?: AgyModel;
-  tier?: "flash" | "flash-lo" | "pro";
   effort?: AgyEffort;
   agent?: string;
   mode: AgyMode;
@@ -60,7 +60,7 @@ export interface AgyExecutionOptions {
 
 export interface AgyExecutionDetails {
   mode: AgyMode;
-  model: AgyModel | "flash-medium";
+  model: AgyModel | AgyModelId;
   dir: string;
   conversation_id?: string;
   verify_cmd: string | null;
@@ -104,17 +104,17 @@ export async function executeAgyTask(
     () => budgetController.abort(),
     Math.max(options.timeout_ms, 0),
   );
-  let effectiveModel: AgyModel | "flash-medium" = "flash-medium";
+  let effectiveModel: AgyModel | AgyModelId = "flash-medium";
 
   try {
     const config = await loadAgyConfig(undefined, abortSignal);
     // Explicit model → legacy tier → configured default → flash-medium.
     const selectedModel = resolveAgyModelAlias(options.model, options.tier);
-    const resolvedModel = selectedModel ?? (await resolveDefaultModel(config, abortSignal));
+    const resolvedModel = selectedModel ?? (options.model_id ? undefined : await resolveDefaultModel(config, abortSignal));
     let model: AgyModel = resolvedModel ?? "flash-medium";
-    effectiveModel = model;
+    effectiveModel = options.model_id ?? model;
     const autoModelSelection =
-      !selectedModel && !config.defaultModel && !config.defaultModelCommand;
+      !options.model_id && !selectedModel && !config.defaultModel && !config.defaultModelCommand;
     const skipPermissions = config.skipPermissions !== false;
 
     return await withDirLock(
@@ -177,7 +177,7 @@ export async function executeAgyTask(
         const run = await runWithTransientRetry(async (trackProgress) => {
           const remainingMs = remainingBudget(startedAt, options.timeout_ms);
           quota = await runPreflight(options.dir, abortSignal, remainingMs);
-          const selectedModelId = resolveAgyModelId(model, options.tier);
+          const selectedModelId = options.model_id ?? resolveAgyModelId(model, options.tier);
           const selectedQuotas = findAgyQuotaEntries(quota, selectedModelId);
           quotaStatus = quota
             ? selectedQuotas.length === 0
@@ -223,7 +223,7 @@ export async function executeAgyTask(
           return spawnAgyStream(
             {
               prompt: finalPrompt,
-              model,
+              ...(options.model_id ? { model_id: options.model_id } : { model }),
               effort: options.effort,
               agent,
               mode: options.mode,
@@ -250,6 +250,7 @@ export async function executeAgyTask(
               AbortSignal.timeout(10_000),
               conversationSummary(options.prompt),
               agent,
+              options.model_id,
             );
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
@@ -264,7 +265,7 @@ export async function executeAgyTask(
         const subagentSummary = formatAgySubagentObservations(run.subagents);
         if (subagentSummary) text = `${text}\n\n## ${subagentSummary}`;
         const quotaSummary = quota?.models.length
-          ? formatAgyUsage(quota, resolveAgyModelId(model, options.tier))
+          ? formatAgyUsage(quota, options.model_id ?? resolveAgyModelId(model, options.tier))
           : undefined;
         if (quotaSummary) text = `${text}\n\n## agy quota snapshot\n${quotaSummary}`;
         let changedFiles: string[] | undefined;
@@ -331,6 +332,7 @@ export async function executeAgyTask(
           AbortSignal.timeout(10_000),
           conversationSummary(options.prompt),
           agent,
+          options.model_id,
         );
         conversationPersisted = true;
       } catch {
@@ -353,6 +355,7 @@ export async function executeAgyTask(
 
 export function validateAgyExecutionOptions(options: AgyExecutionOptions): void {
   if (!options.prompt?.trim()) throw new Error("agy prompt must not be empty");
+  validateModelSelector(options);
   normalizeAgyAgentName(options.agent);
   if (!Number.isFinite(options.timeout_ms) || options.timeout_ms <= 0) {
     throw new Error("agy timeout_ms must be a positive finite number");

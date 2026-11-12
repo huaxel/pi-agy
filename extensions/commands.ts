@@ -1,25 +1,21 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import path from "node:path";
+import { inspectAgyModelIds } from "./lib/inspect.js";
+import { storedModelSelection, type AgyModelSelection } from "./lib/model-selection.js";
+import type { AgyModelId } from "./lib/provider-models.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import {
-  inspectAgyModels,
-  isAgyModel,
+  parseModelCatalog,
+  updateModelCatalog,
   normalizeAgyAgentName,
   resolveAgyModelId,
 } from "./lib/cli.js";
-import { truncate } from "./lib/output.js";
 import { AGY_RUN_ENTRY_TYPE, renderAgyRunReceipt } from "./lib/render.js";
 import { getSession } from "./lib/sessions.js";
 
 import { MODEL_ALIASES, MODEL_KEYS, MODE_KEYS, parseAgyCommandArgs } from "./lib/command-args.js";
 import { executeConfirmedRun, MODE_OPTIONS, optionKey, runSessionsPicker, type InteractiveRun } from "./command-run.js";
 import { showAgents, showBridge, showDoctor, showUsage } from "./command-info.js";
-import { buildAcceptEditsConfirm } from "./lib/confirm.js";
-
-function modelOptions(): string[] {
-  return Object.keys(MODEL_ALIASES).map((alias) =>
-    `${alias} — ${resolveAgyModelId(MODEL_ALIASES[alias])}`,
-  );
-}
 
 export { parseAgyCommandArgs, type AgyCommandArgs } from "./lib/command-args.js";
 
@@ -29,14 +25,25 @@ export { parseAgyCommandArgs, type AgyCommandArgs } from "./lib/command-args.js"
  * confirmed parameters stay authoritative with no second LLM turn.
  */
 export function registerAgyCommand(pi: ExtensionAPI): void {
+  const rosters = new Map<string, { ids?: AgyModelId[]; request: number }>();
+  let completionCwd: string | undefined;
   pi.registerEntryRenderer?.(AGY_RUN_ENTRY_TYPE, (entry, options, theme) =>
     renderAgyRunReceipt(entry.data, options, theme),
   );
 
   pi.registerCommand("agy", {
     description:
-      "Run agy directly: /agy [mode] [model] [agent=name] [continue] [context=summary|recent] [timeout=10m] <prompt>; use /agy agents to list custom agents.",
+      "Run agy directly: /agy [mode] [model|model=id] [agent=name] [continue] [context=summary|recent] [timeout=10m] <prompt>; use /agy agents to list custom agents.",
     getArgumentCompletions: (prefix: string) => {
+      const exactPrefix = /(?:^|\s)model=(\S*)$/.exec(prefix);
+      if (exactPrefix) {
+        // Pi replaces the whole argument prefix with item.value, not just
+        // the current token. Preserve every preceding option and separator.
+        const beforeId = prefix.slice(0, prefix.length - exactPrefix[1].length);
+        return (rosters.get(completionCwd ?? "")?.ids ?? [])
+          .filter(id => id.startsWith(exactPrefix[1]))
+          .map(id => ({ value: `${beforeId}${id}`, label: `${id} (last successful discovery)` }));
+      }
       const tokens = prefix.trim().split(/\s+/).filter(Boolean);
       const p = prefix.toLowerCase();
 
@@ -51,6 +58,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
           ...(tokens[0] === "usage" || tokens[0] === "quota"
             ? []
             : [
+                { value: "model=", label: "model=" },
                 { value: "agent=", label: "agent=" },
                 { value: "continue", label: "continue" },
                 { value: "timeout=10m", label: "timeout=10m" },
@@ -82,6 +90,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
           "context=summary",
           "context=recent",
           "timeout=10m",
+          "model=",
         ].filter((k) => k.startsWith(p));
         return [
           ...modes.map((m) => ({ value: m, label: m })),
@@ -92,6 +101,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
       return null;
     },
     handler: async (args, ctx) => {
+      completionCwd = path.resolve(ctx.cwd);
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/agy requires interactive (TUI) mode", "error");
         return;
@@ -152,33 +162,56 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
         mode = optionKey(pick) as InteractiveRun["mode"];
       }
 
-      let model = parsed.model;
+      let modelSelection: AgyModelSelection | undefined = parsed.model_id
+        ? { model_id: parsed.model_id }
+        : parsed.model ? { model: parsed.model } : undefined;
       let agent = parsed.agent;
-      if (parsed.continue && (!model || !agent)) {
+      if (parsed.continue && (!modelSelection || !agent)) {
         const prior = await getSession(ctx.cwd);
-        if (!model && prior?.last_model && isAgyModel(prior.last_model)) model = prior.last_model;
+        if (!modelSelection) modelSelection = storedModelSelection(prior?.last_model, prior?.last_raw_model_id);
         if (!agent && prior?.last_agent) {
-          try {
-            agent = normalizeAgyAgentName(prior.last_agent);
-          } catch {
+          try { agent = normalizeAgyAgentName(prior.last_agent); } catch {
             // Ignore malformed legacy session metadata.
           }
         }
       }
-      if (!model) {
-        // Refresh once when opening the picker so labels show the concrete IDs
-        // exposed by this account, while retaining the stable alias interface.
-        try {
-          await inspectAgyModels(ctx.cwd, ctx.signal);
-        } catch {
-          // Keep the picker usable with the built-in fallback aliases.
+      if (!modelSelection) {
+        const key = path.resolve(ctx.cwd);
+        let state = rosters.get(key);
+        if (!state) {
+          state = { request: 0 };
+          rosters.set(key, state);
         }
-        const pick = await ctx.ui.select("agy model", modelOptions());
-        if (!pick) {
+        const request = ++state.request;
+        let live = false;
+        try {
+          const ids = await inspectAgyModelIds(ctx.cwd, ctx.signal);
+          if (ctx.signal?.aborted || state.request !== request) return;
+          updateModelCatalog(parseModelCatalog(ids.join("\n")));
+          state.ids = ids;
+          live = true;
+        } catch (error) {
+          if (ctx.signal?.aborted || state.request !== request) return;
+          const message = error instanceof Error ? error.message : String(error);
+          ctx.ui.notify(`agy model discovery failed: ${message}. ${state.ids ? "Using last successful roster; availability is unverified." : "Using built-in alias fallback; availability is unverified."}`, "warning");
+        }
+        const choices: Array<{ label: string; selection: AgyModelSelection }> = [
+          ...(state.ids ?? []).map(id => ({ label: id, selection: { model_id: id } })),
+          ...Object.entries(MODEL_ALIASES).map(([alias, model]) => ({
+            label: `${alias} — alias shortcut (${resolveAgyModelId(model)}; availability unverified)`,
+            selection: { model },
+          })),
+        ];
+        const title = live ? "agy model (discovered IDs; alias shortcuts below)"
+          : state.ids ? "agy model (last successful roster; availability unverified)"
+          : "agy model (built-in alias fallback; availability unverified)";
+        const pick = await ctx.ui.select(title, choices.map(choice => choice.label));
+        if (ctx.signal?.aborted || state.request !== request) return;
+        modelSelection = choices.find(choice => choice.label === pick)?.selection;
+        if (!modelSelection) {
           ctx.ui.notify("agy: cancelled", "info");
           return;
         }
-        model = MODEL_ALIASES[optionKey(pick)] ?? "flash-medium";
       }
 
       let prompt = parsed.prompt;
@@ -193,7 +226,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
 
       await executeConfirmedRun(pi, ctx, {
         mode,
-        model,
+        ...modelSelection,
         agent,
         prompt,
         continue: parsed.continue,
