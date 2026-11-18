@@ -9,7 +9,7 @@ import { describe, it, mock } from "node:test";
 import { ModelRuntime, ModelRegistry, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piAgyExtension from "../extensions/index.js";
 import { getProviderRunner, type ProviderTurnRequest, type ProviderRunEnd } from "../extensions/lib/provider.js";
-import { withTimingFakeAgy, awaitWithWatchdog, type FakeChild } from "./timing-helpers.js";
+import { withTimingFakeAgy, awaitWithWatchdog, awaitNativeTurn, type FakeChild } from "./timing-helpers.js";
 
 type Lifecycle = { start: () => Promise<void>; stop: () => Promise<void>; notices: string[] };
 async function withRuntime(fn: (runtime: ModelRuntime, registry: ModelRegistry, lifecycle: Lifecycle) => Promise<void>) {
@@ -82,6 +82,13 @@ const refreshOptions = { providers: [providerId], allowNetwork: true };
 const representativeCatalog = "claude-sonnet-5-5 Sonnet\nclaude-opus-5-5-thinking Opus\nargon Argon\nfuture.model Future\ngemini-9.1-flash-low Low\ngemini-9.1-flash-high High\n";
 const ids = (registry: ModelRegistry) => registry.getAll().filter((m) => m.provider === providerId).map((m) => m.id);
 const bounded = <T>(p: Promise<T>) => awaitWithWatchdog(p, "catalog operation", 5000);
+async function waitUntil(predicate: () => boolean, label: string) {
+  for (let i = 0; i < 100; i++) {
+    if (predicate()) return;
+    await awaitNativeTurn(label);
+  }
+  assert.fail(`${label} did not complete`);
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => { resolve = r; });
@@ -150,7 +157,8 @@ describe("catalog lifecycle through native Pi", { timeout: 15000 }, () => {
     let output = representativeCatalog;
     await withDiscovery((child) => finish(child, output), async (runtime, registry, lifecycle, calls) => {
       await bounded(lifecycle.start());
-      assert.equal(calls(), 1);
+      await waitUntil(() => calls() === 1, "startup refresh launch");
+      await waitUntil(() => ids(registry).includes("claude-sonnet-5-5"), "startup catalog refresh");
       assert.deepEqual(ids(registry), ["claude-sonnet-5-5", "claude-opus-5-5-thinking", "argon", "future-model", "gemini-9-1-flash"]);
       const provider = registry.getProvider(providerId)!;
       const handler = provider.streamSimple;
@@ -203,6 +211,7 @@ describe("catalog lifecycle through native Pi", { timeout: 15000 }, () => {
       const fallback = ids(registry);
       await bounded(lifecycle.start());
       assert.deepEqual(ids(registry), fallback);
+      await waitUntil(() => lifecycle.notices.length > 0, "startup auth-failure notice");
       assert.match(lifecycle.notices[0], /Could not refresh/);
       assert.match(await openPicker(runtime), /Could not refresh antigravity/);
       code = 0;
@@ -327,6 +336,8 @@ describe("catalog lifecycle through native Pi", { timeout: 15000 }, () => {
       spawned = deferred<FakeChild>();
       const startup = lifecycle.start();
       const startupChild = await bounded(spawned.promise);
+      await bounded(startup); // session_start must not wait for model discovery
+      assert.equal(startupChild.killRequested, false);
       await lifecycle.stop();
       assert.equal(startupChild.killRequested, true);
       finish(startupChild, "old-runtime Old");

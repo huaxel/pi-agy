@@ -128,14 +128,21 @@ function registerAgyProvider(pi: ExtensionAPI): void {
     shutdown.abort();
     return;
   }
-  pi.on?.("session_start", async (_event, ctx) => {
+  pi.on?.("session_start", (_event, ctx) => {
     const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(10_000)]);
-    const result = await ctx.modelRegistry.refresh({
+    // Keep provider discovery off Pi's session-start critical path. The model
+    // picker also refreshes on demand, so startup can use the cached catalog.
+    void ctx.modelRegistry.refresh({
       providers: [AGY_PROVIDER_ID], allowNetwork: true, signal,
+    }).then((result) => {
+      if (!signal.aborted && result.errors.has(AGY_PROVIDER_ID)) {
+        ctx.ui.notify("Could not refresh Antigravity models; showing cached models. Reopen /model to retry.", "warning");
+      }
+    }).catch(() => {
+      if (!signal.aborted) {
+        ctx.ui.notify("Could not refresh Antigravity models; showing cached models. Reopen /model to retry.", "warning");
+      }
     });
-    if (!signal.aborted && result.errors.has(AGY_PROVIDER_ID)) {
-      ctx.ui.notify("Could not refresh Antigravity models; showing cached models. Reopen /model to retry.", "warning");
-    }
   });
 }
 

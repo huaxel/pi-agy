@@ -42,11 +42,8 @@ export {
 } from "./provider-prompt.js";
 
 import { withDirLock } from "./lock.js";
-import {
-  startMcpBridge,
-  type BridgeToolDef,
-  type McpBridgeHandle,
-} from "./provider-mcp.js";
+import type { McpBridgeHandle } from "./provider-mcp.js";
+import type { BridgeToolDef } from "./provider-tools.js";
 import { getSession, saveSession } from "./sessions.js";
 import { AgyProviderDriver, PROVIDER_TURN_TIMEOUT_MS } from "./provider-driver.js";
 import {
@@ -303,6 +300,8 @@ async function ensureProviderBridge(dir: string): Promise<McpBridgeHandle | unde
   try {
     const config = await loadAgyConfig();
     if (config.providerBridge !== false) {
+      // Keep the bridge and its MCP SDK off the extension startup path.
+      const { startMcpBridge } = await import("./provider-mcp.js");
       handle = await startMcpBridge(dir);
     }
   } catch {

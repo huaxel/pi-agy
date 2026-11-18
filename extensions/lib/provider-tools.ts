@@ -1,4 +1,19 @@
-import { toSafeBridgeName, type BridgeToolDef } from "./provider-mcp.js";
+/** A Pi tool projected for agy: MCP-safe advertised name, real Pi identity. */
+export interface BridgeToolDef {
+  name: string;
+  piName: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+/** MCP tool names: [a-zA-Z0-9_-]{1,64}. Pi names are sanitized into that. */
+function toSafeBridgeName(name: string): string {
+  const safe = name
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+  return safe || "tool";
+}
 
 /** Pi tool source shape (structural subset of Pi's ToolInfo). */
 export interface ProviderToolSource {

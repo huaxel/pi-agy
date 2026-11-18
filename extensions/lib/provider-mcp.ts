@@ -35,6 +35,7 @@ import {
 
 import { getDefaultConfigPath } from "./config.js";
 import { isBridgeInputWithinBudget } from "./bridge-input-budget.js";
+import type { BridgeToolDef } from "./provider-tools.js";
 import { checkAgyUsage, formatAgyUsage } from "./cli.js";
 import {
   FALLBACK_PROVIDER_MODELS,
@@ -180,16 +181,6 @@ export interface McpBridgeHandle {
   describe: () => { configDir: string; url: string; toolCount: number; pendingResults: number };
 }
 
-/** A Pi tool projected for agy: MCP-safe advertised name, real Pi identity. */
-export interface BridgeToolDef {
-  /** MCP-safe name as advertised to agy. */
-  name: string;
-  /** Real Pi tool name (invoked via shadow toolUse). */
-  piName: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
-
 export interface BridgePark {
   callId: string;
   /** Real Pi tool name. */
@@ -203,15 +194,6 @@ export interface BridgeToolResult {
 }
 
 export type BridgeParkHandler = (park: BridgePark) => boolean;
-
-/** MCP tool names: [a-zA-Z0-9_-]{1,64}. Pi names are sanitized into that. */
-export function toSafeBridgeName(name: string): string {
-  const safe = name
-    .replace(/[^a-zA-Z0-9_-]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 64);
-  return safe || "tool";
-}
 
 interface CatalogCache {
   raw: string;
