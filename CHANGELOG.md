@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.14
+
+- Keep model discovery off Pi's session-start critical path and load the MCP bridge only when needed.
+- Add regression coverage confirming the extension starts without loading the bridge dependencies.
+- Full 491-test suite, typecheck, and package checks pass.
+
 ## 0.7.13
 
 - Refresh the separate `/agy` delegation picker with every discovered concrete model ID, not just fixed aliases; preserve exact names and Gemini tier variants.
