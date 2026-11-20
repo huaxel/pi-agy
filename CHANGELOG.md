@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.19
 
 - Clear every known dependency advisory. `npm audit` reported four moderates, all transitive through `@modelcontextprotocol/sdk` rather than this package's own code: `hono` 4.13.10 → 4.13.19, `@hono/node-server` 2.1.1 → 2.1.11, `fast-uri` 3.1.8 → 3.1.9 (via `ajv`), `ip-address` 10.7.2 → 10.7.6 (via `express-rate-limit`). No direct dependency changed; `npm audit` now reports zero vulnerabilities at any severity, and the bridge transport suites pass repeatedly against the new `hono` versions.
 - Remove the timing races behind the intermittently failing bridge session tests. Both used a 50ms idle window against a 50ms reaper sweep: the cap assertion could see the slot freed before it asserted a rejection, and a fresh connect could be reaped between `initialize` and the follow-up notification (the observed 404 from `Client.notification`). Cap enforcement and idle reclamation are now separate tests, and reclamation waits for the observable condition instead of a fixed sleep.
