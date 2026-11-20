@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Stop discarding arguments from bridged Pi tools whose schema composes at the root. A root `oneOf`/`anyOf`/`allOf`/`$ref` was replaced by `{type: "object", properties: {}}`, which told the model the tool took no arguments and made every call fail. Unambiguous wrappers are now unwrapped (a nullable branch keeps its real object, `allOf` merges), and an ambiguous root is passed through unchanged rather than emptied, since an empty schema is worse than a complex one.
+- Record why the provider is not gated on an availability probe. Unlike `claude auth status`, agy exposes no auth subcommand and keeps credentials in an opaque state file, so the only probe that proves a usable account is the network call `agy models`. Running that during provider enumeration would hide `antigravity/*` on a transient failure, producing the very `No models match pattern` warning the persisted roster exists to prevent.
+
 ## 0.7.16
 
 - Derive `--effort` support from the catalog instead of a vendor pattern. The previous `/^gpt-oss-/` rule emitted exactly the argv agy rejects: `--model gpt-oss-120b-medium --effort high` fails with "conflicts with --effort=high", while `claude-opus-5-5` accepts the flag. A tier-qualified id now never receives `--effort`, and a base slug only receives a tier its catalog lists.

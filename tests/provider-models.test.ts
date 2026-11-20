@@ -151,6 +151,41 @@ describe("provider catalog", () => {
     assert.equal(entries[0].efforts, undefined);
   });
 
+  it("normalizes root schema composition instead of discarding arguments", async () => {
+    const { projectBridgeTools } = await import("../extensions/lib/provider.js");
+    const schemaOf = (parameters: unknown) =>
+      projectBridgeTools([{ name: "probe", parameters }])[0].inputSchema;
+
+    // A nullable wrapper is unambiguous: keep the real object branch.
+    assert.deepEqual(
+      schemaOf({ oneOf: [{ type: "object", properties: { a: { type: "string" } }, required: ["a"] }, { type: "null" }] }),
+      { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+    );
+    assert.deepEqual(schemaOf({ anyOf: [{ type: "object", properties: { a: { type: "string" } } }, { type: "null" }] }), {
+      type: "object",
+      properties: { a: { type: "string" } },
+    });
+    // allOf of objects merges into one object schema.
+    assert.deepEqual(
+      schemaOf({
+        allOf: [
+          { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+          { type: "object", properties: { b: { type: "number" } }, required: ["b"] },
+        ],
+      }),
+      { type: "object", properties: { a: { type: "string" }, b: { type: "number" } }, required: ["a", "b"] },
+    );
+    // A genuinely ambiguous root keeps its branches: emptying it would tell the
+    // model the tool takes no arguments and make every call fail.
+    const ambiguous = { oneOf: [{ type: "object", properties: { a: { type: "string" } } }, { type: "object", properties: { b: { type: "number" } } }] };
+    assert.deepEqual(schemaOf(ambiguous), ambiguous);
+    // Nested composition is a valid object root and is left untouched.
+    const nested = { type: "object", properties: { x: { oneOf: [{ type: "string" }, { type: "null" }] } } };
+    assert.deepEqual(schemaOf(nested), nested);
+    // Non-object values still degrade to the safe no-arg form.
+    assert.deepEqual(schemaOf("not-a-schema"), { type: "object", properties: {} });
+  });
+
   it("projects bridge tools with exclusions and safe names", async () => {
     const { projectBridgeTools, bridgeToolsFingerprint, collectParkedDeliveries } = await import(
       "../extensions/lib/provider.js"

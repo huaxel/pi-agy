@@ -1,30 +1,65 @@
 # @juanbenjumea/pi-agy
 
-Use Google's Antigravity CLI (`agy`) from Pi. This package adds two ways to work:
-
-- **Delegate a task** to `agy` with Pi tools such as `agy_execute`, or the `/agy` command.
-- **Use agy as a Pi model provider** through `antigravity/*` in `/model`, with an optional bridge to Pi tools.
-
-Install with:
+Use Google's Antigravity models from inside Pi — no API key, no second window. If `agy` is installed and signed in, its models appear in your `/model` picker like any other model, and you can hand whole tasks to it on demand.
 
 ```bash
 pi install npm:@juanbenjumea/pi-agy
 ```
 
-Requires Node.js >= 20.3 and an installed, authenticated `agy` CLI. Existing agy OAuth credentials are used; this package does not manage authentication.
+**Needs:** Node.js >= 20.3 and an installed, signed-in `agy` CLI. It reuses the credentials `agy` already has; this package never asks for a key or manages your login.
 
-## Delegate tasks
+## What you get
 
-`agy_execute` runs a task in `plan`, `accept-edits`, or `sandbox` mode. It streams progress and returns the result, quota details when available, and a summary of newly changed files. Runs are serialized per working directory; timeouts and cancellations stop the agy process tree.
+- **Your existing agy models, in Pi.** Pick `antigravity/<model>` in `/model` and Pi is talking to Antigravity. Nothing to configure, nothing to paste.
+- **Models that stay current.** The list comes from `agy models` at startup and every time the picker opens. When Google ships a new model, it shows up — you don't wait for a package update.
+- **Real control where it matters.** While Pi can run a shell or write a file, agy's own equivalents are denied for that session, so those actions land in Pi — with your permissions, approval prompts, and diffs. Verified to hold even with agy's permission bypass on.
+- **Conversations that behave.** Multi-turn continuity, attached images, a warm process per project — not a fresh cold start on every message.
+- **Model tiers without clutter.** A family with several thinking levels is one picker entry with a level toggle (`low` → `xhigh`), not five near-identical rows.
+- **Delegation when you want it.** `agy_execute` and `/agy` hand a task to agy as a subprocess, with optional background runs and quota reporting.
 
-Useful options include:
+Quick start: install, make sure `agy` is signed in, open `/model`, choose `antigravity/*`. If anything looks wrong, `/agy doctor`.
 
-- `model` and `agent` to select a model or configured agy agent
-- `conversation_id`, `continue`, and `new_session` to resume work
-- `background=true` to return a handle, then use `agy_tasks` to poll, collect, or cancel
-- `context=summary|recent` to optionally pass bounded Pi conversation context (default: none)
+## Two ways to use it
 
-The `/agy` command runs tasks from Pi's TUI and can also list agents, inspect quota, diagnose setup, and select saved conversations. Its model picker refreshes the full concrete ID list from `agy models` each time it opens; alias shortcuts remain available. Discovery failures show the reason and mark cached choices as unverified. Use `model=<id>` for an exact CLI model ID; bare aliases such as `sonnet` still work. For example:
+Either one works alone; both work together.
+
+| | Use it as | Best for |
+|---|---|---|
+| **Native models** | A Pi provider (`antigravity/*`) | Everyday chat and coding where you want Antigravity's models driving Pi's tools |
+| **Delegation** | `agy_execute` / `/agy` | Handing off a self-contained job, long background runs, second opinions |
+
+## Native models: `antigravity/*`
+
+- **Always current** — discovered from `agy models` at startup and on each picker open. No hardcoded model list to go stale.
+- **Fails honestly** — a failed refresh keeps the last good catalog and `/agy doctor` says why. Before the first successful discovery the picker is empty rather than inventing names. Cache-only refreshes never run the CLI.
+- **Effort tiers, catalog-driven** — a family offering several tiers is one entry with a toggle; the chosen level becomes `--effort`. Single-tier families keep agy's exact qualified id and never get `--effort`, because agy rejects that combination outright.
+- **Persistent turns** — one warm `agy` process per working directory, and attached images are staged where agy can read them.
+- **Real Pi integration** — by default a localhost MCP bridge gives agy read-only Pi context and lets it call your active Pi tools through Pi's normal approval flow. Switch it off with `"providerBridge": false` or `/agy bridge off`.
+
+  What that does and doesn't cover: shell and file writes are the strict part. While Pi exposes `bash`/`write`/`edit`, agy's own equivalents are denied for the session, so those calls can only happen through Pi — and that deny holds even under `--dangerously-skip-permissions`, which is on by default. Reads are not denied: agy opens and lists files itself, steered toward Pi's tools by guidance rather than blocked. So the bridge controls the operations that change your workspace, not every action agy takes, and agy still runs its own tool loop.
+
+Your last observed model list is cached in `agy-provider-models.json` beside `agy-config.json`. It holds only ids `agy models` actually returned, and exists because Pi resolves configured model scopes at startup — without it, a configured `antigravity/<id>` reports `No models match pattern` before the provider has discovered anything.
+
+> Don't install `@estebanforge/pi-antigravity-bridge` alongside this package — both register the `antigravity` provider and the `/agy` command.
+
+## Delegation: hand a task to agy
+
+`agy_execute` runs a task in `plan`, `accept-edits`, or `sandbox` mode, streams progress, and returns the result plus quota details and a summary of newly changed files.
+
+| What you need | How |
+|---|---|
+| Pick a model or configured agent | `model`, `agent` |
+| Pin one exact model id | `model=<id>` |
+| Continue earlier work | `conversation_id`, `continue`, `new_session` |
+| Long runs without steering | `background=true`, then `agy_tasks` to poll, collect, or cancel |
+| Bring Pi context along | `context=summary` or `context=recent` (default: none) |
+| Inspect agents, sessions, quota | `agy_agents`, `agy_history`, `agy_usage` |
+
+Runs are serialized per working directory, and timeouts or cancellations stop the whole agy process tree.
+
+### The `/agy` command
+
+Runs tasks straight from the TUI — no second LLM turn, and what you confirm is what runs.
 
 ```text
 /agy plan flash investigate the failing tests
@@ -34,33 +69,23 @@ The `/agy` command runs tasks from Pi's TUI and can also list agents, inspect qu
 /agy doctor
 ```
 
-Aliases are resolved against the live catalog instead of a shipped table: an alias names a family and optionally a tier (`sonnet`, `flash-low`, `pro-high`), and it matches an id whose hyphen-separated tokens appear contiguously, with a tier only as the id's trailing tokens. A family that ships no tier variants at all answers its tier aliases with its top id, so a flagship named without a tier still serves `pro`. A tier the vendor retires stops resolving and fails with an actionable message rather than quietly substituting a neighbour; the executed concrete id is always reported in the run receipt.
+Also: `/agy agents`, `/agy usage`, `/agy quota`, `/agy bridge on|off|status`.
 
-In `accept-edits` mode, Pi confirms before writes. agy's own permission behavior is controlled by its configuration and the package's `agy-config.json` settings below.
+The model picker refreshes the full concrete id list each time it opens, with alias shortcuts alongside. Discovery failures show the reason and mark cached choices as unverified.
 
-## Use agy as a Pi model
+### How aliases resolve
 
-The package registers an `antigravity` provider. Select discovered models as `antigravity/<model>` in Pi's `/model` picker. Models refresh automatically from `agy models` at session startup and whenever Pi opens the model picker (Pi 1.5.2 native refresh). New model names need no package update. Failed discovery keeps the last good catalog; before the first successful discovery the picker is empty rather than a stale built-in list, and `/agy doctor` reports why. Reopen `/model` after signing in to retry. Cache-only refreshes never run the CLI.
+Aliases resolve against your live catalog, never a shipped table. An alias is a family plus an optional tier — `sonnet`, `flash-low`, `pro-high` — and matches an id containing those tokens contiguously, with a tier only as trailing tokens.
 
-The last observed roster is also cached in `agy-provider-models.json` next to `agy-config.json`. That file holds only ids `agy models` actually returned, and it exists because Pi resolves configured model scopes at startup: without it, a configured `antigravity/<id>` reports `No models match pattern` for a model that plainly exists, since the provider simply had not discovered anything yet.
+- A family with no tiers answers its tier aliases with its top id, so a flagship named without a tier still serves `pro`.
+- A retired tier stops resolving and fails with an actionable message instead of quietly substituting a neighbour.
+- The concrete id that actually ran is always reported in the run receipt.
 
-A family that ships several effort tiers appears as one picker entry with a thinking-level toggle, including `xhigh` and `max` where agy offers them, and `--effort` carries the chosen tier. Families with a single tier, or none, keep agy's exact qualified id and never receive `--effort` — agy rejects that combination as a conflict.
-
-Provider turns use a persistent agy process per working directory and can stage attached images for agy to read. By default, an MCP bridge gives agy read-only Pi context and lets it call active Pi tools through Pi's normal permission and approval flow. Set `"providerBridge": false` in `agy-config.json` to disable the bridge.
-
-Do not install `@estebanforge/pi-antigravity-bridge` alongside this package: both register the `antigravity` provider and `/agy` command.
-
-### Bridge input limits
-
-Authenticated bridge POSTs retain a **1 MiB UTF-8 body cap** and allow at most **10,000 object properties plus array elements** across the entire parsed JSON-RPC body, including metadata, with at most **64 container levels** (root container = level 1). Scalar string content counts toward bytes, not structural elements. Overly wide/deep requests return HTTP **413** before SDK validation, session allocation or tool parking; oversized byte streams retain the existing connection-close behavior. Authentication and localhost Host checks happen first, but authentication alone is not a complexity budget.
-
-The bridge uses the SDK's low-level `Server`, not the high-level `McpServer` tool validator, so it enforces these local structural limits rather than relying on `maxToolInputElements`. These are defensive input bounds, not a guarantee against all resource exhaustion.
-
-The SDK dependency floor is `^1.32.2`; the repository lock qualifies SDK 1.32.2, Zod 4.6.7 and body-parser 2.4.0. A library consumer resolves its own dependency graph: the SDK still permits older Zod through `^3.25 || ^4.0`, and overrides in this package would not enforce a consumer's resolutions. Audit the actual consumer tree; a patched repository lock is not a universal downstream security guarantee.
+In `accept-edits` mode Pi confirms before writes. agy's own permission behaviour is controlled by its config and by `skipPermissions` below.
 
 ## Configuration
 
-Optional file: `$PI_CODING_AGENT_DIR/agy-config.json` (default `~/.pi/agent/agy-config.json`). For example:
+Optional file: `$PI_CODING_AGENT_DIR/agy-config.json` (default `~/.pi/agent/agy-config.json`).
 
 ```json
 {
@@ -70,24 +95,33 @@ Optional file: `$PI_CODING_AGENT_DIR/agy-config.json` (default `~/.pi/agent/agy-
 }
 ```
 
-`defaultModel` sets the default for delegated tasks. `skipPermissions` controls agy's permission-bypass flag for `accept-edits` runs; set it to `false` to retain agy's checks. `providerBridge` toggles the provider's Pi-tool bridge.
+- `defaultModel` — default model for delegated tasks. Always wins when set.
+- `defaultModelCommand` — shell command whose stdout is a model alias, for quota-aware defaults. Output is validated and cached for a few minutes. Runs verbatim via `sh -c`, so only point it at something you control.
+- `quotaBalancing` — with no default configured, flip to `sonnet` once the Gemini group carried most recent work (≥ 3 conversations in 24h at > 75% share). Tune with `AGY_DEFAULT_MODEL_WINDOW_HOURS`, `AGY_DEFAULT_MODEL_MIN_SESSIONS`, `AGY_DEFAULT_MODEL_GEMINI_SHARE`. Unreadable usage means no signal, never an error.
+- `skipPermissions` — agy's permission-bypass flag for `accept-edits` runs, default `true`. Set `false` to keep agy's own checks; note agy's print mode has no interactive approval path, so restricted operations may then simply fail.
+- `providerBridge` — the provider's Pi-tool bridge, default `true`.
+
+Resolution order: `defaultModel` → `defaultModelCommand` → `quotaBalancing` → built-in fallback.
+
+## Notes for the curious
+
+- **The bridge is local and locked down.** It listens on `127.0.0.1` only, requires a per-process secret header, and caps each authenticated request at 1 MiB and 10,000 structural elements across 64 levels, rejecting oversized input before any session or tool work happens.
+- **Dependencies are pinned deliberately.** The MCP SDK floor is `^1.32.2`, qualified here against SDK 1.32.2, Zod 4.6.7 and body-parser 2.4.0. A consumer resolves its own graph, so audit your own tree — a patched lockfile here isn't a guarantee downstream.
+- **Turns in flight are serialized** per directory, so a delegated run can never race a provider turn in the same project.
 
 ## Development
 
-Development tests are qualified against the exact Pi SDK fixture version 1.5.2, which requires Node >=22.19.0; qualification ran on Node 22.23.4. The resolved development graph is qualified; embedded Undici is not independently attested.
-
 ```bash
-npm test
+npm test              # full suite
 npm run typecheck
-npm run test:live      # read-only, no inference
-npm run test:bridge    # billable: deny-rule and park-path evidence
+npm run test:live     # read-only, no inference
+npm run test:bridge   # billable: deny-rule and park-path evidence
+npm run test:provider # billable: two turns, usage and reuse
 ```
 
-With an installed agy CLI, `npm run test:live` runs read-only integration checks without starting an inference turn.
+`test:live` only reads your installed CLI. `test:bridge` proves the `--settings` deny document really stops agy's built-in shell tool — with a positive control, so a pass can't mean the model just declined to act — and reports how many bridged calls one turn produces. `test:provider` spends two short turns on a budget alias (`npm run test:provider -- <model-id>`) to assert streamed text, the conversation id, native usage, and that a reused process reports a delta rather than cumulative counters.
 
-`npm run test:bridge` covers the two behaviours that need a real child on the loopback bridge: that the `--settings` deny document actually stops agy's built-in shell tool (proven with a positive control, so a passing run cannot be the model declining to act), and how many bridged calls a single turn produces. Note that agy's tool loop is serial — it issues one call, waits, then issues the next — so the park micro-batch never sees concurrent calls in practice and stays covered by deterministic driver tests instead.
-
-`npm run test:provider` is the one deliberately billable check: it spends two short turns on a budget alias of your choosing (`npm run test:provider -- <model-id>`), keeps the child alive between them, and asserts streamed text, the conversation id, native usage, and that a reused process reports the second turn as a delta rather than the session's cumulative counters. It runs without agy's permission bypass, so a tool call would be escalated rather than silently executed.
+Tests are qualified against the Pi SDK fixture at exactly 1.5.2, which needs Node >= 22.19.0 (ran on 22.23.4).
 
 ## License
 

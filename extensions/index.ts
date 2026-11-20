@@ -112,9 +112,24 @@ function registerAgyProvider(pi: ExtensionAPI): void {
     id: AGY_PROVIDER_ID,
     name: "Antigravity (agy)",
     baseUrl,
-    // agy owns authentication. Pi must regard this ambient CLI provider as
-    // configured so refresh can recover after the user signs in to agy.
-    auth: { apiKey: { name: "Antigravity CLI", resolve: async () => ({ auth: { apiKey: "not-used" } }) } },
+    // agy owns authentication, and this provider is deliberately configured
+    // unconditionally rather than gated on an availability probe.
+    //
+    // There is no cheap signed-in signal to gate on: unlike `claude auth
+    // status`, agy exposes no auth subcommand, and it keeps credentials in an
+    // opaque state file rather than anything meant to be read. The only probe
+    // that proves a usable account is `agy models`, which is a network call.
+    // Running that during provider enumeration would hide antigravity/* on a
+    // transient failure — turning a working session into `No models match
+    // pattern` — which is the exact failure the persisted roster exists to
+    // prevent. A missing or signed-out CLI therefore surfaces where it belongs:
+    // an empty picker, a `/agy doctor` line, and a turn error that names it.
+    auth: {
+      apiKey: {
+        name: "Antigravity CLI",
+        resolve: async () => ({ auth: { apiKey: "not-used" } }),
+      },
+    },
     getModels: () => models,
     async refreshModels(context) {
       const signal = AbortSignal.any([context.signal, shutdown.signal]);

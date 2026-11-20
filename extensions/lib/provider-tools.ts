@@ -47,6 +47,78 @@ function jsonClone(value: unknown): Record<string, unknown> | undefined {
   }
 }
 
+const EMPTY_INPUT_SCHEMA = { type: "object", properties: {} } as const;
+
+function isObjectSchema(value: Record<string, unknown>): boolean {
+  return value.type === "object" && typeof value.properties === "object" && value.properties !== null;
+}
+
+/**
+ * Normalize a Pi tool schema for MCP `inputSchema`, which must be an object.
+ *
+ * Root-level composition used to be discarded wholesale, which told the model a
+ * tool took no arguments at all and made every call fail. Only the unambiguous
+ * wrappers are unwrapped:
+ *
+ * - `oneOf`/`anyOf` with a single non-null branch → that branch;
+ * - `allOf` of object schemas → merged properties and required lists.
+ *
+ * Anything else is passed through unchanged rather than replaced with an empty
+ * schema: a genuinely ambiguous root (`oneOf` of two different objects) still
+ * carries real information for the model, whereas `{properties: {}}` actively
+ * misleads it. Only a non-object value becomes the empty form.
+ */
+export function normalizeBridgeInputSchema(value: unknown): Record<string, unknown> {
+  const cloned = jsonClone(value);
+  if (!cloned) return { ...EMPTY_INPUT_SCHEMA };
+  const normalized = unwrapRootComposition(cloned, 0);
+  return normalized ?? cloned;
+}
+
+function unwrapRootComposition(
+  schema: Record<string, unknown>,
+  depth: number,
+): Record<string, unknown> | undefined {
+  if (depth > 8) return undefined;
+  if (isObjectSchema(schema)) return schema;
+  const merge = (branches: unknown[]): Record<string, unknown> | undefined => {
+    const properties: Record<string, unknown> = {};
+    const required = new Set<string>();
+    for (const branch of branches) {
+      const record = jsonClone(branch);
+      if (!record || !isObjectSchema(record)) return undefined;
+      Object.assign(properties, record.properties as Record<string, unknown>);
+      if (Array.isArray(record.required)) {
+        for (const key of record.required) if (typeof key === "string") required.add(key);
+      }
+    }
+    return {
+      type: "object",
+      properties,
+      ...(required.size > 0 ? { required: [...required] } : {}),
+    };
+  };
+  if (Array.isArray(schema.allOf)) {
+    const merged = merge(schema.allOf);
+    if (merged) return merged;
+  }
+  for (const key of ["oneOf", "anyOf"] as const) {
+    const branches = schema[key];
+    if (!Array.isArray(branches)) continue;
+    // A nullable variant is the common case: one real object plus `null`.
+    const concrete = branches.filter((branch) => {
+      const record = jsonClone(branch);
+      return !(record && record.type === "null");
+    });
+    if (concrete.length !== 1) continue;
+    const only = jsonClone(concrete[0]);
+    if (!only) continue;
+    const unwrapped = unwrapRootComposition(only, depth + 1);
+    if (unwrapped) return unwrapped;
+  }
+  return undefined;
+}
+
 /**
  * Project Pi tools into bridge definitions: exclude self-delegation,
  * sanitize MCP names, drop unserializable schemas. First-seen wins on
@@ -62,13 +134,7 @@ export function projectBridgeTools(sources: ProviderToolSource[]): BridgeToolDef
     if (seenPiNames.has(source.name)) continue;
     const name = toSafeBridgeName(source.name);
     if (seenNames.has(name)) continue;
-    // MCP requires an object root; anything else degrades to no-arg form
-    // instead of shipping a schema agy cannot validate against.
-    const cloned = jsonClone(source.parameters);
-    const inputSchema =
-      cloned && (cloned as { type?: unknown }).type === "object" && typeof (cloned as { properties?: unknown }).properties === "object"
-        ? (cloned as Record<string, unknown>)
-        : { type: "object", properties: {} };
+    const inputSchema = normalizeBridgeInputSchema(source.parameters);
     seenPiNames.add(source.name);
     seenNames.add(name);
     defs.push({
