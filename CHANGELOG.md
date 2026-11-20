@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.15
+
+- Resolve every model alias against the live `agy models` catalog; no production path ships a model id, a per-family regex, or a fallback roster, so a renamed or new family needs no package update. An unresolvable alias now fails with the alias name, the exact recovery, and the discovered-catalog requirement instead of launching a stale id.
+- Match aliases structurally (family, optional trailing tier) and let a family that ships no tier variants answer its tier aliases with its top id, so a flagship named without a tier still serves `pro`. A tier-aware family keeps failing loudly for a retired tier instead of substituting a neighbour, and `xhigh` counts as a tier.
+- Report native provider usage: validate `agy` token counts, difference the cumulative `result.usage` of a persistent child so consecutive turns are not double-counted, and normalize to Pi's `Usage` shape (`cache_read` excluded from input, thinking reported as reasoning).
+- Stream agy thinking into Pi's TUI as thinking blocks and deltas, separate from tool/step progress.
+- Send only the new transcript delta to a resumed agy conversation instead of replaying the whole prompt.
+- Deny agy's shadowed built-in tools through a session `--settings` document when the Pi bridge owns the same capability.
+- Batch parallel bridged MCP tool calls inside a short window so Pi answers them in one turn instead of one turn per call.
+- Full 510-test suite, typecheck, live smoke against an authenticated agy CLI, and package checks pass.
+
 ## 0.7.14
 
 - Keep model discovery off Pi's session-start critical path and load the MCP bridge only when needed.
