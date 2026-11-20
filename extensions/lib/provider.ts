@@ -52,6 +52,7 @@ import type { McpBridgeHandle } from "./provider-mcp.js";
 import type { BridgeToolDef } from "./provider-tools.js";
 import { getSession, saveSession } from "./sessions.js";
 import { AgyProviderDriver, PROVIDER_TURN_TIMEOUT_MS } from "./provider-driver.js";
+import type { AgySubagentSummary } from "./subagents.js";
 import type { NormalizedProviderUsage } from "./provider-usage.js";
 export {
   diffAgyUsage,
@@ -413,6 +414,8 @@ export interface ProviderStatus {
     recycles: number;
     lastRecycleReason?: string;
     boundConversationId?: string;
+    /** Live aggregate of the active turn's subagents, when any launched. */
+    subagents?: AgySubagentSummary;
   };
   /** Bridge description, when a bridge is running for the directory. */
   bridge?: { toolCount: number; pendingResults: number; listening: boolean };
@@ -454,6 +457,7 @@ export function getProviderStatus(dir: string): ProviderStatus {
             recycles: snapshot.stats.recycles,
             lastRecycleReason: snapshot.stats.lastRecycleReason,
             boundConversationId: snapshot.boundConversationId,
+            subagents: snapshot.subagents,
           }
         : undefined,
       bridge: description

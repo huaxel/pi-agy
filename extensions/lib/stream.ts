@@ -82,10 +82,17 @@ export interface AgyRunResult {
   subagents?: AgyObservedSubagent[];
 }
 
+/** Structured state that a one-line label cannot carry. */
+export interface AgyProgressMeta {
+  /** Bounded subagent observations after the step that produced this update. */
+  subagents?: AgyObservedSubagent[];
+}
+
 export type AgyProgressHandler = (
   message: string,
   /** "activity" = real agy work (tool step or response text); "status" = lifecycle chatter. */
   kind?: "status" | "activity",
+  meta?: AgyProgressMeta,
 ) => void;
 
 export function parseStreamLine(line: string): AgyStreamLine | null {

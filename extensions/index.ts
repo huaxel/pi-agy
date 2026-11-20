@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { registerAgyCommand } from "./commands.js";
 import { closeProviderDrivers } from "./lib/provider.js";
+import { formatLiveBackgroundStatus } from "./lib/background.js";
 import { getBackgroundRunner, registerAgyTools } from "./tools.js";
 
 export { getBackgroundRunner, resolveAgyMode } from "./tools.js";
@@ -36,6 +37,44 @@ import {
 import { runPreflightCommand } from "./lib/spawn.js";
 
 export { truncate } from "./lib/output.js";
+
+type StatusUi = { setStatus?: (key: string, text: string | undefined) => void };
+
+/**
+ * Footer handle for background-run visibility. Doctor and provider turns use
+ * their own keys, so this one only ever reports delegated work.
+ */
+let backgroundUi: StatusUi | undefined;
+
+function setBackgroundStatus(text: string | undefined): void {
+  try {
+    backgroundUi?.setStatus?.("agy-bg", text);
+  } catch {
+    // Status updates are best effort and must never disrupt a run.
+  }
+}
+
+/**
+ * One running task is the honest summary; more than one says so and names the
+ * newest. Terminal tasks leave the footer as soon as they settle, because a
+ * finished run has nothing live to report.
+ */
+function refreshBackgroundStatus(): void {
+  let running: ReturnType<ReturnType<typeof getBackgroundRunner>["list"]> = [];
+  try {
+    running = getBackgroundRunner().list().filter((task) => task.state === "running");
+  } catch {
+    setBackgroundStatus(undefined);
+    return;
+  }
+  const newest = running[running.length - 1];
+  if (!newest) {
+    setBackgroundStatus(undefined);
+    return;
+  }
+  const live = formatLiveBackgroundStatus(newest) ?? undefined;
+  setBackgroundStatus(running.length > 1 ? `${live} (+${running.length - 1} more)` : live);
+}
 
 /**
  * Register agy-backed models in Pi's global `/model` picker as
@@ -71,6 +110,7 @@ function registerAgyProvider(pi: ExtensionAPI): void {
   pi.on?.("session_shutdown", () => {
     setLiveStatus(undefined);
     activeUi = undefined;
+    backgroundUi = undefined;
     shutdown.abort();
   });
   const streamSimple = createAgyStreamSimple(
@@ -178,6 +218,8 @@ function registerAgyProvider(pi: ExtensionAPI): void {
   pi.on?.("session_start", (_event, ctx) => {
     if (ctx.hasUI && typeof ctx.ui?.setStatus === "function") {
       activeUi = ctx.ui;
+      backgroundUi = ctx.ui;
+      refreshBackgroundStatus();
     }
     const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(10_000)]);
     // Keep provider discovery off Pi's session-start critical path. The model
@@ -219,4 +261,11 @@ export default function piAgyExtension(pi: ExtensionAPI) {
   }
 
   registerAgyTools(pi);
+  // A background run outlives the tool call that started it, so the footer is
+  // the only place its progress is visible without polling agy_tasks.
+  try {
+    getBackgroundRunner().subscribe(refreshBackgroundStatus);
+  } catch {
+    // Visibility is additive; delegation must work without it.
+  }
 }

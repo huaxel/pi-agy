@@ -15,6 +15,7 @@ import { getProviderCatalogProvenance } from "./provider-catalog-store.js";
 import { canonicalDir, getDirLockPath } from "./lock.js";
 import { getProviderStatus } from "./provider.js";
 import { getDefaultStorePath, getHistory } from "./sessions.js";
+import { formatSubagentCounts } from "./subagents.js";
 import { detectVerifyCommand } from "./verify.js";
 
 export type AgyDoctorStatus = "ok" | "info" | "warn" | "error";
@@ -335,6 +336,10 @@ async function providerCheck(cwd: string, signal?: AbortSignal): Promise<AgyDoct
           ? "bridge started, listener unavailable"
           : "bridge configured, not started");
     if (status.driver && status.driver.turns > 0) parts.push("provider used");
+    // Only while a turn is live: a finished turn's children are history.
+    if (status.driver?.subagents && status.driver.state === "running") {
+      parts.push(formatSubagentCounts(status.driver.subagents));
+    }
     if (status.diagnostics?.promptMode) {
       parts.push(`last prompt ${status.diagnostics.promptMode}${status.diagnostics.promptFallbackReason ? ` (${status.diagnostics.promptFallbackReason})` : ""}`);
     }

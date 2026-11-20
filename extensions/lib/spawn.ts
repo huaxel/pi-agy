@@ -176,6 +176,8 @@ export async function runPreflightCommand(
 import { StringDecoder } from "node:string_decoder";
 
 import { buildAgyArgs } from "./args.js";
+import { collectAgyWarnings } from "./stderr.js";
+import { AGY_AUTH_PROGRESS, AGY_AUTH_RECOVERY, isAgyAuthFailure, withAuthRecovery } from "./auth.js";
 import {
   accumulateRunResult,
   appendStreamChunk,
@@ -269,8 +271,25 @@ function spawnAgyInternal(
       processStdoutText(decoder.write(d));
     });
 
+    const stderrWarnings = new Set<string>();
+    let stderrWarningBuffer = "";
+    let authRequired = false;
     child.stderr.on("data", (d: Buffer) => {
       stderrBytes = appendBounded(stderr, stderrBytes, d);
+      // agy's own warnings change what the run actually did, so report them as
+      // lifecycle status rather than leaving them in the failure-only tail.
+      // They are deliberately not "activity": they must not suppress a
+      // transient-failure retry that has not done real work yet.
+      const collected = collectAgyWarnings(stderrWarningBuffer + d.toString("utf8"), stderrWarnings);
+      stderrWarningBuffer = collected.buffer;
+      for (const warning of collected.warnings) onProgress?.(`agy: ${warning}`, "status");
+      if (collected.authRequired && !authRequired) {
+        // The CLI is waiting on a browser sign-in that cannot happen here, so
+        // stop now instead of burning the whole print timeout on it.
+        authRequired = true;
+        onProgress?.(AGY_AUTH_PROGRESS, "status");
+        killProcessTree(child);
+      }
     });
 
     let settled = false;
@@ -320,6 +339,11 @@ function spawnAgyInternal(
         // Terminal status is authoritative when present. agy can emit an
         // ERROR envelope with response: "" and even exit 0; response
         // completeness must never turn that failed turn into success.
+        if (authRequired || isAgyAuthFailure(finalized.terminal_error) || isAgyAuthFailure(err)) {
+          reject(withConversationId(AGY_AUTH_RECOVERY, finalized));
+          return;
+        }
+
         const terminalFailure = terminalFailureMessage(finalized, err);
         if (terminalFailure) {
           reject(withConversationId(terminalFailure, finalized));
@@ -397,7 +421,8 @@ function terminalFailureMessage(runResult: AgyRunResult, stderr: string): string
   if (detail) message += `: ${detail}`;
   const stderrDetail = stderr.trim().slice(0, 2_000);
   if (stderrDetail && !message.includes(stderrDetail)) message += `\n${stderrDetail}`;
-  return message;
+  // An ERROR envelope can carry the auth detail without a stderr prompt.
+  return withAuthRecovery(message);
 }
 
 function withConversationId(message: string, runResult: AgyRunResult): Error {
@@ -417,7 +442,10 @@ function processStreamLine(
   const next = accumulateRunResult(parsed, current);
   const activity = isActivityProgress(parsed);
   const progress = formatStepProgress(parsed);
-  if (progress) onProgress?.(progress, activity ? "activity" : "status");
-  else if (activity) onProgress?.("agy: working…", "activity");
+  // The label loses shape (how many children are still running); the aggregate
+  // travels beside it so the footer and status can say so without re-parsing.
+  const meta = next.subagents && next.subagents.length > 0 ? { subagents: next.subagents } : undefined;
+  if (progress) onProgress?.(progress, activity ? "activity" : "status", meta);
+  else if (activity) onProgress?.("agy: working…", "activity", meta);
   return next;
 }

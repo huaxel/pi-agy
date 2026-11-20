@@ -32,6 +32,7 @@ import {
 } from "./mcp-transport.js";
 
 import { getDefaultConfigPath } from "./config.js";
+import { truncate } from "./output.js";
 import { loadProviderCatalogCache } from "./provider-catalog-store.js";
 import { isBridgeInputWithinBudget } from "./bridge-input-budget.js";
 import type { BridgeToolDef } from "./provider-tools.js";
@@ -60,6 +61,19 @@ export const POLL_TOOL_NAME = "bridge_poll_result";
 export const DEFAULT_PARK_ESCALATE_MS = 20_000;
 const BRIDGE_MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 1024 * 1024;
+/**
+ * Characters of a Pi tool result relayed to agy. The bridge bounds what agy
+ * sends in, so it bounds what it hands back: a tool that returns megabytes
+ * would otherwise land whole in agy's context (and in the driver's stream).
+ * `truncate` keeps head and tail and names how much it dropped, so an agent
+ * can narrow the call instead of silently reading a cut payload.
+ */
+export const MAX_BRIDGED_RESULT_CHARS = 64_000;
+
+/** Relay-bound a Pi tool result; the marker distinguishes a cut payload from real content. */
+function boundedResultText(text: string): string {
+  return truncate(text, MAX_BRIDGED_RESULT_CHARS);
+}
 const CATALOG_TTL_MS = 5 * 60_000;
 const HISTORY_LIMIT = 10;
 
@@ -397,7 +411,7 @@ export async function startMcpBridge(
         escalations.delete(callId);
         const result = record.result;
         return {
-          content: [{ type: "text" as const, text: result?.text ?? "(no output)" }],
+          content: [{ type: "text" as const, text: boundedResultText(result?.text ?? "(no output)") }],
           ...(result?.isError ? { isError: true as const } : {}),
         };
       }
@@ -466,7 +480,7 @@ export async function startMcpBridge(
           return toolText("Pi turn is not awaiting tool calls; the call was not executed.", true);
         }
         return {
-          content: [{ type: "text" as const, text: parked.text }],
+          content: [{ type: "text" as const, text: boundedResultText(parked.text) }],
           ...(parked.isError ? { isError: true as const } : {}),
         };
       }

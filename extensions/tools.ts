@@ -30,7 +30,12 @@ import {
   type AgyMode,
 } from "./lib/execute.js";
 import { describeWhen, truncate } from "./lib/output.js";
-import { BackgroundTaskRunner, summarizeTaskPrompt } from "./lib/background.js";
+import {
+  BackgroundTaskRunner,
+  formatShortDuration,
+  summarizeTaskPrompt,
+} from "./lib/background.js";
+import { formatSubagentCounts, type AgySubagentSummary } from "./lib/subagents.js";
 import { renderAgyCall, renderAgyResult } from "./lib/render.js";
 import { getHistory, getSession } from "./lib/sessions.js";
 import { normalizeConversationSelection } from "./lib/request.js";
@@ -260,7 +265,9 @@ export function registerAgyTools(pi: ExtensionAPI): void {
           agent,
           timeoutMs,
           run: ({ onProgress, signal }) =>
-            executeAgyTask(executionOptions, signal, (progress) => onProgress(progress)).then(
+            executeAgyTask(executionOptions, signal, (progress, meta) =>
+              onProgress(progress, meta),
+            ).then(
               (result) => ({
                 text: result.text,
                 conversationId: result.details.conversation_id,
@@ -417,7 +424,8 @@ export function registerAgyTools(pi: ExtensionAPI): void {
       // details stay behind collect, so polling never bloats the transcript.
       const summarize = (task: {
         handle: string; dir: string; summary: string; model?: string; agent?: string;
-        state: string; startedAt: number; updatedAt: number; progress: string[];
+        state: string; startedAt: number; updatedAt: number; lastActivityAt: number; progress: string[];
+        subagents?: AgySubagentSummary;
         error?: string; conversationId?: string;
       }) => ({
         handle: task.handle,
@@ -428,6 +436,8 @@ export function registerAgyTools(pi: ExtensionAPI): void {
         state: task.state,
         startedAt: task.startedAt,
         updatedAt: task.updatedAt,
+        lastActivityAt: task.lastActivityAt,
+        subagents: task.subagents,
         progressTail: task.progress.slice(-3),
         error: task.error,
         conversationId: task.conversationId,
@@ -441,12 +451,17 @@ export function registerAgyTools(pi: ExtensionAPI): void {
             details: { dir: cwd, tasks: [] },
           };
         }
+        const now = Date.now();
         const lines = tasks.map((task) => {
           const age = describeWhen(new Date(task.startedAt).toISOString());
           const latest = task.state === "running" && task.progress.length > 0
             ? ` · latest: ${task.progress[task.progress.length - 1]}`
             : "";
-          return `${task.handle} · ${task.state}${task.model ? ` · ${task.model}` : ""} · ${age} · ${task.summary}${latest}`;
+          // Only worth saying once the silence is longer than a normal step.
+          const quiet = task.state === "running" && now - task.lastActivityAt >= 60_000
+            ? ` · quiet ${formatShortDuration(now - task.lastActivityAt)}`
+            : "";
+          return `${task.handle} · ${task.state}${task.model ? ` · ${task.model}` : ""} · ${age} · ${task.summary}${latest}${quiet}`;
         });
         return {
           content: [{ type: "text", text: `background agy tasks for ${cwd}:\n${lines.join("\n")}` }],
@@ -457,7 +472,17 @@ export function registerAgyTools(pi: ExtensionAPI): void {
       if (action === "status") {
         const task = runner.get(params.handle);
         if (!task) throw new Error(`unknown background task '${params.handle}'`);
-        const elapsed = `${Math.round((Date.now() - task.startedAt) / 1000)}s`;
+        const now = Date.now();
+        const elapsed = formatShortDuration(now - task.startedAt);
+        // Elapsed says how long it has run; quiet says whether it is still
+        // doing anything. Without the second number a hung run and a busy one
+        // read the same.
+        const quiet = task.state === "running"
+          ? ` · last activity ${formatShortDuration(now - task.lastActivityAt)} ago`
+          : "";
+        const subagents = task.subagents
+          ? `\nsubagents: ${formatSubagentCounts(task.subagents)}`
+          : "";
         const progress = task.progress.length ? `\nrecent progress:\n${task.progress.slice(-5).join("\n")}` : "";
         const outcome = task.state === "running"
           ? ""
@@ -468,7 +493,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
         return {
           content: [{
             type: "text",
-            text: `${task.handle} · ${task.state} · elapsed ${elapsed} · ${task.summary}${progress}${outcome}${conversation}`,
+            text: `${task.handle} · ${task.state} · elapsed ${elapsed}${quiet} · ${task.summary}${subagents}${progress}${outcome}${conversation}`,
           }],
           details: { task: summarize(task) },
         };

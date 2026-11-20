@@ -361,13 +361,25 @@ describe("model catalog stability", () => {
     updateModelCatalog({ "flash-medium": "gemini-3.8-flash-medium" });
     const args = buildAgyArgs({
       prompt: "/dangerous --mode evil",
-      mode: "plan",
+      mode: "accept-edits",
       dir: "/tmp",
       timeout_ms: 60_000,
       stream: true,
     });
     assert.ok(args.includes("--disable-slash-commands"));
     assert.ok(args.includes("/dangerous --mode evil"));
+    // A plan run omits the flag (agy ignores --mode plan while expansion is
+    // disabled), and the prompt still travels as exactly one argv element.
+    const planArgs = buildAgyArgs({
+      prompt: "/dangerous --mode evil",
+      mode: "plan",
+      dir: "/tmp",
+      timeout_ms: 60_000,
+      stream: true,
+    });
+    assert.ok(!planArgs.includes("--disable-slash-commands"));
+    assert.equal(planArgs.filter((arg) => arg === "/dangerous --mode evil").length, 1);
+    assert.equal(planArgs.filter((arg) => arg === "plan").length, 1);
     resetModelCatalog();
   });
 });

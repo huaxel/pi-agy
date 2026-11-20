@@ -172,13 +172,42 @@ describe("buildAgyArgs", () => {
     assert.ok(!args.includes("--dangerously-skip-permissions"));
   });
 
-  it("disables slash command expansion in print mode", () => {
+  it("disables slash command expansion for task text", () => {
+    for (const prompt of ["/review everything", "/tmp/x is broken", "//comment-ish", "fix the build"]) {
+      const args = buildAgyArgs({ prompt, mode: "accept-edits", dir: "/tmp", timeout_ms: 60_000 });
+      assert.ok(args.includes("--disable-slash-commands"), `${prompt} must stay literal task text`);
+    }
+  });
+
+  it("keeps expansion on for plan runs so the mode applies", () => {
+    // agy 1.5.13 warns "`--mode plan` has no effect while slash command
+    // expansion is disabled" and runs the default mode instead, which turned
+    // every plan delegation into a writing one.
     const args = buildAgyArgs({
-      prompt: "/review everything",
+      prompt: "Plan the refactor",
       mode: "plan",
       dir: "/tmp",
       timeout_ms: 60_000,
     });
+    assert.ok(!args.includes("--disable-slash-commands"));
+    assert.ok(args.includes("--mode"));
+    assert.ok(args.includes("plan"));
+  });
+
+  it("lets the commands print mode answers reach agy", () => {
+    // Verified against agy 1.5.13: `agy -p "/help"` lists these and reports
+    // zero usage, so suppressing expansion would hide a zero-cost surface.
+    for (const prompt of ["/help", "/usage", "/quota", "/skills", "/plugin:list", "/config"]) {
+      const args = buildAgyArgs({ prompt, mode: "accept-edits", dir: "/tmp", timeout_ms: 60_000 });
+      assert.ok(
+        !args.includes("--disable-slash-commands"),
+        `${prompt} must reach agy as a command`,
+      );
+    }
+  });
+
+  it("keeps unknown slash commands literal", () => {
+    const args = buildAgyArgs({ prompt: "/goal ship it", mode: "accept-edits", dir: "/tmp", timeout_ms: 60_000 });
     assert.ok(args.includes("--disable-slash-commands"));
   });
 

@@ -26,6 +26,13 @@ import { StringDecoder } from "node:string_decoder";
 import type { ChildProcess } from "node:child_process";
 
 import { getSpawn, killProcessTree } from "./spawn.js";
+import { collectAgyWarnings } from "./stderr.js";
+import { AGY_AUTH_PROGRESS, AGY_AUTH_RECOVERY, isAgyAuthFailure } from "./auth.js";
+import {
+  formatSubagentCounts,
+  summarizeObservedSubagents,
+  type AgySubagentSummary as SubagentSummary,
+} from "./subagents.js";
 import {
   accumulateRunResult,
   appendStreamChunk,
@@ -107,6 +114,8 @@ export interface ProviderDriverStats {
 export interface ProviderDriverSnapshot {
   state: "idle" | "running" | "dead";
   pid?: number;
+  /** Aggregate of the live turn's subagent observations; absent when none. */
+  subagents?: SubagentSummary;
   boundConversationId?: string;
   stats: ProviderDriverStats;
   lifecycle: string[];
@@ -127,6 +136,13 @@ interface TurnPhase {
 
 /** Wall-clock cap for a suspended (parked) turn without Pi progress. */
 export const SUSPENDED_TURN_MAX_MS = 30 * 60_000;
+/**
+ * Silence tolerance for a live provider phase. This is not a step timeout:
+ * agy can legitimately emit nothing while one shell tool or one large edit
+ * runs, and the old flat ten-minute cap killed those turns while they were
+ * still working. A phase now fails on silence, so productive work survives.
+ */
+export const PROVIDER_TURN_INACTIVITY_MS = 15 * 60_000;
 /** Micro-batch window for collecting parallel bridged MCP tool calls into one Pi turn. */
 export const PROVIDER_PARK_BATCH_MS = 15;
 
@@ -154,6 +170,8 @@ interface ActiveTurn {
   /** Terminal envelope received during a park; owned until consumed or abandoned. */
   pendingTerminal?: { kind: "done"; end: DriverTurnEnd } | { kind: "error"; error: Error };
   timer?: NodeJS.Timeout;
+  /** Re-armed on every stream line: fires only on silence. */
+  inactivityTimer?: NodeJS.Timeout;
   suspendedTimer?: NodeJS.Timeout;
   onAbort?: () => void;
 }
@@ -174,6 +192,7 @@ export class AgyProviderDriver {
   private idleTimer?: NodeJS.Timeout;
   private readonly idleMs: number;
   private readonly parkBatchMs: number;
+  private readonly inactivityMs: number;
   private lineBuffer = "";
   private readonly decoder = new StringDecoder("utf8");
   /**
@@ -186,13 +205,45 @@ export class AgyProviderDriver {
   private primed = false;
   private static readonly MAX_PENDING_LINES = 64;
   private stderrTail = "";
+  private stderrWarningBuffer = "";
+  private readonly stderrWarnings = new Set<string>();
   private stats: ProviderDriverStats = { spawns: 0, turns: 0, reuses: 0, recycles: 0 };
   private lifecycle: string[] = [];
   private closed = false;
 
-  constructor(options?: { idleMs?: number; parkBatchMs?: number }) {
+  constructor(options?: { idleMs?: number; parkBatchMs?: number; inactivityMs?: number }) {
     this.idleMs = options?.idleMs ?? PROVIDER_DRIVER_IDLE_MS;
     this.parkBatchMs = options?.parkBatchMs ?? PROVIDER_PARK_BATCH_MS;
+    this.inactivityMs = options?.inactivityMs ?? PROVIDER_TURN_INACTIVITY_MS;
+  }
+
+  private clearInactivityTimer(turn: ActiveTurn): void {
+    if (turn.inactivityTimer) {
+      clearTimeout(turn.inactivityTimer);
+      turn.inactivityTimer = undefined;
+    }
+  }
+
+  /**
+   * Arm the silence watchdog for the current phase. Every parsed stream line
+   * re-arms it; a parked phase clears it because agy is waiting on Pi, not on
+   * itself.
+   */
+  private armInactivityTimer(turn: ActiveTurn): void {
+    this.clearInactivityTimer(turn);
+    if (this.closed) return;
+    const limit = Math.max(1, this.inactivityMs);
+    turn.inactivityTimer = setTimeout(() => {
+      turn.inactivityTimer = undefined;
+      if (this.active !== turn || turn.settled || turn.suspended) return;
+      const quiet = limit >= 60_000 ? `${Math.round(limit / 60_000)}m` : `${limit}ms`;
+      this.interruptTurn(
+        turn,
+        "timedOut",
+        `agy provider turn went quiet for ${quiet} with no stream activity; the child was stopped`,
+      );
+    }, limit);
+    (turn.inactivityTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   /**
@@ -258,6 +309,8 @@ export class AgyProviderDriver {
     const parks = turn.pendingParks;
     turn.pendingParks = [];
     turn.suspended = true;
+    // Pi owns the turn now; agy waiting on a parked tool is not silence.
+    this.clearInactivityTimer(turn);
     // Keep this deadline through terminal-awaiting-consumption too: a lost
     // Pi continuation must not hold the child, parks, images or driver forever.
     turn.suspendedTimer = setTimeout(() => {
@@ -301,6 +354,7 @@ export class AgyProviderDriver {
     if (turn.settled) {
       this.active = undefined;
       this.clearSuspendedTimer(turn);
+      this.clearInactivityTimer(turn);
       this.armIdleTimer();
     } else {
       this.settleError(turn, error);
@@ -373,6 +427,7 @@ export class AgyProviderDriver {
         this.interruptTurn(turn, "timedOut", "agy provider turn timed out");
       }, Math.max(1, Math.min(PROVIDER_TURN_TIMEOUT_MS, turn.timeoutMs)));
       (turn.timer as unknown as { unref?: () => void }).unref?.();
+      this.armInactivityTimer(turn);
     });
   }
 
@@ -388,6 +443,7 @@ export class AgyProviderDriver {
     return {
       state: this.child ? (this.active ? "running" : "idle") : "dead",
       pid: this.child?.pid,
+      subagents: summarizeObservedSubagents(this.active?.runResult.subagents),
       boundConversationId: this.boundConversationId,
       stats: { ...this.stats },
       lifecycle: [...this.lifecycle],
@@ -470,6 +526,12 @@ export class AgyProviderDriver {
     if (profile.settingsJson) args.push("--settings", profile.settingsJson);
     if (profile.bridgeDir) args.push("--add-dir", profile.bridgeDir);
     if (profile.imageRoot) args.push("--add-dir", profile.imageRoot);
+    // Transcript text is data, never CLI input. Without this, a turn whose
+    // message begins with one of agy's own commands fails outright: agy
+    // answers "/help is answered by the CLI itself and is unavailable with
+    // --input-format stream-json". With it, the text reaches the model.
+    // Verified against agy 1.5.13.
+    args.push("--disable-slash-commands");
     // Same flags as the former per-turn spawn, minus `-p`: turns arrive on stdin.
     args.push("--input-format", "stream-json", "--output-format", "stream-json");
 
@@ -490,6 +552,8 @@ export class AgyProviderDriver {
     this.pendingLines = [];
     this.primed = false;
     this.stderrTail = "";
+    this.stderrWarningBuffer = "";
+    this.stderrWarnings.clear();
     this.stats.spawns += 1;
     this.log(`spawn:${child.pid ?? "?"}:${resume ? "resume" : "fresh"}`);
 
@@ -508,7 +572,23 @@ export class AgyProviderDriver {
     });
     child.stderr?.on("data", (data: Buffer) => {
       if (generation !== this.generation) return;
-      this.stderrTail = (this.stderrTail + data.toString("utf8")).slice(-MAX_STDERR_TAIL_CHARS);
+      const text = data.toString("utf8");
+      this.stderrTail = (this.stderrTail + text).slice(-MAX_STDERR_TAIL_CHARS);
+      // agy warns on stderr when it ignores something we asked for (a mode it
+      // cannot honor, a model it cannot serve). Silence there hid a real
+      // divergence, so warnings become activity on the turn.
+      const collected = collectAgyWarnings(this.stderrWarningBuffer + text, this.stderrWarnings);
+      this.stderrWarningBuffer = collected.buffer;
+      const turn = this.active;
+      if (!turn || turn.settled) return;
+      for (const warning of collected.warnings) this.pushActivity(turn, `agy: ${warning}`);
+      if (collected.authRequired) {
+        // Signed out: the child is waiting on a browser flow that cannot
+        // complete here, so fail now rather than after the silence window.
+        this.pushActivity(turn, AGY_AUTH_PROGRESS);
+        this.killChild();
+        this.abandonTurn(turn, new Error(AGY_AUTH_RECOVERY));
+      }
     });
     child.on("error", (error: Error) => {
       if (generation !== this.generation) return;
@@ -626,6 +706,8 @@ export class AgyProviderDriver {
     if (turn.settled) return;
     const parsed = parseStreamLine(line);
     if (!parsed) return;
+    // Any parseable line is evidence of life; only silence is a stall.
+    this.armInactivityTimer(turn);
     const step = parsed.step_update;
     if (step) {
       const thinkingDelta =
@@ -646,11 +728,19 @@ export class AgyProviderDriver {
         this.pushLiveText(turn, undefined, record.response_text);
       }
     }
-    const progress = formatStepProgress(parsed);
-    if (progress && !parsed.result) this.pushActivity(turn, progress);
     // Shared accumulator: terminal status, usage, denied actions, and
-    // conversation ids track exactly like the former per-turn runner.
+    // conversation ids track exactly like the former per-turn runner. It runs
+    // before the label so a subagent's own step is already counted.
     turn.runResult = accumulateRunResult(parsed, turn.runResult);
+    const progress = formatStepProgress(parsed);
+    if (progress && !parsed.result) {
+      // A subagent label loses its shape as a single line; the turn's own
+      // observations still know how many children are in flight.
+      const summary = step?.step_type === "subagent"
+        ? summarizeObservedSubagents(turn.runResult.subagents)
+        : undefined;
+      this.pushActivity(turn, summary ? `${progress} · ${formatSubagentCounts(summary)}` : progress);
+    }
     if (parsed.event === "result" || parsed.result) {
       this.settleFromResult(turn);
     }
@@ -661,10 +751,13 @@ export class AgyProviderDriver {
     const result = turn.runResult;
     const status = result.terminal_status;
     if (status && status !== "SUCCESS" && status !== "OK") {
+      const detail = result.terminal_error ? `: ${result.terminal_error}` : "";
       this.settleError(
         turn,
         new Error(
-          `agy provider turn failed (${status})${result.terminal_error ? `: ${result.terminal_error}` : ""}`,
+          isAgyAuthFailure(result.terminal_error)
+            ? `${AGY_AUTH_RECOVERY} (agy said: ${result.terminal_error})`
+            : `agy provider turn failed (${status})${detail}`,
         ),
       );
       return;
@@ -707,6 +800,7 @@ export class AgyProviderDriver {
     turn.settled = true;
     turn.suspended = false;
     if (!retain) this.clearSuspendedTimer(turn);
+    this.clearInactivityTimer(turn);
     if (turn.timer) {
       clearTimeout(turn.timer);
       turn.timer = undefined;
@@ -749,6 +843,7 @@ export class AgyProviderDriver {
     turn.settled = true;
     turn.suspended = false;
     if (!retain) this.clearSuspendedTimer(turn);
+    this.clearInactivityTimer(turn);
     if (turn.timer) {
       clearTimeout(turn.timer);
       turn.timer = undefined;
@@ -834,6 +929,7 @@ export class AgyProviderDriver {
         killFor("timedOut", "agy provider turn timed out");
       }, Math.max(1, Math.min(PROVIDER_TURN_TIMEOUT_MS, options.timeoutMs)));
       (turn.timer as unknown as { unref?: () => void }).unref?.();
+      this.armInactivityTimer(turn);
 
       const line = `${JSON.stringify({
         event: "user",
@@ -850,5 +946,9 @@ export class AgyProviderDriver {
   }
 }
 
-/** Parent-side turn deadline shared with the per-turn runner. */
-export const PROVIDER_TURN_TIMEOUT_MS = 600_000;
+/**
+ * Absolute ceiling for one provider phase, shared with the per-turn runner.
+ * Stuck phases fail earlier on silence, so this only bounds a phase that keeps
+ * emitting activity without ever finishing.
+ */
+export const PROVIDER_TURN_TIMEOUT_MS = 30 * 60_000;

@@ -379,6 +379,51 @@ describe("persistent provider driver", () => {
     });
   });
 
+  it("fails a quiet phase on silence instead of waiting for the ceiling", async () => {
+    await withPersistentFakeAgy(async (controls) => {
+      // Emits its init line, then nothing: the shape of a wedged child.
+      await controls.setMode("hang");
+      const driver = track(new AgyProviderDriver({ inactivityMs: 150 }));
+      const dir = await tempDir();
+      const started = Date.now();
+      await assert.rejects(
+        driver.turn({ ...profile, dir }, turnOptions({ timeoutMs: 30_000 })),
+        /went quiet for 150ms with no stream activity/,
+      );
+      assert.ok(Date.now() - started < 5_000, "silence must fail long before the ceiling");
+      assert.equal(driver.snapshot().state, "dead");
+    });
+  });
+
+  it("keeps a phase alive while stream activity keeps arriving", async () => {
+    await withTimingFakeAgy(
+      { onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } },
+      async (children) => {
+        // Wide margin on purpose: a 4x scheduler stall must not turn a tick
+        // into the silence this test is proving is tolerated.
+        const driver = track(new AgyProviderDriver({ inactivityMs: 400 }));
+        const pending = driver.turn(profile, turnOptions({ timeoutMs: 30_000 }));
+        await Promise.resolve();
+        const child = [...children][0]!;
+        child.stdout.write('{"event":"init","init":{"model":"fake"}}\n');
+        // Each tick lands inside the silence window, so a watchdog that never
+        // re-armed would already have killed this turn.
+        for (let i = 0; i < 6; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          assert.equal(driver.snapshot().state, "running");
+          child.stdout.write(
+            '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"tick"}}\n',
+          );
+        }
+        child.stdout.write(
+          '{"event":"result","result":{"status":"SUCCESS","response":"kept alive"}}\n',
+        );
+        const end = expectDone(await awaitWithWatchdog(pending, "activity-kept turn"));
+        assert.match(end.text, /kept alive/);
+      },
+    );
+  });
+
   it("a crashing child fails the turn instead of hanging", async () => {
     await withPersistentFakeAgy(async (controls) => {
       await controls.setMode("crash");

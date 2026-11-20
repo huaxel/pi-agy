@@ -114,6 +114,41 @@ export function supportsAgyEffort(model?: AgyModel, tier?: AgyOptions["tier"]): 
   return id !== undefined && supportsAgyEffortId(id);
 }
 
+/**
+ * The commands print mode answers itself, with no model turn and no quota
+ * spend. Verified against agy 1.5.13: `agy -p "/help"` lists exactly these and
+ * reports zero usage for each, so suppressing expansion would hide the one
+ * documented zero-cost surface. Aliases appear because either spelling works.
+ */
+export const AGY_PRINT_MODE_COMMANDS: ReadonlySet<string> = new Set([
+  "agents",
+  "changelog",
+  "config",
+  "settings",
+  "credits",
+  "effort",
+  "help",
+  "hooks",
+  "model",
+  "permissions",
+  "plugin",
+  "skills",
+  "usage",
+  "quota",
+]);
+
+/**
+ * Is this prompt one of agy's own print-mode commands rather than task text?
+ * Anything else stays literal: an unknown `/review …` or a leading path
+ * (`/tmp/x is broken`) must never be reinterpreted as agent instructions.
+ */
+export function isAgyCommandPrompt(prompt: string): boolean {
+  const match = /^\/([a-z][a-z0-9:_-]*)(?:\s|$)/i.exec(prompt.trim());
+  // `/plugin:list` is the plugin command; the subcommand is agy's business.
+  const name = (match?.[1] ?? "").split(":", 1)[0] ?? "";
+  return AGY_PRINT_MODE_COMMANDS.has(name.toLowerCase());
+}
+
 export function buildAgyArgs(options: AgyOptions): string[] {
   if (options.continue && options.conversation_id) {
     throw new Error("agy cannot use --continue and --conversation together");
@@ -146,7 +181,18 @@ export function buildAgyArgs(options: AgyOptions): string[] {
     "--add-dir",
     options.dir,
     // Task text must never be interpreted as agy slash commands or skills.
-    "--disable-slash-commands",
+    //
+    // Two exceptions, both verified against agy 1.5.13:
+    // - An explicit `/command` prompt: print mode answers its read-only
+    //   commands (`/help`, `/usage`, `/skills`, …) itself, with zero usage and
+    //   no conversation, and suppressing that hides the one documented
+    //   zero-cost surface.
+    // - A plan run: agy warns "`--mode plan` has no effect while slash command
+    //   expansion is disabled" and silently runs in the default mode, so the
+    //   flag made every plan delegation write files instead of planning.
+    ...(mode === "plan" || isAgyCommandPrompt(options.prompt)
+      ? []
+      : ["--disable-slash-commands"]),
     ...(mode === "sandbox" ? ["--sandbox"] : ["--mode", mode]),
     ...(writes && skipPermissions ? ["--dangerously-skip-permissions"] : []),
     ...(options.effort && effortCapable ? ["--effort", options.effort] : []),

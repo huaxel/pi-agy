@@ -24,6 +24,7 @@ import type { AgyContextMode } from "./context.js";
 import {
   summarizeAgyDeniedActions,
   type AgyDeniedAction,
+  type AgyProgressMeta,
   type AgyUsage,
 } from "./stream.js";
 import {
@@ -91,7 +92,7 @@ export interface AgyExecutionResult {
 export async function executeAgyTask(
   options: AgyExecutionOptions,
   signal: AbortSignal | undefined,
-  onProgress?: (message: string) => void,
+  onProgress?: (message: string, meta?: AgyProgressMeta) => void,
 ): Promise<AgyExecutionResult> {
   validateAgyExecutionOptions(options);
   const selection = normalizeConversationSelection(options);
@@ -402,15 +403,19 @@ function findAvailableFallbackModel(
  * means no tool steps ran, so the retry cannot double-apply edits.
  */
 async function runWithTransientRetry<T>(
-  attempt: (trackProgress: (message: string) => void) => Promise<T>,
-  onProgress?: (message: string) => void,
+  attempt: (trackProgress: (message: string, kind?: "status" | "activity", meta?: AgyProgressMeta) => void) => Promise<T>,
+  onProgress?: (message: string, meta?: AgyProgressMeta) => void,
   signal?: AbortSignal,
 ): Promise<T> {
   for (let tries = 0; ; tries++) {
     let sawActivity = false;
-    const trackProgress = (message: string, kind?: "status" | "activity") => {
+    const trackProgress = (
+      message: string,
+      kind?: "status" | "activity",
+      meta?: AgyProgressMeta,
+    ) => {
       if (kind === "activity") sawActivity = true;
-      onProgress?.(message);
+      onProgress?.(message, meta);
     };
     try {
       return await attempt(trackProgress);

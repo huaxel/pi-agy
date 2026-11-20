@@ -1705,7 +1705,9 @@ describe("shared executor", () => {
           // `gpt-oss-120b-medium` would make agy reject the flag as a conflict.
           model_id: validateAgyModelId("gemini-3.8-flash"),
           effort: "high",
-          mode: "plan",
+          // Not plan: agy ignores --mode plan while slash expansion is disabled,
+          // and this test pins the flag that keeps task text literal.
+          mode: "accept-edits",
           dir: process.cwd(),
           timeout_ms: 60_000,
           new_session: true,

@@ -51,11 +51,14 @@ Your last observed model list is cached in `agy-provider-models.json` beside `ag
 | Pick a model or configured agent | `model`, `agent` |
 | Pin one exact model id | `model=<id>` |
 | Continue earlier work | `conversation_id`, `continue`, `new_session` |
-| Long runs without steering | `background=true`, then `agy_tasks` to poll, collect, or cancel |
+| Long runs without steering | `background=true`; the footer tracks the newest run, `agy_tasks` polls, collects, or cancels |
 | Bring Pi context along | `context=summary` or `context=recent` (default: none) |
 | Inspect agents, sessions, quota | `agy_agents`, `agy_history`, `agy_usage` |
+| Ask agy about itself | `/help`, `/usage`, `/skills`, `/permissions`, `/changelog` (answered by agy, zero tokens) |
 
-Runs are serialized per working directory, and timeouts or cancellations stop the whole agy process tree.
+A prompt that is one of agy's own print-mode commands (`/help`, `/usage`, `/skills`, `/plugin:list`, …) is answered by agy itself with zero tokens and no conversation. Everything else is task text: the prompt reaches agy with slash/skill expansion disabled, so `/review this` or `/tmp/x is broken` cannot turn into instructions. The exception is `mode: "plan"`, which needs expansion on because agy ignores `--mode plan` while it is disabled.
+
+Runs are serialized per working directory, and timeouts or cancellations stop the whole agy process tree. A foreground run streams its steps as they happen. A background run reports the newest step and its elapsed time in the session footer, and `agy_tasks status` adds how long ago the last activity was, so a slow step and a stalled one do not look the same.
 
 ### The `/agy` command
 
@@ -105,9 +108,13 @@ Resolution order: `defaultModel` → `defaultModelCommand` → `quotaBalancing` 
 
 ## Notes for the curious
 
-- **The bridge is local and locked down.** It listens on `127.0.0.1` only, requires a per-process secret header, and caps each authenticated request at 1 MiB and 10,000 structural elements across 64 levels, rejecting oversized input before any session or tool work happens.
+- **The bridge is local and locked down.** It listens on `127.0.0.1` only, requires a per-process secret header, and caps each authenticated request at 1 MiB and 10,000 structural elements across 64 levels, rejecting oversized input before any session or tool work happens. It bounds the other direction too: a Pi tool result longer than 64,000 characters is relayed head and tail with the omitted count named, so a runaway tool cannot flood agy's context.
 - **No runtime dependencies.** Everything the bridge needs from MCP lives in `extensions/lib/mcp-transport.ts`: JSON-RPC 2.0 dispatch, the initialize handshake, `tools/list`, `tools/call`, `ping`, session ids, and both JSON and SSE framing. The official SDK is a dev dependency, so the bridge tests keep driving this server with a real client and `agy` itself still connects to it — while an install of this package pulls nothing. Pi supplies the peer packages. `npm audit` is clean, and CI blocks on high or critical advisories and missing registry attestations.
 - **Turns in flight are serialized** per directory, so a delegated run can never race a provider turn in the same project.
+- **A signed-out run fails immediately.** agy waits on a browser sign-in that cannot happen inside a
+  delegated run or a provider turn. That stderr line stops the child and returns one recovery
+  sentence, rather than the run idling out its timeout. The OAuth URL is never copied into Pi.
+- **A turn fails on silence, not on duration.** agy can legitimately emit nothing while one shell tool or one large edit runs, and a flat per-turn deadline killed those turns mid-work. A live phase now stops only after 15 minutes with no stream activity, and a 30-minute ceiling bounds a phase that keeps emitting activity without finishing. The error says which one fired: `went quiet for 15m with no stream activity` or `timed out`. A phase parked on a Pi tool is owned by Pi and has its own deadline.
 
 ## Development
 
@@ -118,9 +125,10 @@ npm run typecheck
 npm run test:live     # read-only, no inference
 npm run test:bridge   # billable: deny-rule and park-path evidence
 npm run test:provider # billable: two turns, usage and reuse
+npm run test:bridge-contract  # synthetic wiring check, no agy process or inference
 ```
 
-`test:live` only reads your installed CLI. `test:bridge` proves the `--settings` deny document really stops agy's built-in shell tool — with a positive control, so a pass can't mean the model just declined to act — and reports how many bridged calls one turn produces. `test:provider` spends two short turns on a budget alias (`npm run test:provider -- <model-id>`) to assert streamed text, the conversation id, native usage, and that a reused process reports a delta rather than cumulative counters.
+`test:live` only reads your installed CLI. `test:bridge-contract` drives the provider's real registration, tool projection and loopback MCP transport against an in-memory fake `agy` child: one active Pi tool is listed beside the five bridge builtins, a fixed synthetic call round-trips, a second client initializes on the same bridge, and any real process launch fails the run. It proves local wiring only, not that agy discovers a model or answers a turn. `test:bridge` proves the `--settings` deny document really stops agy's built-in shell tool — with a positive control, so a pass can't mean the model just declined to act — and reports how many bridged calls one turn produces. `test:provider` spends two short turns on a budget alias (`npm run test:provider -- <model-id>`) to assert streamed text, the conversation id, native usage, and that a reused process reports a delta rather than cumulative counters.
 
 Tests are qualified against the Pi SDK fixture at exactly 1.5.2, which needs Node >= 22.19.0 (ran on 22.23.4).
 

@@ -17,11 +17,18 @@
 import { randomBytes } from "node:crypto";
 
 import { conversationSummary } from "./sessions.js";
+import {
+  formatSubagentCounts,
+  summarizeObservedSubagents,
+  type AgyObservedSubagent,
+  type AgySubagentSummary,
+} from "./subagents.js";
+import type { AgyProgressMeta } from "./stream.js";
 
 export type BackgroundTaskState = "running" | "done" | "error" | "cancelled" | "timeout";
 
 export interface BackgroundRunCallbacks {
-  onProgress: (message: string) => void;
+  onProgress: (message: string, meta?: AgyProgressMeta) => void;
   signal: AbortSignal;
 }
 
@@ -49,8 +56,15 @@ export interface BackgroundTaskSnapshot {
   state: BackgroundTaskState;
   startedAt: number;
   updatedAt: number;
+  /**
+   * When the run last reported real work. `updatedAt` also moves on state
+   * changes, so this is the field to age for "is it still doing anything".
+   */
+  lastActivityAt: number;
   /** Bounded recent progress lines (newest last). */
   progress: string[];
+  /** Aggregate of native subagent observations; absent when none launched. */
+  subagents?: AgySubagentSummary;
   text?: string;
   error?: string;
   conversationId?: string;
@@ -60,6 +74,37 @@ export interface BackgroundTaskSnapshot {
 const MAX_TASKS = 32;
 const MAX_PROGRESS_LINES = 20;
 const MAX_PROGRESS_CHARS = 500;
+/** Footer status is one short line: past this it would crowd the session. */
+export const MAX_LIVE_STATUS_CHARS = 120;
+
+/** "12s", "1m12s", "2h05m" — compact enough for a footer, never rounded to a lie. */
+export function formatShortDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes}m${String(total % 60).padStart(2, "0")}s`;
+  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/**
+ * One-line description of a running task for the session footer: what it is
+ * doing now and for how long. Terminal tasks have nothing live to show.
+ */
+export function formatLiveBackgroundStatus(
+  task: BackgroundTaskSnapshot,
+  now = Date.now(),
+): string | undefined {
+  if (task.state !== "running") return undefined;
+  const latest = task.progress.length > 0 ? task.progress[task.progress.length - 1] : task.summary;
+  const counts = task.subagents ? formatSubagentCounts(task.subagents) : undefined;
+  const build = (withCounts: boolean): string =>
+    `agy ${task.handle.replace(/^agybg-/, "#")}: ${latest}${withCounts && counts ? ` · ${counts}` : ""} · ${formatShortDuration(now - task.startedAt)}`;
+  let line = build(true);
+  // The label describes what is happening; the counts are the first thing to
+  // go when the line is too wide, never the other way around.
+  if (line.length > MAX_LIVE_STATUS_CHARS) line = build(false);
+  return line.length > MAX_LIVE_STATUS_CHARS ? `${line.slice(0, MAX_LIVE_STATUS_CHARS - 1)}…` : line;
+}
 
 interface TaskRecord {
   handle: string;
@@ -70,7 +115,9 @@ interface TaskRecord {
   state: BackgroundTaskState;
   startedAt: number;
   updatedAt: number;
+  lastActivityAt: number;
   progress: string[];
+  observedSubagents?: AgyObservedSubagent[];
   text?: string;
   error?: string;
   conversationId?: string;
@@ -90,6 +137,7 @@ function clipProgress(message: string): string {
 
 export class BackgroundTaskRunner {
   private readonly tasks = new Map<string, TaskRecord>();
+  private readonly listeners = new Set<() => void>();
   private readonly maxTasks: number;
   private readonly shutdownTimeoutMs: number;
 
@@ -116,6 +164,16 @@ export class BackgroundTaskRunner {
     const handle = `agybg-${randomBytes(8).toString("hex")}`;
     const controller = new AbortController();
     const now = Date.now();
+    // Callers observe state through snapshots; this only says "look again".
+    const notify = (): void => {
+      for (const listener of this.listeners) {
+        try {
+          listener();
+        } catch {
+          // A status listener must never break a run.
+        }
+      }
+    };
     const record: TaskRecord = {
       handle,
       dir: options.dir,
@@ -125,6 +183,7 @@ export class BackgroundTaskRunner {
       state: "running",
       startedAt: now,
       updatedAt: now,
+      lastActivityAt: now,
       progress: [],
       controller,
       cancelled: false,
@@ -140,11 +199,13 @@ export class BackgroundTaskRunner {
     }, Math.max(1, options.timeoutMs));
 
     this.tasks.set(handle, record);
+    notify();
     let runPromise: Promise<BackgroundRunOutcome>;
     try {
       runPromise = Promise.resolve(
         options.run({
-          onProgress: (message) => {
+          onProgress: (message, meta) => {
+            if (meta?.subagents?.length) record.observedSubagents = meta.subagents;
             const line = clipProgress(message);
             if (!line) return;
             record.progress.push(line);
@@ -152,6 +213,8 @@ export class BackgroundTaskRunner {
               record.progress.splice(0, record.progress.length - MAX_PROGRESS_LINES);
             }
             record.updatedAt = Date.now();
+            record.lastActivityAt = record.updatedAt;
+            notify();
           },
           signal: controller.signal,
         }),
@@ -192,11 +255,21 @@ export class BackgroundTaskRunner {
           clearTimeout(record.timer);
           record.timer = undefined;
         }
+        // Terminal state is observable now; tell anyone watching the footer.
+        notify();
       });
     // A settlement rejection here would be an unhandled rejection: the
     // handlers above never throw, but belt-and-braces costs nothing.
     record.settled.catch(() => undefined);
     return handle;
+  }
+
+  /** Observe task starts, progress, and settlement; returns an unsubscribe. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   get(handle: string): BackgroundTaskSnapshot | undefined {
@@ -295,7 +368,9 @@ function snapshotOf(record: TaskRecord): BackgroundTaskSnapshot {
     state: record.state,
     startedAt: record.startedAt,
     updatedAt: record.updatedAt,
+    lastActivityAt: record.lastActivityAt,
     progress: [...record.progress],
+    subagents: summarizeObservedSubagents(record.observedSubagents),
     text: record.text,
     error: record.error,
     conversationId: record.conversationId,

@@ -21,6 +21,8 @@ jobs:
       - run: npm run typecheck
       - run: git diff --exit-code
       - run: npm run pack:check
+      - name: Bridge contract (isolated, no agy process)
+        run: npm run test:bridge-contract
       - name: Dependency advisories (high or critical block)
         run: npm audit --audit-level=high
       - name: Registry attestations

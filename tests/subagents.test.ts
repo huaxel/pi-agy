@@ -5,7 +5,10 @@ import {
   MAX_OBSERVED_SUBAGENTS,
   formatAgySubagentObservations,
   formatAgySubagentProgress,
+  formatSubagentCounts,
   observeAgySubagents,
+  summarizeObservedSubagents,
+  type AgyObservedSubagent,
 } from "../extensions/lib/subagents.js";
 
 describe("observed agy subagents", () => {
@@ -156,5 +159,28 @@ describe("observed agy subagents", () => {
     }]);
     assert.match(report ?? "", /active at last event/);
     assert.ok(!(report ?? "").includes("running"));
+  });
+
+  it("summarizes counts and prefers a still-active entry as latest", () => {
+    const entries: AgyObservedSubagent[] = [
+      { slot: 0, name: "planner", status: "done" },
+      { slot: 1, name: "scout", status: "error", error: "failed" },
+      { slot: 2, name: "writer", status: "active" },
+      { slot: 3, name: "reviewer", status: "done" },
+    ];
+    const summary = summarizeObservedSubagents(entries);
+    assert.deepEqual(summary, { active: 1, done: 2, error: 1, total: 4, latest: "writer" });
+    assert.equal(formatSubagentCounts(summary!), "1/4 subagents, 1 failed");
+  });
+
+  it("omits the aggregate when no subagent launched", () => {
+    assert.equal(summarizeObservedSubagents(undefined), undefined);
+    assert.equal(summarizeObservedSubagents([]), undefined);
+    const finished = summarizeObservedSubagents([
+      { slot: 0, name: "solo", status: "done" },
+      { slot: 1, name: "last", status: "done" },
+    ]);
+    assert.equal(finished?.latest, "last", "without an active child the newest name wins");
+    assert.equal(formatSubagentCounts(finished!), "0/2 subagents");
   });
 });

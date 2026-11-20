@@ -220,6 +220,49 @@ export function formatAgySubagentObservations(
   return lines.join("\n");
 }
 
+/** Counts for a live turn: enough shape to tell working from waiting. */
+export interface AgySubagentSummary {
+  active: number;
+  done: number;
+  error: number;
+  total: number;
+  /** Name of a still-active entry when one exists, otherwise the newest name. */
+  latest?: string;
+}
+
+/**
+ * Aggregate observed subagents. Undefined for a turn that never launched one,
+ * so callers can omit the field instead of reporting a meaningless 0/0.
+ */
+export function summarizeObservedSubagents(
+  entries: readonly AgyObservedSubagent[] | undefined,
+): AgySubagentSummary | undefined {
+  if (!entries || entries.length === 0) return undefined;
+  let active = 0;
+  let done = 0;
+  let error = 0;
+  for (const entry of entries) {
+    if (entry.status === "active") active += 1;
+    else if (entry.status === "done") done += 1;
+    else error += 1;
+  }
+  const lastActive = [...entries].reverse().find((entry) => entry.status === "active");
+  const newest = entries[entries.length - 1];
+  return {
+    active,
+    done,
+    error,
+    total: entries.length,
+    latest: (lastActive ?? newest)?.name,
+  };
+}
+
+/** "1/2 subagents", plus a failure count when any child errored. */
+export function formatSubagentCounts(summary: AgySubagentSummary): string {
+  const base = `${summary.active}/${summary.total} subagents`;
+  return summary.error > 0 ? `${base}, ${summary.error} failed` : base;
+}
+
 /** Compact progress text for a native subagent stream step. */
 export function formatAgySubagentProgress(step: AgySubagentStep): string | undefined {
   const tool = clean(step.tool_name ?? step.tool_info?.name, 40);

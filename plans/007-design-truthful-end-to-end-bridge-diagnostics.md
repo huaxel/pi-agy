@@ -6,6 +6,19 @@
 
 ## Status
 
+> **Current follow-up:** Passive catalog/bridge/prompt provenance now appears in
+> `/agy doctor`, and the recommended isolated gate is available locally as
+> `npm run test:bridge-contract`. It exercises production registration, the real
+> loopback MCP transport, a fixed synthetic park/result, and a second client on
+> an in-memory fake agy child. No inference-capable process is launched. The gate
+> is now described in `README.md` (Development) and `CHANGELOG.md` (Unreleased),
+> so it is discoverable rather than an undocumented script. Timing, non-vacuity
+> and claim-by-claim evidence are recorded in
+> [the gate verification](evidence/007-bridge-contract-verification.md). This
+> local worktree implementation has not been independently reviewed, committed as
+> part of a release, or released; it proves only fixture-backed local wiring, not
+> actual agy/model health.
+
 - **Priority:** P2
 - **Effort:** S (design/spike only; later implementation estimated separately)
 - **Risk:** LOW (no production changes)

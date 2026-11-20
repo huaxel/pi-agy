@@ -5,7 +5,13 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { BackgroundTaskRunner } from "../extensions/lib/background.js";
+import {
+  BackgroundTaskRunner,
+  MAX_LIVE_STATUS_CHARS,
+  formatLiveBackgroundStatus,
+  formatShortDuration,
+  type BackgroundTaskSnapshot,
+} from "../extensions/lib/background.js";
 import piAgyExtension, { getBackgroundRunner } from "../extensions/index.js";
 import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withFakeAgy } from "./helpers.js";
@@ -158,6 +164,151 @@ describe("background task runner", () => {
     const collected = runner.collect(handle);
     assert.equal(collected.progress.length, 20);
     assert.equal(collected.progress[19], "line 29");
+  });
+
+  it("reports last activity and notifies subscribers on start, progress, and settle", async () => {
+    const runner = new BackgroundTaskRunner();
+    const dir = await tempDir("pi-agy-bg-");
+    let notifications = 0;
+    const unsubscribe = runner.subscribe(() => {
+      notifications += 1;
+    });
+    const gate = deferred<{ text: string }>();
+    const handle = runner.start({
+      dir,
+      summary: "watchable work",
+      timeoutMs: 30_000,
+      run: async ({ onProgress }) => {
+        onProgress("▸ bash → pnpm test");
+        return gate.promise;
+      },
+    });
+    const startedAt = runner.get(handle)!.startedAt;
+    assert.ok(notifications >= 1, "starting a task must notify observers");
+    await settle();
+    const running = runner.get(handle)!;
+    assert.equal(running.progress.at(-1), "▸ bash → pnpm test");
+    assert.ok(running.lastActivityAt >= startedAt, "progress must advance the activity clock");
+    assert.ok(notifications >= 2, "progress must notify observers");
+    gate.resolve({ text: "done" });
+    await waitForTerminal(runner, handle);
+    assert.equal(runner.get(handle)?.state, "done");
+    assert.ok(notifications >= 3, "settlement must notify observers");
+    unsubscribe();
+    const afterUnsubscribe = notifications;
+    runner.collect(handle);
+    assert.equal(notifications, afterUnsubscribe, "unsubscribe must stop notifications");
+  });
+
+  it("formats a live footer line only while a task runs", async () => {
+    const runner = new BackgroundTaskRunner();
+    const dir = await tempDir("pi-agy-bg-");
+    const gate = deferred<{ text: string }>();
+    const handle = runner.start({
+      dir,
+      summary: "long job",
+      timeoutMs: 30_000,
+      run: async ({ onProgress }) => {
+        onProgress("searching\nseveral   lines");
+        return gate.promise;
+      },
+    });
+    await settle();
+    const live = runner.get(handle)!;
+    const line = formatLiveBackgroundStatus(live, live.startedAt + 72_000);
+    assert.ok(line, "a running task must have a live line");
+    assert.match(line!, /#/);
+    assert.match(line!, /searching several lines/);
+    assert.match(line!, /· 1m12s$/);
+    assert.equal(formatLiveBackgroundStatus({ ...live, state: "done" }), undefined);
+    // A long progress line cannot crowd the footer.
+    const noisy: BackgroundTaskSnapshot = {
+      ...live,
+      progress: ["x".repeat(400)],
+    };
+    const clipped = formatLiveBackgroundStatus(noisy, noisy.startedAt)!;
+    assert.equal(clipped.length, MAX_LIVE_STATUS_CHARS);
+    assert.ok(clipped.endsWith("…"));
+    gate.resolve({ text: "done" });
+    await waitForTerminal(runner, handle);
+  });
+
+  it("carries a subagent aggregate into snapshots and the footer line", async () => {
+    const runner = new BackgroundTaskRunner();
+    const dir = await tempDir("pi-agy-bg-");
+    const gate = deferred<{ text: string }>();
+    const handle = runner.start({
+      dir,
+      summary: "fan out",
+      timeoutMs: 30_000,
+      run: async ({ onProgress }) => {
+        onProgress("▸ subagent scout — map the callers", {
+          subagents: [
+            { slot: 0, name: "scout", status: "active" },
+            { slot: 1, name: "writer", status: "done" },
+          ],
+        });
+        return gate.promise;
+      },
+    });
+    await settle();
+    const live = runner.get(handle)!;
+    assert.deepEqual(live.subagents, {
+      active: 1,
+      done: 1,
+      error: 0,
+      total: 2,
+      latest: "scout",
+    });
+    const line = formatLiveBackgroundStatus(live, live.startedAt + 5_000)!;
+    assert.match(line, /1\/2 subagents/);
+    assert.ok(line.endsWith("· 5s"));
+    gate.resolve({ text: "done" });
+    await waitForTerminal(runner, handle);
+  });
+
+  it("keeps no subagent aggregate for a run that never launched one", async () => {
+    const runner = new BackgroundTaskRunner();
+    const dir = await tempDir("pi-agy-bg-");
+    const gate = deferred<{ text: string }>();
+    const handle = runner.start({
+      dir,
+      summary: "plain work",
+      timeoutMs: 30_000,
+      run: async ({ onProgress }) => {
+        onProgress("▸ bash → pnpm test");
+        return gate.promise;
+      },
+    });
+    await settle();
+    assert.equal(runner.get(handle)?.subagents, undefined);
+    gate.resolve({ text: "done" });
+    await waitForTerminal(runner, handle);
+  });
+
+  it("drops the subagent counts before clipping the live label", () => {
+    const base = {
+      handle: "agybg-abc123",
+      dir: "/tmp",
+      summary: "work",
+      state: "running" as const,
+      startedAt: 0,
+      updatedAt: 0,
+      lastActivityAt: 0,
+      progress: ["x".repeat(MAX_LIVE_STATUS_CHARS - 30)],
+      subagents: { active: 1, done: 0, error: 0, total: 1, latest: "scout" },
+    };
+    const line = formatLiveBackgroundStatus(base, 1_000)!;
+    assert.ok(line.length <= MAX_LIVE_STATUS_CHARS);
+    assert.ok(!line.includes("subagents"), "counts are dropped before the label is cut");
+    assert.ok(line.startsWith("agy #abc123: xxx"));
+  });
+
+  it("formats short durations without rounding away seconds", () => {
+    assert.equal(formatShortDuration(0), "0s");
+    assert.equal(formatShortDuration(12_400), "12s");
+    assert.equal(formatShortDuration(72_000), "1m12s");
+    assert.equal(formatShortDuration(3_900_000), "1h05m");
   });
 
   it("keeps uncollected records instead of evicting them", async () => {

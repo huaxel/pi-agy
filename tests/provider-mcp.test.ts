@@ -10,7 +10,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { BRIDGE_TOKEN_HEADER, startMcpBridge, type McpBridgeHandle } from "../extensions/lib/provider-mcp.js";
+import {
+  BRIDGE_TOKEN_HEADER,
+  MAX_BRIDGED_RESULT_CHARS,
+  startMcpBridge,
+  type McpBridgeHandle,
+} from "../extensions/lib/provider-mcp.js";
 
 const handles: McpBridgeHandle[] = [];
 afterEach(async () => {
@@ -623,6 +628,40 @@ describe("MCP bridge", () => {
         const result = (await pending) as { content: Array<{ text: string }>; isError?: boolean };
         assert.equal(result.content[0].text, "file contents");
         assert.equal(result.isError, undefined);
+      } finally {
+        await client.close();
+      }
+    });
+  });
+
+  it("bounds a large Pi tool result relayed to agy", async () => {
+    await withIsolatedAgentDir(async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
+      const handle = await startBridge(dir);
+      handle.setTools([
+        { name: "read", piName: "read", description: "Read a file", inputSchema: { type: "object" } },
+      ]);
+      let callId = "";
+      handle.setParkHandler((park) => {
+        callId = park.callId;
+        return true;
+      });
+      const client = await connectClient(handle.url, await readToken(handle.configDir));
+      try {
+        const pending = client.callTool({ name: "read", arguments: { path: "/tmp/big" } });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.ok(callId, "the call was not parked");
+        const huge = `HEAD-START${"h".repeat(100_000)}MIDDLE${"t".repeat(100_000)}TAIL-END`;
+        assert.equal(handle.completePark(callId, { text: huge, isError: false }), true);
+        const result = (await pending) as { content: Array<{ text: string }> };
+        const text = result.content[0]?.text ?? "";
+        assert.ok(
+          text.length <= MAX_BRIDGED_RESULT_CHARS,
+          `relayed ${text.length} chars, over the ${MAX_BRIDGED_RESULT_CHARS} bound`,
+        );
+        assert.match(text, /\(Output truncated: \d+ chars omitted\)/);
+        assert.ok(text.startsWith("HEAD-START"), "the head of the result must survive");
+        assert.ok(text.endsWith("TAIL-END"), "the tail of the result must survive");
       } finally {
         await client.close();
       }
