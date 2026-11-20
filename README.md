@@ -75,9 +75,13 @@ Development tests are qualified against the exact Pi SDK fixture version 1.5.2, 
 ```bash
 npm test
 npm run typecheck
+npm run test:live      # read-only, no inference
+npm run test:bridge    # billable: deny-rule and park-path evidence
 ```
 
 With an installed agy CLI, `npm run test:live` runs read-only integration checks without starting an inference turn.
+
+`npm run test:bridge` covers the two behaviours that need a real child on the loopback bridge: that the `--settings` deny document actually stops agy's built-in shell tool (proven with a positive control, so a passing run cannot be the model declining to act), and how many bridged calls a single turn produces. Note that agy's tool loop is serial — it issues one call, waits, then issues the next — so the park micro-batch never sees concurrent calls in practice and stays covered by deterministic driver tests instead.
 
 `npm run test:provider` is the one deliberately billable check: it spends two short turns on a budget alias of your choosing (`npm run test:provider -- <model-id>`), keeps the child alive between them, and asserts streamed text, the conversation id, native usage, and that a reused process reports the second turn as a delta rather than the session's cumulative counters. It runs without agy's permission bypass, so a tool call would be escalated rather than silently executed.
 

@@ -8,7 +8,8 @@
 - Stream agy thinking into Pi's TUI as thinking blocks and deltas, separate from tool/step progress.
 - Send only the new transcript delta to a resumed agy conversation instead of replaying the whole prompt.
 - Deny agy's shadowed built-in tools through a session `--settings` document when the Pi bridge owns the same capability.
-- Batch parallel bridged MCP tool calls inside a short window so Pi answers them in one turn instead of one turn per call.
+- Batch parallel bridged MCP tool calls inside a short window so Pi answers them in one turn instead of one turn per call. Live verification shows agy's tool loop is serial (two calls arrived across two sequential phases), so this window is insurance rather than observed traffic; the batching behaviour itself is covered by deterministic driver tests.
+- Verify the deny document live: with `--dangerously-skip-permissions` in force, `permissions.deny` still blocks agy's built-in shell tool (`Permission denied ... Matches user-configured deny rule`), while an identical request without the document creates its file. Both controls are in `npm run test:bridge`.
 - Add `npm run test:provider`, an opt-in two-turn live check that keeps one child alive across turns and
   asserts native usage is reported per turn instead of cumulatively; verified against agy 1.5.13
   (`input 10420 / total 10421`, then `input 2119 + cache_read 8376 / total 10496` on reuse).
