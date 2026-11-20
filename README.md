@@ -79,6 +79,8 @@ npm run typecheck
 
 With an installed agy CLI, `npm run test:live` runs read-only integration checks without starting an inference turn.
 
+`npm run test:provider` is the one deliberately billable check: it spends two short turns on a budget alias of your choosing (`npm run test:provider -- <model-id>`), keeps the child alive between them, and asserts streamed text, the conversation id, native usage, and that a reused process reports the second turn as a delta rather than the session's cumulative counters. It runs without agy's permission bypass, so a tool call would be escalated rather than silently executed.
+
 ## License
 
 MIT

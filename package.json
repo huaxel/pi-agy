@@ -1,7 +1,7 @@
 {
   "name": "@juanbenjumea/pi-agy",
   "version": "0.7.15",
-  "description": "Antigravity (agy) provider and delegation for Pi — /model picker, background tasks, loopback MCP tool bridge, quota awareness, and repo verification.",
+  "description": "Antigravity (agy) provider and delegation for Pi \u2014 /model picker, background tasks, loopback MCP tool bridge, quota awareness, and repo verification.",
   "type": "module",
   "license": "MIT",
   "author": "Juan Benjumea",
@@ -30,6 +30,7 @@
   "scripts": {
     "test": "node --import ./tests/resolve-hook.mjs --test tests/*.test.ts",
     "test:live": "node --import ./tests/resolve-hook.mjs tests/live-smoke.ts",
+    "test:provider": "node --import ./tests/resolve-hook.mjs tests/live-provider.ts",
     "typecheck": "tsc --noEmit --pretty false",
     "pack:check": "npm pack --dry-run --json"
   },

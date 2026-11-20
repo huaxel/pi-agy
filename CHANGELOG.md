@@ -9,6 +9,9 @@
 - Send only the new transcript delta to a resumed agy conversation instead of replaying the whole prompt.
 - Deny agy's shadowed built-in tools through a session `--settings` document when the Pi bridge owns the same capability.
 - Batch parallel bridged MCP tool calls inside a short window so Pi answers them in one turn instead of one turn per call.
+- Add `npm run test:provider`, an opt-in two-turn live check that keeps one child alive across turns and
+  asserts native usage is reported per turn instead of cumulatively; verified against agy 1.5.13
+  (`input 10420 / total 10421`, then `input 2119 + cache_read 8376 / total 10496` on reuse).
 - Full 510-test suite, typecheck, live smoke against an authenticated agy CLI, and package checks pass.
 
 ## 0.7.14
