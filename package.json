@@ -33,7 +33,8 @@
     "test:provider": "node --import ./tests/resolve-hook.mjs tests/live-provider.ts",
     "typecheck": "tsc --noEmit --pretty false",
     "pack:check": "npm pack --dry-run --json",
-    "test:bridge": "node --import ./tests/resolve-hook.mjs tests/live-bridge.ts"
+    "test:bridge": "node --import ./tests/resolve-hook.mjs tests/live-bridge.ts",
+    "gate": "npm run typecheck && npm test && npm run pack:check"
   },
   "files": [
     "LICENSE",

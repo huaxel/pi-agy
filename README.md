@@ -112,6 +112,7 @@ Resolution order: `defaultModel` → `defaultModelCommand` → `quotaBalancing` 
 ## Development
 
 ```bash
+npm run gate          # typecheck + full suite + pack check, in one exit code
 npm test              # full suite
 npm run typecheck
 npm run test:live     # read-only, no inference
