@@ -34,6 +34,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { getDefaultConfigPath } from "./config.js";
+import { loadProviderCatalogCache } from "./provider-catalog-store.js";
 import { isBridgeInputWithinBudget } from "./bridge-input-budget.js";
 import type { BridgeToolDef } from "./provider-tools.js";
 import { checkAgyUsage, formatAgyUsage } from "./cli.js";
@@ -750,9 +751,17 @@ async function readCatalog(
     const models = parseProviderCatalog(raw);
     if (models.length > 0) return { models, fallback: false, cache: { raw, at: Date.now() } };
   } catch {
-    // Fall through to the empty catalog.
+    // Fall through to the last roster this machine observed.
   }
-  return { models: [...FALLBACK_PROVIDER_MODELS], fallback: true, cache };
+  // The provider persists the roster it discovered, so a discovery failure
+  // here degrades to those real, previously observed ids instead of an empty
+  // list that reads as "this workspace has no models".
+  const observed = loadProviderCatalogCache();
+  return {
+    models: observed.length > 0 ? observed : [...FALLBACK_PROVIDER_MODELS],
+    fallback: true,
+    cache,
+  };
 }
 
 async function readBody(req: IncomingMessage): Promise<{ body?: unknown; tooLarge: boolean }> {

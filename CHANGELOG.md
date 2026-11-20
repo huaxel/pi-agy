@@ -6,7 +6,7 @@
 - Collapse every family with two or more effort tiers into one picker entry with a thinking-level toggle, rather than only `gemini-*` families. The catalog decides, so `claude-*` bases stop appearing as separate per-tier entries.
 - Treat `xhigh` and `max` as effort tiers. `gemini-4-neon-xhigh` and `gemini-4-hydrogen-xhigh` previously did not match the tier suffix and appeared as standalone models instead of a fourth stop in their family's toggle.
 - Offer `xhigh` and `max` through `agy_execute`'s `effort` parameter, matching `agy --effort`.
-- Cache the last observed model roster so a cold process can answer `getModels()`. Pi resolves `enabledModels` during startup, so an undiscovered provider reported `No models match pattern "antigravity/<id>"` for an existing model. The cache stores only ids `agy models` returned, is written atomically, and degrades to the previous empty start when unreadable.
+- Cache the last observed model roster so a cold process can answer `getModels()`; the bridge's `agy_model_catalog` tool reads the same cache instead of reporting an empty catalog when live discovery fails. Pi resolves `enabledModels` during startup, so an undiscovered provider reported `No models match pattern "antigravity/<id>"` for an existing model. The cache stores only ids `agy models` returned, is written atomically, and degrades to the previous empty start when unreadable.
 
 ## 0.7.15
 
