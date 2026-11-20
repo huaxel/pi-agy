@@ -10,20 +10,92 @@ import { parseAgyModelIds, type AgyModelId } from "./provider-models.js";
 import { compareModelIds } from "./model-sort.js";
 import { runPreflightCommand } from "./spawn.js";
 import { parseAgyUsage, usageError, type AgyUsageSnapshot } from "./usage.js";
-import type { AgyModel } from "./cli.js";
+import { AGY_MODEL_ALIASES, type AgyModel } from "./cli.js";
 
-/** alias → pattern matching concrete model ids in `agy models` output. */
-const UNSTABLE_SUFFIX = "(?:-(?:preview|experimental|beta|alpha|rc\\d*|snapshot|next))*";
-const CATALOG_PATTERNS: Record<AgyModel, RegExp> = {
-  "flash-low": new RegExp(`^gemini-\\d+(?:\\.\\d+)*-flash-low${UNSTABLE_SUFFIX}$`),
-  "flash-medium": new RegExp(`^gemini-\\d+(?:\\.\\d+)*-flash-medium${UNSTABLE_SUFFIX}$`),
-  "flash-high": new RegExp(`^gemini-\\d+(?:\\.\\d+)*-flash-high${UNSTABLE_SUFFIX}$`),
-  "pro-low": new RegExp(`^gemini-\\d+(?:\\.\\d+)*-pro-low${UNSTABLE_SUFFIX}$`),
-  "pro-high": new RegExp(`^gemini-\\d+(?:\\.\\d+)*-pro-high${UNSTABLE_SUFFIX}$`),
-  sonnet: /^claude-sonnet-[\w.-]+$/,
-  opus: /^claude-opus-[\w.-]+$/,
-  "gpt-oss": /^gpt-oss-[\w.-]+$/,
-};
+/**
+ * Alias matching is structural, never a literal model name.
+ *
+ * An alias is `family` or `family-<effort>` (see `AGY_MODEL_ALIASES`). It
+ * matches an `agy models` id when the alias's hyphen-separated tokens appear
+ * contiguously in the id — and, for an effort alias, only as the id's trailing
+ * tokens. `…-flash-low` therefore matches `flash-low` but not `flash-medium`,
+ * and a tier the vendor retires stops matching instead of resolving to an
+ * invented id. New families and renames resolve with no code change.
+ */
+const EFFORT_TOKENS: readonly string[] = ["low", "medium", "high", "xhigh"];
+
+/**
+ * Release-channel qualifiers that may trail an id (`…-flash-medium-preview`).
+ * Structural, not model-specific: these describe maturity, not a family, and
+ * stripping them lets a preview catalog resolve while `isStableModelId` still
+ * keeps such ids out of the default catalog.
+ */
+const QUALIFIER_TOKENS: readonly string[] = ["preview", "experimental", "beta", "alpha", "snapshot", "next"];
+
+export type AgyModelAliasMatcher = (alias: AgyModel, id: string) => boolean;
+
+function findTokenRun(haystack: readonly string[], needle: readonly string[]): number {
+  if (needle.length === 0 || needle.length > haystack.length) return -1;
+  const last = haystack.length - needle.length;
+  for (let start = 0; start <= last; start++) {
+    let matched = true;
+    for (let offset = 0; offset < needle.length; offset++) {
+      if (haystack[start + offset] !== needle[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return start;
+  }
+  return -1;
+}
+
+function aliasTokens(alias: string): string[] {
+  return alias.toLowerCase().split("-").filter(Boolean);
+}
+
+/** Class tokens of an effort alias (`flash-low` -> `flash`), else undefined. */
+function classTokensOf(alias: string): string[] | undefined {
+  const tokens = aliasTokens(alias);
+  if (tokens.length < 2) return undefined;
+  if (!EFFORT_TOKENS.includes(tokens[tokens.length - 1])) return undefined;
+  return tokens.slice(0, -1);
+}
+
+/** Does this catalog id satisfy the alias? Pure token comparison. */
+export function aliasMatchesModelId(alias: string, id: string): boolean {
+  const tokens = aliasTokens(alias);
+  const idTokens = id.toLowerCase().split("-").filter(Boolean);
+  if (tokens.length === 0) return false;
+  const namesEffort = EFFORT_TOKENS.includes(tokens[tokens.length - 1]);
+  const start = findTokenRun(idTokens, tokens);
+  if (start === -1) return false;
+  if (!namesEffort) return true;
+  // An effort alias pins the tier: only release-channel qualifiers may follow,
+  // so `…-flash-medium-preview` is still flash-medium and `…-flash-medium-x` is not.
+  const trailing = idTokens.slice(start + tokens.length);
+  return trailing.every((token) => QUALIFIER_TOKENS.includes(token));
+}
+
+/**
+ * Class-level match used only when a family ships no effort variants at all.
+ *
+ * Vendors do move effort out of the id: a `…-pro-orchestrator-neon` flagship
+ * carries no tier token, so every `pro-*` alias would stop resolving and a
+ * legacy `tier: "pro"` would fail for a model that plainly exists. Such a
+ * family answers its tier aliases with its top id instead. A family that does
+ * ship variants never reaches this path, so a retired tier still fails loudly
+ * rather than silently upgrading.
+ */
+function classMatchesModelId(classTokens: readonly string[], id: string): boolean {
+  const idTokens = id.toLowerCase().split("-").filter(Boolean);
+  return findTokenRun(idTokens, classTokens) !== -1;
+}
+
+function namesEffortTier(id: string): boolean {
+  const idTokens = id.toLowerCase().split("-").filter(Boolean);
+  return idTokens.length > 0 && EFFORT_TOKENS.includes(idTokens[idTokens.length - 1]!);
+}
 
 export type AgyModelCatalog = Partial<Record<AgyModel, string>>;
 
@@ -44,17 +116,40 @@ export function isStableModelId(id: string): boolean {
  */
 export function parseModelCatalog(output: string, allowPreview = false): AgyModelCatalog {
   const allow = allowPreview || process.env.PI_AGY_ALLOW_PREVIEW === "1";
-  const found: AgyModelCatalog = {};
+  const ids: string[] = [];
   for (const line of output.split("\n")) {
     const id = line.trim().split(/\s+/)[0] ?? "";
     if (!id) continue;
     if (!allow && !isStableModelId(id)) continue;
-    for (const [alias, pattern] of Object.entries(CATALOG_PATTERNS) as Array<[AgyModel, RegExp]>) {
-      if (pattern.test(id) && compareModelIds(id, found[alias] ?? "") > 0) {
+    ids.push(id);
+  }
+
+  const found: AgyModelCatalog = {};
+  const unanswered: AgyModel[] = [];
+  for (const alias of AGY_MODEL_ALIASES) {
+    for (const id of ids) {
+      // A catalog line that is just the alias name is the CLI's own shortcut,
+      // not a concrete model: letting it win would shadow the real family id.
+      if (id === alias) continue;
+      if (aliasMatchesModelId(alias, id) && compareModelIds(id, found[alias] ?? "") > 0) {
         found[alias] = id;
       }
     }
+    if (found[alias] === undefined) unanswered.push(alias);
   }
+
+  for (const alias of unanswered) {
+    const classTokens = classTokensOf(alias);
+    if (!classTokens) continue;
+    const candidates = ids.filter((id) => classMatchesModelId(classTokens, id));
+    // A class that ships any effort variant is tier-aware: its aliases must
+    // match the requested tier or fail, never fall back to another tier.
+    if (candidates.length === 0 || candidates.some(namesEffortTier)) continue;
+    for (const id of candidates) {
+      if (compareModelIds(id, found[alias] ?? "") > 0) found[alias] = id;
+    }
+  }
+
   return found;
 }
 

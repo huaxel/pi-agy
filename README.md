@@ -24,7 +24,7 @@ Useful options include:
 - `background=true` to return a handle, then use `agy_tasks` to poll, collect, or cancel
 - `context=summary|recent` to optionally pass bounded Pi conversation context (default: none)
 
-The `/agy` command runs tasks from Pi's TUI and can also list agents, inspect quota, diagnose setup, and select saved conversations. Its model picker refreshes the full concrete ID list from `agy models` each time it opens; alias shortcuts remain available. Discovery failures show the reason and mark cached or fallback choices as unverified. Use `model=<id>` for an exact CLI model ID; bare aliases such as `sonnet` still work. For example:
+The `/agy` command runs tasks from Pi's TUI and can also list agents, inspect quota, diagnose setup, and select saved conversations. Its model picker refreshes the full concrete ID list from `agy models` each time it opens; alias shortcuts remain available. Discovery failures show the reason and mark cached choices as unverified. Use `model=<id>` for an exact CLI model ID; bare aliases such as `sonnet` still work. For example:
 
 ```text
 /agy plan flash investigate the failing tests
@@ -34,11 +34,13 @@ The `/agy` command runs tasks from Pi's TUI and can also list agents, inspect qu
 /agy doctor
 ```
 
+Aliases are resolved against the live catalog instead of a shipped table: an alias names a family and optionally a tier (`sonnet`, `flash-low`, `pro-high`), and it matches an id whose hyphen-separated tokens appear contiguously, with a tier only as the id's trailing tokens. A family that ships no tier variants at all answers its tier aliases with its top id, so a flagship named without a tier still serves `pro`. A tier the vendor retires stops resolving and fails with an actionable message rather than quietly substituting a neighbour; the executed concrete id is always reported in the run receipt.
+
 In `accept-edits` mode, Pi confirms before writes. agy's own permission behavior is controlled by its configuration and the package's `agy-config.json` settings below.
 
 ## Use agy as a Pi model
 
-The package registers an `antigravity` provider. Select discovered models as `antigravity/<model>` in Pi's `/model` picker. Models refresh automatically from `agy models` at session startup and whenever Pi opens the model picker (Pi 1.5.2 native refresh). New model names need no package update. Failed discovery keeps the last good catalog, or the synchronous fallback before the first success; reopen `/model` after signing in to retry. Cache-only refreshes never run the CLI. Gemini thinking levels map to agy's supported effort tiers.
+The package registers an `antigravity` provider. Select discovered models as `antigravity/<model>` in Pi's `/model` picker. Models refresh automatically from `agy models` at session startup and whenever Pi opens the model picker (Pi 1.5.2 native refresh). New model names need no package update. Failed discovery keeps the last good catalog; before the first successful discovery the picker is empty rather than a stale built-in list, and `/agy doctor` reports why. Reopen `/model` after signing in to retry. Cache-only refreshes never run the CLI. Gemini thinking levels map to agy's supported effort tiers.
 
 Provider turns use a persistent agy process per working directory and can stage attached images for agy to read. By default, an MCP bridge gives agy read-only Pi context and lets it call active Pi tools through Pi's normal permission and approval flow. Set `"providerBridge": false` in `agy-config.json` to disable the bridge.
 

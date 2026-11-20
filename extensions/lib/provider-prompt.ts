@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -83,15 +83,20 @@ export function imageExtension(mimeType: string): string {
   return IMAGE_EXTENSIONS[mimeType.toLowerCase()] ?? "bin";
 }
 
-/** Collect image blocks in transcript order, optionally only one tool result. */
+/** Collect image blocks in transcript order, optionally only matching tool result(s). */
 export function collectImageBlocks(
   messages: ProviderTranscriptMessage[],
-  onlyToolCallId?: string,
+  onlyToolCallId?: string | ReadonlySet<string>,
 ): PromptImageBlock[] {
   const blocks: PromptImageBlock[] = [];
   for (const message of messages) {
     if (onlyToolCallId !== undefined) {
-      if (message.role !== "toolResult" || message.toolCallId !== onlyToolCallId) continue;
+      if (message.role !== "toolResult") continue;
+      if (typeof onlyToolCallId === "string") {
+        if (message.toolCallId !== onlyToolCallId) continue;
+      } else if (!message.toolCallId || !onlyToolCallId.has(message.toolCallId)) {
+        continue;
+      }
     }
     const content = message.content;
     if (!Array.isArray(content)) continue;
@@ -209,42 +214,115 @@ export async function clearImageStaging(): Promise<void> {
   }
 }
 
-/**
- * Render Pi transcript messages into a single agy `-p` prompt. The latest
- * user message is authoritative; earlier history is bounded reference. Pi
- * tool definitions are intentionally NOT translated — agy runs its own tool
- * loop (see the module wall note).
- */
-export function renderProviderPrompt(
-  messages: ProviderTranscriptMessage[],
-  systemPrompt?: string,
-  imagePaths?: Map<object, string>,
-): string {
-  const imageRef = (block: object): string | undefined => {
+function formatHistoryEntry(
+  message: ProviderTranscriptMessage,
+  imageRef: (block: object) => string | undefined,
+): string | undefined {
+  const text = clip(textOfContent(message.content, imageRef).trim(), MAX_MESSAGE_CHARS);
+  if (!text) return undefined;
+  let label: string;
+  if (message.role === "user") label = "User";
+  else if (message.role === "assistant") label = "Assistant (previous turn)";
+  else if (message.role === "toolResult") {
+    label = `Tool result (${message.toolName ?? "tool"}${message.isError ? ", error" : ""})`;
+  } else if (message.role === "system") label = "System";
+  else label = message.role;
+  return `${label}: ${text}`;
+}
+
+function makeImageRef(imagePaths?: Map<object, string>): (block: object) => string | undefined {
+  return (block: object): string | undefined => {
     const file = imagePaths?.get(block);
     return file
       ? `[attached image saved at ${file} — open it with your file tools to view it]`
       : undefined;
   };
+}
+
+/**
+ * Deterministic fingerprint of a transcript prefix so resumed turns can
+ * detect compaction, /tree rewinds, replaced replies, or edited history
+ * (including image payloads and tool-call arguments) and fall back to a
+ * full prompt instead of sending a delta.
+ */
+export function transcriptFingerprint(messages: readonly ProviderTranscriptMessage[]): string {
+  const hash = createHash("sha256");
+  const mix = (value: string): void => {
+    hash.update(value);
+    hash.update("\u001f");
+  };
+  for (const message of messages) {
+    mix(message.role);
+    if (message.toolCallId) mix(`id:${message.toolCallId}`);
+    if (message.toolName) mix(`tool:${message.toolName}`);
+    if (message.isError) mix("err:1");
+    const content = message.content;
+    if (typeof content === "string") {
+      mix(`t:${content}`);
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (typeof block === "string") {
+          mix(`t:${block}`);
+        } else if (block && typeof block === "object") {
+          const record = block as Record<string, unknown>;
+          if (record.type === "text" && typeof record.text === "string") {
+            mix(`t:${record.text}`);
+          } else if (record.type === "thinking" && typeof record.thinking === "string") {
+            mix(`th:${record.thinking}`);
+          } else if (record.type === "image") {
+            mix(`img:${String(record.mimeType ?? "")}:${String(record.data ?? "")}`);
+          } else if (record.type === "toolCall") {
+            let serializedArgs = "";
+            try {
+              serializedArgs = JSON.stringify(record.arguments ?? {});
+            } catch {
+              serializedArgs = "[unserializable]";
+            }
+            mix(`tc:${String(record.id ?? "")}:${String(record.name ?? "")}:${serializedArgs}`);
+          }
+        }
+      }
+    }
+    hash.update("\u001e");
+  }
+  return `m${messages.length}-${hash.digest("hex").slice(0, 16)}`;
+}
+
+export interface RenderProviderPromptOptions {
+  /** Active bridged Pi tool names exposed via the pi-agy-tools MCP server. */
+  bridgedToolNames?: readonly string[];
+}
+
+/**
+ * Render Pi transcript messages into a full agy turn prompt (used for fresh
+ * conversations, model switches, compaction, or /tree rewinds). The latest
+ * message is authoritative; earlier history is bounded reference. Active Pi
+ * tools are bridged over the localhost `pi-agy-tools` MCP server.
+ */
+export function renderProviderPrompt(
+  messages: ProviderTranscriptMessage[],
+  systemPrompt?: string,
+  imagePaths?: Map<object, string>,
+  options?: RenderProviderPromptOptions,
+): string {
+  const imageRef = makeImageRef(imagePaths);
   const lines: string[] = [];
   if (systemPrompt?.trim()) {
     lines.push("System instructions:", clip(systemPrompt.trim(), MAX_SYSTEM_CHARS), "");
+  }
+  if (options?.bridgedToolNames && options.bridgedToolNames.length > 0) {
+    lines.push(
+      `Pi tool bridge (pi-agy-tools MCP server): ${options.bridgedToolNames.join(", ")}.`,
+      "Prefer these pi-agy-tools MCP tools over built-in workspace file/shell tools so Pi can render native tool cards, run approval gates, and track touched files.",
+      "",
+    );
   }
   const history = messages.slice(0, -1);
   const rendered: string[] = [];
   let budget = MAX_HISTORY_CHARS;
   for (let i = history.length - 1; i >= 0 && budget > 0; i--) {
-    const message = history[i];
-    const text = clip(textOfContent(message.content, imageRef).trim(), MAX_MESSAGE_CHARS);
-    if (!text) continue;
-    let label: string;
-    if (message.role === "user") label = "User";
-    else if (message.role === "assistant") label = "Assistant (previous turn)";
-    else if (message.role === "toolResult") {
-      label = `Tool result (${message.toolName ?? "tool"}${message.isError ? ", error" : ""})`;
-    } else if (message.role === "system") label = "System";
-    else label = message.role;
-    const entry = `${label}: ${text}`;
+    const entry = formatHistoryEntry(history[i], imageRef);
+    if (!entry) continue;
     if (entry.length > budget) break;
     budget -= entry.length;
     rendered.unshift(entry);
@@ -253,6 +331,40 @@ export function renderProviderPrompt(
     lines.push("Conversation history (reference only; the current message is authoritative):", ...rendered, "");
   }
   const last = messages[messages.length - 1];
+  const current = last ? textOfContent(last.content, imageRef).trim() : "";
+  const currentLabel = last && last.role !== "user" ? `Current message (${last.role}):` : "Current message:";
+  lines.push(currentLabel, current || "(empty — respond with a brief acknowledgement)");
+  return lines.join("\n");
+}
+
+/**
+ * Render only the new delta messages for an already-synced resumed agy
+ * conversation, avoiding redundant system prompt and transcript replay.
+ */
+export function renderProviderDeltaPrompt(
+  deltaMessages: ProviderTranscriptMessage[],
+  imagePaths?: Map<object, string>,
+): string {
+  const imageRef = makeImageRef(imagePaths);
+  if (deltaMessages.length === 1 && deltaMessages[0].role === "user") {
+    const current = textOfContent(deltaMessages[0].content, imageRef).trim();
+    return current || "(empty — respond with a brief acknowledgement)";
+  }
+  const lines: string[] = [];
+  const earlier = deltaMessages.slice(0, -1);
+  const rendered: string[] = [];
+  let budget = MAX_HISTORY_CHARS;
+  for (let i = earlier.length - 1; i >= 0 && budget > 0; i--) {
+    const entry = formatHistoryEntry(earlier[i], imageRef);
+    if (!entry) continue;
+    if (entry.length > budget) break;
+    budget -= entry.length;
+    rendered.unshift(entry);
+  }
+  if (rendered.length > 0) {
+    lines.push("Additional context since last turn:", ...rendered, "");
+  }
+  const last = deltaMessages[deltaMessages.length - 1];
   const current = last ? textOfContent(last.content, imageRef).trim() : "";
   const currentLabel = last && last.role !== "user" ? `Current message (${last.role}):` : "Current message:";
   lines.push(currentLabel, current || "(empty — respond with a brief acknowledgement)");

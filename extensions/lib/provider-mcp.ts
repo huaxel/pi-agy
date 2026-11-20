@@ -342,13 +342,19 @@ export async function startMcpBridge(
       if (name === "agy_model_catalog") {
         const entries = await readCatalog(dir, catalogCache);
         catalogCache = entries.cache;
+        // Never name models from memory: a retired id would look selectable
+        // here and then fail at launch.
+        if (entries.models.length === 0) {
+          return toolText(
+            "no agy models resolved: live discovery (agy models) is unavailable. Sign in to agy, then retry; this bridge will not guess model ids.",
+            true,
+          );
+        }
         const lines = entries.models.map(
           (entry) =>
             `- ${entry.id} (--model ${entry.full}${entry.efforts ? `; effort: ${entry.efforts.join("/")}` : "; fixed thinking"})`,
         );
-        return toolText(
-          `agy models${entries.fallback ? " (fallback catalog — live discovery unavailable)" : ""}:\n${lines.join("\n")}`,
-        );
+        return toolText(`agy models:\n${lines.join("\n")}`);
       }
       if (name === ACTIVATE_SKILL_TOOL_NAME) {
         const skillName = stringArg(args.name);
@@ -744,7 +750,7 @@ async function readCatalog(
     const models = parseProviderCatalog(raw);
     if (models.length > 0) return { models, fallback: false, cache: { raw, at: Date.now() } };
   } catch {
-    // Fall through to the fallback catalog.
+    // Fall through to the empty catalog.
   }
   return { models: [...FALLBACK_PROVIDER_MODELS], fallback: true, cache };
 }

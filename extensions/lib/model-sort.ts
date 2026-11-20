@@ -6,15 +6,23 @@
  */
 
 /**
+ * Dotted version segment following the leading family token, e.g.
+ * `acme-3.8-thing` -> `3.8`. Family-agnostic on purpose: naming one vendor
+ * here would freeze ordering to that vendor's id shape.
+ */
+const DOTTED_VERSION_RE = /^[a-z][a-z0-9]*-(\d+(?:\.\d+)+)/i;
+
+/**
  * Order model ids so the newest-looking id wins catalog resolution.
  * Returns a negative/zero/positive number like `Array.prototype.sort` expects.
  */
 export function compareModelIds(a: string, b: string): number {
   if (!b) return 1;
-  const versionA = /^gemini-(\d+(?:\.\d+)*)-/.exec(a)?.[1];
-  const versionB = /^gemini-(\d+(?:\.\d+)*)-/.exec(b)?.[1];
+  const versionA = DOTTED_VERSION_RE.exec(a)?.[1];
+  const versionB = DOTTED_VERSION_RE.exec(b)?.[1];
   if (versionA && versionB) return compareDottedVersions(versionA, versionB);
-  // Numeric-aware compare so claude-sonnet-4-10 sorts above claude-sonnet-4-6.
+  // Numeric-aware compare so `x-4-10` sorts above `x-4-6` and a dotted id
+  // still outranks a hyphenated lower generation.
   return compareNatural(a, b);
 }
 

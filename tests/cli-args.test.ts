@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, stat as statFile, writeFile }
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -21,11 +21,13 @@ import {
   normalizeAgyAgentName,
   parseAgyAgents,
   parseModelCatalog,
+  requireAgyModelId,
   resetModelCatalog,
   resolveAgyModelId,
   supportsAgyEffort,
   updateModelCatalog,
 } from "../extensions/lib/cli.js";
+import { validateAgyModelId } from "../extensions/lib/provider-models.js";
 import { resolveAgyMode, truncate } from "../extensions/index.js";
 import piAgyExtension from "../extensions/index.js";
 import { registerAgyCommand } from "../extensions/commands.js";
@@ -45,7 +47,29 @@ import { parseJsonResponse } from "../extensions/lib/parse.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
 import { hasFlagPair } from "./helpers.js";
+/**
+ * Fixture catalog for argv tests. Production hardcodes no model ids, so the
+ * executable path requires an observed catalog; fixtures supply their own.
+ */
+const ARGV_CATALOG = {
+  "flash-low": "gemini-9.9-flash-low",
+  "flash-medium": "gemini-9.9-flash-medium",
+  "flash-high": "gemini-9.9-flash-high",
+  "pro-low": "gemini-9.9-pro-low",
+  "pro-high": "gemini-9.9-pro-high",
+  sonnet: "claude-sonnet-9-9",
+  opus: "claude-opus-9-9",
+  "gpt-oss": "gpt-oss-9-9-medium",
+} as const;
+
 describe("buildAgyArgs", () => {
+  beforeEach(() => {
+    resetModelCatalog();
+    updateModelCatalog({ ...ARGV_CATALOG });
+  });
+  afterEach(() => {
+    resetModelCatalog();
+  });
   it("uses stream-json for plan mode", () => {
     const args = buildAgyArgs({
       prompt: "test",
@@ -163,7 +187,7 @@ describe("buildAgyArgs", () => {
       dir: "/tmp",
       timeout_ms: 60_000,
     });
-    assert.ok(hasFlagPair(args, "--model", "gemini-3.1-pro-high"));
+    assert.ok(hasFlagPair(args, "--model", ARGV_CATALOG["pro-high"]));
   });
 
   it("passes reasoning effort to models that expose it", () => {
@@ -178,6 +202,27 @@ describe("buildAgyArgs", () => {
     const idx = args.indexOf("--effort");
     assert.equal(args[idx + 1], "high");
     assert.equal(supportsAgyEffort("gpt-oss"), true);
+  });
+
+  it("decides effort for an exact model id without the catalog", () => {
+    const capable = buildAgyArgs({
+      prompt: "t",
+      model_id: validateAgyModelId("gpt-oss-120b-medium"),
+      mode: "plan",
+      dir: "/tmp",
+      timeout_ms: 60_000,
+      effort: "high",
+    });
+    assert.equal(capable[capable.indexOf("--effort") + 1], "high");
+    const fixed = buildAgyArgs({
+      prompt: "t",
+      model_id: validateAgyModelId("gemini-4-neon-high"),
+      mode: "plan",
+      dir: "/tmp",
+      timeout_ms: 60_000,
+      effort: "high",
+    });
+    assert.equal(fixed.includes("--effort"), false);
   });
 
   it("omits unsupported effort for Claude and Gemini aliases", () => {
@@ -241,10 +286,25 @@ describe("model catalog", () => {
     }
   });
 
-  it("falls back to the static map without a catalog", () => {
+  it("never invents a model id without a catalog", () => {
     resetModelCatalog();
-    assert.equal(resolveAgyModelId("flash-medium"), "gemini-3.8-flash-medium");
-    assert.equal(resolveAgyModelId(undefined, "flash"), "gemini-3.8-flash-high");
+    assert.equal(resolveAgyModelId("flash-medium"), undefined);
+    assert.equal(resolveAgyModelId(undefined, "flash"), undefined);
+    assert.throws(
+      () => requireAgyModelId("flash-medium"),
+      /matches nothing in the current catalog/,
+    );
+  });
+
+  it("resolves legacy tiers through the catalog, not through literals", () => {
+    resetModelCatalog();
+    updateModelCatalog({ "flash-high": "gemini-9.9-flash-high" });
+    try {
+      assert.equal(resolveAgyModelId(undefined, "flash"), "gemini-9.9-flash-high");
+      assert.equal(requireAgyModelId(undefined, "flash"), "gemini-9.9-flash-high");
+    } finally {
+      resetModelCatalog();
+    }
   });
 
   it("accepts only known model aliases", () => {

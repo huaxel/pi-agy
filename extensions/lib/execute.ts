@@ -11,6 +11,7 @@ import {
   isAgyQuotaExhausted,
   isTransientAgyFailure,
   normalizeAgyAgentName,
+  requireAgyModelId,
   resolveAgyModelAlias,
   resolveAgyModelId,
   spawnAgyStream,
@@ -177,7 +178,7 @@ export async function executeAgyTask(
         const run = await runWithTransientRetry(async (trackProgress) => {
           const remainingMs = remainingBudget(startedAt, options.timeout_ms);
           quota = await runPreflight(options.dir, abortSignal, remainingMs);
-          const selectedModelId = options.model_id ?? resolveAgyModelId(model, options.tier);
+          const selectedModelId = options.model_id ?? requireAgyModelId(model, options.tier);
           const selectedQuotas = findAgyQuotaEntries(quota, selectedModelId);
           quotaStatus = quota
             ? selectedQuotas.length === 0
@@ -192,7 +193,7 @@ export async function executeAgyTask(
               : undefined;
             if (fallback) {
               onProgress?.(
-                `agy: ${selectedModelId} quota exhausted; falling back to ${resolveAgyModelId(fallback)}…`,
+                `agy: ${selectedModelId} quota exhausted; falling back to ${resolveAgyModelId(fallback) ?? fallback}…`,
               );
               model = fallback;
               effectiveModel = fallback;
@@ -387,7 +388,10 @@ function findAvailableFallbackModel(
   if (!snapshot) return undefined;
   return FALLBACK_MODELS.find((candidate) => {
     if (candidate === current) return false;
-    const entries = findAgyQuotaEntries(snapshot, resolveAgyModelId(candidate));
+    // An alias with no catalog match cannot be run, so it cannot be the fallback.
+    const id = resolveAgyModelId(candidate);
+    if (!id) return false;
+    const entries = findAgyQuotaEntries(snapshot, id);
     return entries.length > 0 && entries.every((entry) => !isAgyQuotaExhausted(entry));
   });
 }

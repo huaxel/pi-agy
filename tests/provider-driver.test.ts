@@ -468,6 +468,89 @@ describe("persistent provider driver", () => {
       assert.equal(await controls.spawnCount(), 2);
     });
   });
+
+  it("micro-batches parallel parks into one parked phase", async () => {
+    await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async () => {
+      const driver = track(new AgyProviderDriver({ parkBatchMs: 15 }));
+      const pending = driver.turn(profile, turnOptions({ timeoutMs: 1000 }));
+      await Promise.resolve();
+      assert.equal(driver.notifyPark({ callId: "p1", toolName: "read", args: { path: "a" } }), true);
+      assert.equal(driver.notifyPark({ callId: "p2", toolName: "read", args: { path: "b" } }), true);
+      assert.equal(driver.notifyPark({ callId: "p3", toolName: "grep", args: { q: "x" } }), true);
+      const parked = await awaitWithWatchdog(pending, "batched parks");
+      assert.equal(parked.kind, "parked");
+      if (parked.kind !== "parked") throw new Error("expected parked");
+      assert.equal(parked.park.callId, "p1");
+      assert.deepEqual(parked.parks.map((p) => p.callId), ["p1", "p2", "p3"]);
+      // Once suspended after flush, a late park is still refused.
+      assert.equal(driver.notifyPark({ callId: "p4", toolName: "read", args: {} }), false);
+    });
+  });
+
+  it("forwards thinking deltas separately from activity and passes --settings when configured", async () => {
+    let seenArgs: readonly string[] = [];
+    await withTimingFakeAgy({
+      onSpawn: (args, child) => {
+        seenArgs = args;
+        Object.assign(child, { stdin: new PassThrough() });
+      },
+    }, async (children) => {
+      const driver = track(new AgyProviderDriver());
+      const thinking: string[] = [];
+      const activity: string[] = [];
+      const settingsJson = JSON.stringify({ permissions: { deny: ["command(*)"], allow: ["mcp(*)"] } });
+      const pending = driver.turn(
+        { ...profile, settingsJson },
+        turnOptions({
+          onThinking: (delta: string) => thinking.push(delta),
+          onActivity: (label: string) => activity.push(label),
+        }),
+      );
+      await Promise.resolve();
+      const child = [...children][0];
+      child.stdout.write(JSON.stringify({ event: "init", init: { model: "fake" } }) + "\n");
+      child.stdout.write(JSON.stringify({ event: "step_update", step_update: { step_type: "thinking", text_delta: "plan " } }) + "\n");
+      child.stdout.write(JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", thinking_delta: "more", text_delta: "hi" } }) + "\n");
+      child.stdout.write(JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "hi" } }) + "\n");
+      const end = await awaitWithWatchdog(pending, "thinking separation");
+      assert.equal(expectDone(end).text, "hi");
+      assert.deepEqual(thinking, ["plan ", "more"]);
+      assert.ok(activity.includes("agy: session started (fake)"));
+      const idx = seenArgs.indexOf("--settings");
+      assert.ok(idx !== -1 && seenArgs[idx + 1] === settingsJson);
+    });
+  });
+
+  it("orphans pending micro-batch parks on abort during parkBatchMs and recycles on settings-changed", async () => {
+    await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+      const driver = track(new AgyProviderDriver({ parkBatchMs: 50 }));
+      let orphans = 0;
+      driver.onParksOrphaned = () => { orphans++; };
+      const controller = new AbortController();
+      const pending = driver.turn(profile, turnOptions({ signal: controller.signal, timeoutMs: 1000 }));
+      await Promise.resolve();
+      assert.equal(driver.notifyPark({ callId: "pending-1", toolName: "read", args: {} }), true);
+      controller.abort();
+      await assert.rejects(awaitWithWatchdog(pending, "aborted during batch window"), /cancelled/);
+      assert.equal(orphans, 1);
+
+      const t1 = driver.turn({ ...profile, settingsJson: '{"permissions":{"deny":["command(*)"]}}' }, turnOptions());
+      await Promise.resolve();
+      const child1 = [...children][children.size - 1];
+      child1.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"r1","conversation_id":"c1"}}\n');
+      assert.equal(expectDone(await awaitWithWatchdog(t1, "settings first")).text, "r1");
+
+      const t2 = driver.turn(
+        { ...profile, settingsJson: '{"permissions":{"deny":["command(*)","write_file(*)"]}}' },
+        turnOptions({ resumeConversationId: "c1" }),
+      );
+      await Promise.resolve();
+      const child2 = [...children][children.size - 1];
+      child2.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"r2","conversation_id":"c1"}}\n');
+      assert.equal(expectDone(await awaitWithWatchdog(t2, "settings second")).text, "r2");
+      assert.equal(driver.snapshot().stats.lastRecycleReason, "settings-changed");
+    });
+  });
 });
 
 // Deterministic driver probes: no real process, pid, credentials, or inference.

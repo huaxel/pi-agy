@@ -9,8 +9,10 @@ import { afterEach, describe, it, mock } from "node:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import {
+  buildBridgeSettings,
   createAgyStreamSimple,
   getProviderRunner,
+  renderProviderDeltaPrompt,
   renderProviderPrompt,
   resolveProviderTurnModel,
   type AgyEventStream,
@@ -35,8 +37,17 @@ import { AGY_PROVIDER_ID, closeProviderDrivers } from "../extensions/lib/provide
 afterEach(async () => {
   await closeProviderDrivers();
 });
-import { FALLBACK_PROVIDER_MODELS } from "../extensions/lib/provider-models.js";
+/**
+ * Test-local provider catalog. Production ships no built-in model ids (agy
+ * models is the only source), so fixtures must own their concrete names.
+ */
+const TEST_CATALOG: AgyProviderModelEntry[] = [
+  { full: "gemini-3.8-flash", id: "gemini-3-8-flash", efforts: ["low", "medium", "high"] },
+  { full: "gemini-3.1-pro", id: "gemini-3-1-pro", efforts: ["low", "high"] },
+  { full: "claude-sonnet-4-6", id: "claude-sonnet-4-6" },
+];
 import { readFakeAgyArgs, withFakeAgy } from "./helpers.js";
+import type { AgyProviderModelEntry } from "../extensions/lib/provider-models.js";
 
 /** Run with an isolated agent dir so session-store reads/writes never touch the real store. */
 async function withIsolatedAgentDir<T>(fn: () => Promise<T>): Promise<T> {
@@ -122,23 +133,57 @@ describe("provider prompt rendering", () => {
     ]);
     assert.match(prompt, /image omitted/);
   });
+
+  it("includes MCP routing guidance when bridged tools are present", () => {
+    const prompt = renderProviderPrompt([userMessage("inspect")], "rules", undefined, {
+      bridgedToolNames: ["read", "bash", "edit"],
+    });
+    assert.match(prompt, /Pi tool bridge \(pi-agy-tools MCP server\): read, bash, edit/);
+    assert.match(prompt, /Prefer these pi-agy-tools MCP tools/);
+  });
+
+  it("renders compact delta prompts for resumed turns", () => {
+    assert.equal(renderProviderDeltaPrompt([userMessage("follow up")]), "follow up");
+    const multi = renderProviderDeltaPrompt([
+      { role: "system", content: "out-of-band note" },
+      userMessage("continue"),
+    ]);
+    assert.match(multi, /Additional context since last turn:\nSystem: out-of-band note/);
+    assert.match(multi, /Current message:\ncontinue/);
+  });
+
+  it("builds session-only deny settings for bridged shell and file-write tools", () => {
+    assert.equal(buildBridgeSettings([]), undefined);
+    assert.equal(
+      buildBridgeSettings([{ name: "read", piName: "read", description: "Read", inputSchema: { type: "object" } }]),
+      undefined,
+    );
+    const settings = buildBridgeSettings([
+      { name: "bash", piName: "bash", description: "Shell", inputSchema: { type: "object" } },
+      { name: "edit", piName: "edit", description: "Edit", inputSchema: { type: "object" } },
+    ]);
+    assert.ok(settings);
+    assert.deepEqual(JSON.parse(settings!), {
+      permissions: { deny: ["command(*)", "write_file(*)"] },
+    });
+  });
 });
 
 describe("provider model resolution", () => {
   it("maps thinking levels to effort for effort-driven bases", () => {
-    assert.deepEqual(resolveProviderTurnModel(FALLBACK_PROVIDER_MODELS, "gemini-3-8-flash", "medium"), {
+    assert.deepEqual(resolveProviderTurnModel(TEST_CATALOG, "gemini-3-8-flash", "medium"), {
       full: "gemini-3.8-flash",
       effort: "medium",
     });
     // Fallback Pro entry has no medium: clamps to high.
-    assert.deepEqual(resolveProviderTurnModel(FALLBACK_PROVIDER_MODELS, "gemini-3-1-pro", "medium"), {
+    assert.deepEqual(resolveProviderTurnModel(TEST_CATALOG, "gemini-3-1-pro", "medium"), {
       full: "gemini-3.1-pro",
       effort: "high",
     });
   });
 
   it("never passes effort for fixed-thinking models", () => {
-    assert.deepEqual(resolveProviderTurnModel(FALLBACK_PROVIDER_MODELS, "claude-sonnet-4-6", "high"), {
+    assert.deepEqual(resolveProviderTurnModel(TEST_CATALOG, "claude-sonnet-4-6", "high"), {
       full: "claude-sonnet-4-6",
       effort: undefined,
     });
@@ -146,7 +191,7 @@ describe("provider model resolution", () => {
 
   it("fails closed on unknown model ids", () => {
     assert.throws(
-      () => resolveProviderTurnModel(FALLBACK_PROVIDER_MODELS, "gemini-9-9-flash"),
+      () => resolveProviderTurnModel(TEST_CATALOG, "gemini-9-9-flash"),
       /Unknown antigravity model.*reopen \/model to refresh/,
     );
   });
@@ -157,7 +202,7 @@ describe("provider streamSimple", () => {
     await withIsolatedAgentDir(async () => {
     const factory = createRecordingFactory();
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner: makeStaticRunner(async ({ callbacks }) => {
         callbacks?.onText?.("hello ");
         callbacks?.onText?.("world");
@@ -176,23 +221,26 @@ describe("provider streamSimple", () => {
     });
   });
 
-  it("surfaces agy tool activity as thinking events", async () => {
+  it("routes agy step activity to live status instead of thinking blocks", async () => {
     await withIsolatedAgentDir(async () => {
     const factory = createRecordingFactory();
+    const statuses: Array<string | undefined> = [];
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
+      onActivity: (label) => statuses.push(label),
       runner: makeStaticRunner(async ({ callbacks }) => {
-        callbacks?.onActivity?.("[agy tool: editing foo.ts]");
+        callbacks?.onActivity?.("▸ read → foo.ts");
         callbacks?.onText?.("done");
-        return { text: "done", truncated: false, activity: ["[agy tool: editing foo.ts]"] };
+        return { text: "done", truncated: false, activity: ["▸ read → foo.ts"] };
       }),
     });
     streamSimple({ id: "claude-sonnet-4-6" }, [userMessage("edit foo")], {});
     await new Promise((resolve) => setTimeout(resolve, 50));
     const types = factory.events.map((event) => event.type);
-    assert.ok(types.includes("thinking_start"));
-    assert.ok(types.includes("thinking_delta"));
-    assert.ok(types.includes("thinking_end"));
+    assert.equal(types.includes("thinking_start"), false);
+    assert.equal(types.includes("thinking_delta"), false);
+    assert.equal(types.includes("thinking_end"), false);
+    assert.deepEqual(statuses, ["▸ read → foo.ts", undefined]);
     });
   });
 
@@ -201,7 +249,7 @@ describe("provider streamSimple", () => {
     const factory = createRecordingFactory();
     let spawned = false;
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner: makeStaticRunner(async () => {
         spawned = true;
         throw new Error("must not spawn");
@@ -222,7 +270,7 @@ describe("provider streamSimple", () => {
     await withIsolatedAgentDir(async () => {
     const factory = createRecordingFactory();
     const seen: Array<{ fullModel: string; effort?: string; resume?: string }> = [];
-    const entries = [...FALLBACK_PROVIDER_MODELS];
+    const entries = [...TEST_CATALOG];
     const streamSimple = createAgyStreamSimple(factory, {
       entries,
       runner: makeStaticRunner(async (request) => {
@@ -258,7 +306,7 @@ describe("provider streamSimple", () => {
     const factory = createRecordingFactory();
     const seen: Array<string | undefined> = [];
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner: makeStaticRunner(async (request) => {
         seen.push(request.resumeConversationId);
         return { text: "ok", truncated: false, conversationId: "conv-fresh", activity: [] };
@@ -275,7 +323,7 @@ describe("provider streamSimple", () => {
     await withIsolatedAgentDir(async () => {
     const factory = createRecordingFactory();
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner: makeStaticRunner(async ({ callbacks }) => {
         callbacks?.onText?.("partial");
         return { text: "partial", truncated: false, timedOut: true, activity: [] };
@@ -300,23 +348,212 @@ describe("provider streamSimple", () => {
     });
   });
 
-  it("emits thinking_end with string content", async () => {
+  it("emits thinking_start/delta/end with string content for model reasoning", async () => {
     await withIsolatedAgentDir(async () => {
     const factory = createRecordingFactory();
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner: makeStaticRunner(async ({ callbacks }) => {
-        callbacks?.onActivity?.("[agy tool: editing foo.ts]");
+        callbacks?.onThinking?.("step 1 ");
+        callbacks?.onThinking?.("step 2");
         callbacks?.onText?.("done");
         return { text: "done", truncated: false, activity: [] };
       }),
     });
     streamSimple({ id: "claude-sonnet-4-6" }, [userMessage("edit foo")], {});
     await new Promise((resolve) => setTimeout(resolve, 50));
+    const types = factory.events.map((event) => event.type);
+    assert.ok(types.includes("thinking_start"));
+    assert.ok(types.includes("thinking_delta"));
     const end = factory.events.find((event) => event.type === "thinking_end") as unknown as {
       content: unknown;
     };
-    assert.equal(typeof end.content, "string");
+    assert.equal(end.content, "step 1 step 2");
+    });
+  });
+
+  it("sends only the delta prompt on synced resumed conversations and falls back on rewind or prompt change", async () => {
+    await withIsolatedAgentDir(async () => {
+      let currentSystemPrompt = "Be helpful.";
+      const events: Array<Record<string, unknown>> = [];
+      const factory: AgyStreamFactory & { events: Array<Record<string, unknown>> } = {
+        events,
+        createStream: () => ({
+          push: (event) => events.push(event),
+          end: () => events.push({ type: "__end" }),
+        }),
+        getSystemPrompt: () => currentSystemPrompt,
+      };
+      const prompts: string[] = [];
+      const streamSimple = createAgyStreamSimple(factory, {
+        entries: [...TEST_CATALOG],
+        runner: makeStaticRunner(async (request) => {
+          prompts.push(request.prompt);
+          return { text: `reply-${prompts.length}`, truncated: false, conversationId: "conv-delta", activity: [] };
+        }),
+      });
+
+      // Turn 1: fresh full prompt
+      let start = factory.events.length;
+      streamSimple({ id: "gemini-3-8-flash" }, [userMessage("first question")], {});
+      await waitForStreamEnd(factory, start);
+      assert.match(prompts[0], /System instructions:\nBe helpful\./);
+      assert.match(prompts[0], /Current message:\nfirst question/);
+
+      // Turn 2: resumed with matching prefix -> delta only
+      start = factory.events.length;
+      streamSimple(
+        { id: "gemini-3-8-flash" },
+        [userMessage("first question"), { role: "assistant", content: "reply-1" }, userMessage("second question")],
+        {},
+      );
+      await waitForStreamEnd(factory, start);
+      assert.equal(prompts[1], "second question");
+
+      // Turn 3: /tree rewind (changed prefix) -> falls back to full prompt
+      start = factory.events.length;
+      streamSimple(
+        { id: "gemini-3-8-flash" },
+        [userMessage("rewound question"), { role: "assistant", content: "reply-1" }, userMessage("third question")],
+        {},
+      );
+      await waitForStreamEnd(factory, start);
+      assert.match(prompts[2], /System instructions:\nBe helpful\./);
+      assert.match(prompts[2], /Conversation history/);
+      assert.match(prompts[2], /Current message:\nthird question/);
+
+      // Turn 4: replaced assistant reply (same prefix, different assistant content) -> falls back to full prompt
+      start = factory.events.length;
+      streamSimple(
+        { id: "gemini-3-8-flash" },
+        [
+          userMessage("rewound question"),
+          { role: "assistant", content: "reply-1" },
+          userMessage("third question"),
+          { role: "assistant", content: "regenerated-reply-3" },
+          userMessage("fourth question"),
+        ],
+        {},
+      );
+      await waitForStreamEnd(factory, start);
+      assert.match(prompts[3], /System instructions:\nBe helpful\./);
+      assert.match(prompts[3], /regenerated-reply-3/);
+
+      // Turn 5: bridged tool catalog changed -> falls back to full prompt with routing note
+      start = factory.events.length;
+      streamSimple(
+        { id: "gemini-3-8-flash" },
+        [
+          userMessage("rewound question"),
+          { role: "assistant", content: "reply-1" },
+          userMessage("third question"),
+          { role: "assistant", content: "regenerated-reply-3" },
+          userMessage("fourth question"),
+          { role: "assistant", content: "reply-4" },
+          userMessage("fifth question"),
+        ],
+        { tools: [{ name: "bash", description: "Shell", parameters: { type: "object", properties: {} } }] },
+      );
+      await waitForStreamEnd(factory, start);
+      assert.match(prompts[4], /Pi tool bridge \(pi-agy-tools MCP server\): bash/);
+
+      // Turn 6: system prompt changed -> falls back to full prompt
+      currentSystemPrompt = "New rules.";
+      start = factory.events.length;
+      streamSimple(
+        { id: "gemini-3-8-flash" },
+        [
+          userMessage("rewound question"),
+          { role: "assistant", content: "reply-1" },
+          userMessage("third question"),
+          { role: "assistant", content: "regenerated-reply-3" },
+          userMessage("fourth question"),
+          { role: "assistant", content: "reply-4" },
+          userMessage("fifth question"),
+          { role: "assistant", content: "reply-5" },
+          userMessage("sixth question"),
+        ],
+        { tools: [{ name: "bash", description: "Shell", parameters: { type: "object", properties: {} } }] },
+      );
+      await waitForStreamEnd(factory, start);
+      assert.match(prompts[5], /System instructions:\nNew rules\./);
+    });
+  });
+
+  it("batches parallel parked tool calls in one assistant turn and resumes with all deliveries", async () => {
+    await withIsolatedAgentDir(async () => {
+      const factory = createRecordingFactory();
+      const delivered: Array<{ callId: string; text: string; isError: boolean }> = [];
+      const seenPrompts: string[] = [];
+      let runCount = 0;
+      const runner: ProviderTurnRunner = {
+        run: async (request) => {
+          seenPrompts.push(request.prompt);
+          runCount += 1;
+          if (runCount === 1) {
+            return {
+              kind: "parked" as const,
+              park: { callId: "p1", toolName: "read", args: { path: "a.ts" } },
+              parks: [
+                { callId: "p1", toolName: "read", args: { path: "a.ts" } },
+                { callId: "p2", toolName: "read", args: { path: "b.ts" } },
+              ],
+            };
+          }
+          return { kind: "done" as const, result: { text: "follow-up ok", truncated: false, conversationId: "conv-par", activity: [] } };
+        },
+        resume: async (got) => {
+          delivered.push(...got);
+          return { kind: "done" as const, result: { text: "both read", truncated: false, conversationId: "conv-par", activity: [] } };
+        },
+        cancel: () => {},
+      };
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-par-"));
+      try {
+        const streamSimple = createAgyStreamSimple(factory, {
+          entries: [...TEST_CATALOG],
+          runner,
+          dir,
+        });
+        const start1 = factory.events.length;
+        streamSimple({ id: "gemini-3-8-flash" }, [userMessage("read both")], {});
+        await waitForStreamEnd(factory, start1);
+        const done1 = factory.events.find((event) => event.type === "done") as unknown as {
+          reason: string;
+          message: { content: Array<{ type: string; id: string; name: string }> };
+        };
+        assert.equal(done1.reason, "toolUse");
+        const calls = done1.message.content.filter((block) => block.type === "toolCall");
+        assert.equal(calls.length, 2);
+        assert.equal(getProviderStatus(dir).suspended.length, 2);
+
+        const resumedTranscript: ProviderTranscriptMessage[] = [
+          userMessage("read both"),
+          { role: "assistant", content: calls.map((c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: {} })) },
+          { role: "toolResult", toolCallId: calls[0].id, toolName: "read", content: "content A", isError: false },
+          { role: "toolResult", toolCallId: calls[1].id, toolName: "read", content: "content B", isError: false },
+        ];
+        const start2 = factory.events.length;
+        streamSimple({ id: "gemini-3-8-flash" }, resumedTranscript, {});
+        await waitForStreamEnd(factory, start2);
+        assert.deepEqual(delivered, [
+          { callId: "p1", text: "content A", isError: false },
+          { callId: "p2", text: "content B", isError: false },
+        ]);
+        assert.equal(getProviderStatus(dir).suspended.length, 0);
+
+        // Next user turn after parked resume uses delta prompt.
+        const start3 = factory.events.length;
+        streamSimple(
+          { id: "gemini-3-8-flash" },
+          [...resumedTranscript, { role: "assistant", content: "both read" }, userMessage("now summarize")],
+          {},
+        );
+        await waitForStreamEnd(factory, start3);
+        assert.equal(seenPrompts[1], "now summarize");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
   });
 });
@@ -327,7 +564,7 @@ describe("provider terminal response reconciliation", () => {
       for (const [draft, terminal] of [["prefix ", "prefix plus terminal"], ["draft text", "corrected final"]]) {
         const factory = createRecordingFactory();
         const streamSimple = createAgyStreamSimple(factory, {
-          entries: [...FALLBACK_PROVIDER_MODELS],
+          entries: [...TEST_CATALOG],
           runner: makeStaticRunner(async ({ callbacks }) => {
             callbacks?.onText?.(draft);
             return { text: terminal, truncated: false, activity: [] };
@@ -351,7 +588,7 @@ describe("provider terminal response reconciliation", () => {
       for (const activity of [["terminal activity"], []]) {
         const factory = createRecordingFactory();
         const streamSimple = createAgyStreamSimple(factory, {
-          entries: [...FALLBACK_PROVIDER_MODELS],
+          entries: [...TEST_CATALOG],
           runner: makeStaticRunner(async ({ callbacks }) => {
             callbacks?.onText?.("stale live draft");
             return { text: "", truncated: false, activity };
@@ -385,7 +622,7 @@ describe("provider terminal response reconciliation", () => {
         for (const testCase of cases) {
           const factory = createRecordingFactory();
           const streamSimple = createAgyStreamSimple(factory, {
-            entries: [...FALLBACK_PROVIDER_MODELS],
+            entries: [...TEST_CATALOG],
             runner: makeStaticRunner(async ({ callbacks }) => {
               if (live) callbacks?.onText?.("provisional draft");
               return { text: "terminal answer", truncated: false, activity: [], ...testCase };
@@ -424,7 +661,7 @@ describe("provider terminal response reconciliation", () => {
             getSystemPrompt: () => "",
           },
           {
-            entries: [...FALLBACK_PROVIDER_MODELS],
+            entries: [...TEST_CATALOG],
             runner: makeStaticRunner(async ({ callbacks }) => {
               callbacks?.onText?.(liveText);
               return { text: terminalText, truncated: false, activity: [] };
@@ -483,7 +720,7 @@ async function bridgedToolCatalogs(
   const factory = createRecordingFactory();
   const captured: Array<Array<{ name: string; piName: string }>> = [];
   const streamSimple = createAgyStreamSimple(factory, {
-    entries: [...FALLBACK_PROVIDER_MODELS],
+    entries: [...TEST_CATALOG],
     tools: depsTools,
     runner: makeStaticRunner(async (request) => {
       captured.push(request.bridgedTools.map(({ name, piName }) => ({ name, piName })));
@@ -552,7 +789,7 @@ describe("provider tool round-trip", () => {
       cancel: () => {},
     };
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner,
       tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
     });
@@ -638,7 +875,7 @@ describe("provider tool round-trip", () => {
       },
     };
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner,
     });
     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("first")], {});
@@ -685,7 +922,7 @@ describe("provider tool round-trip", () => {
       cancel: () => {},
     };
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner,
     });
     // No suspended turn exists and no toolResult matches: plain fresh run.
@@ -797,7 +1034,7 @@ describe("provider image staging", () => {
       cancel: () => {},
     };
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner,
     });
     streamSimple(
@@ -832,7 +1069,7 @@ describe("provider image staging", () => {
       cancel: () => {},
     };
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner,
     });
     streamSimple(
@@ -891,7 +1128,7 @@ describe("provider status", () => {
     };
     const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-status-susp-"));
     const streamSimple = createAgyStreamSimple(factory, {
-      entries: [...FALLBACK_PROVIDER_MODELS],
+      entries: [...TEST_CATALOG],
       runner,
       dir,
     });
@@ -929,7 +1166,7 @@ import { createInterface } from "node:readline";
 const { Client } = await import(${JSON.stringify(clientUrl)});
 const { StreamableHTTPClientTransport } = await import(${JSON.stringify(transportUrl)});
 const args = process.argv.slice(2);
-if (args.includes("models")) { console.log("fake-model"); process.exit(0); }
+if (args.includes("models")) { console.log("gemini-3.8-flash-low\\ngemini-3.8-flash-medium\\ngemini-3.8-flash-high\\ngemini-3.1-pro-low\\ngemini-3.1-pro-high\\nclaude-sonnet-4-6\\nclaude-opus-4-6-thinking\\ngpt-oss-120b-medium"); process.exit(0); }
 const dirs = args.flatMap((arg, index) => arg === "--add-dir" ? [args[index + 1]] : []);
 const configDir = dirs.find((dir) => { try { return readFileSync(dir + "/.agents/mcp_config.json", "utf8"); } catch { return false; } });
 if (!configDir) throw new Error("bridge config not found");
@@ -1017,6 +1254,13 @@ async function runRegisteredCatalogScenario(withOptions: boolean): Promise<strin
           piAgyExtension(fakePi as unknown as ExtensionAPI);
           const provider = providers[0];
           assert.ok(provider?.streamSimple);
+          // No bundled catalog exists any more: discovery is the only source of
+          // model ids, so resolve the fixture roster before the turn.
+          await provider!.refreshModels!({
+            allowNetwork: true,
+            signal: new AbortController().signal,
+            publish: async ({ update }) => { update?.(); return true; },
+          });
           type RegistrationTranscriptMessage = ProviderTranscriptMessage & {
             timestamp: number;
             toolsAdded?: object[];
@@ -1124,9 +1368,11 @@ describe("provider registration", () => {
           piAgyExtension(fakePi as unknown as ExtensionAPI);
           const provider = providers.find((entry) => entry.name === AGY_PROVIDER_ID);
           assert.ok(provider, "antigravity provider was not registered");
-          const ids = provider!.config.models.map((model) => model.id);
-          for (const entry of FALLBACK_PROVIDER_MODELS) {
-            assert.ok(ids.includes(entry.id), `missing fallback model: ${entry.id}`);
+          const ids: string[] = provider!.config.models.map((model) => model.id);
+          // No invented ids before discovery: an empty picker is the honest state.
+          assert.deepEqual(ids, []);
+          for (const entry of TEST_CATALOG) {
+            assert.ok(!ids.some((id) => id === entry.id), `fabricated model id: ${entry.id}`);
           }
           assert.equal(typeof provider!.config.streamSimple, "function");
           // Factory registration is synchronous and starts no discovery I/O.
@@ -1166,7 +1412,7 @@ describe("provider real stream protocol", () => {
           getSystemPrompt: () => "",
         },
         {
-          entries: [...FALLBACK_PROVIDER_MODELS],
+          entries: [...TEST_CATALOG],
           runner: makeStaticRunner(async ({ callbacks }) => {
             callbacks?.onText?.("real stream text");
             return { text: "real stream text", truncated: false, activity: [] };
@@ -1339,7 +1585,7 @@ describe("provider parked resource reclamation", () => {
             const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-reclaim-"));
             const factory = createRecordingFactory();
             const stream = createAgyStreamSimple(factory, {
-              dir, entries: [...FALLBACK_PROVIDER_MODELS],
+              dir, entries: [...TEST_CATALOG],
               tools: [{ name: "read", description: "Read", parameters: { type: "object" } }],
             });
             const old = new AbortController();
@@ -1435,7 +1681,7 @@ async function withProviderLifecycleProbe(fn: (probe: {
       const parkStub = mock.method(driver, "notifyPark", (park: Parameters<typeof driver.notifyPark>[0]) => { parks.push(park); return notify(park); });
       const factory = createRecordingFactory();
       const controller = new AbortController();
-      const stream = createAgyStreamSimple(factory, { dir, entries: [...FALLBACK_PROVIDER_MODELS],
+      const stream = createAgyStreamSimple(factory, { dir, entries: [...TEST_CATALOG],
         tools: [{ name: "read", description: "Read", parameters: { type: "object" } }],
       });
       const client = new Client({ name: "lifecycle-probe", version: "1" }, { capabilities: {} });
@@ -1569,4 +1815,34 @@ it("keeps ordinary escalation polling available until the owning operation ends"
       if (done.kind === "done") assert.equal(done.result.text, "after polling");
     });
   } finally { timerStub.mock.restore(); }
+});
+
+it("batches concurrent loopback MCP tool calls into a single Pi toolUse turn", { timeout: 7000 }, async () => {
+  await withProviderLifecycleProbe(async ({ dir, child, runner, client, factory, parks }) => {
+    const callA = callProbeTool(client, "read");
+    const callB = callProbeTool(client, "read");
+    await waitForStreamEnd(factory, 0);
+    const done = factory.events.find((event) => event.type === "done") as unknown as {
+      reason: string;
+      message: { content: Array<{ type: string; id: string; name: string }> };
+    };
+    assert.equal(done.reason, "toolUse");
+    const toolCalls = done.message.content.filter((block) => block.type === "toolCall");
+    assert.equal(toolCalls.length, 2);
+    assert.equal(parks.length, 2);
+    assert.equal(getProviderStatus(dir).suspended.length, 2);
+
+    const resumed = runner.resume([
+      { callId: parks[0].callId, text: "first payload", isError: false },
+      { callId: parks[1].callId, text: "second payload", isError: false },
+    ]);
+    const [resA, resB] = await Promise.all([callA, callB]);
+    assert.match(JSON.stringify(resA), /first payload/);
+    assert.match(JSON.stringify(resB), /second payload/);
+    child.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"parallel complete"}}\n');
+    const finalEnd = await awaitWithWatchdog(resumed, "parallel resumed terminal");
+    assert.equal(finalEnd.kind, "done");
+    if (finalEnd.kind === "done") assert.equal(finalEnd.result.text, "parallel complete");
+    assert.equal(getProviderStatus(dir).suspended.length, 0);
+  });
 });

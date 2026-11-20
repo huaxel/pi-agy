@@ -26,6 +26,7 @@ import {
   parseAgyUsage,
   parseModelCatalog,
   resetModelCatalog,
+  updateModelCatalog,
 } from "../extensions/lib/cli.js";
 import { canonicalDir, withDirLock } from "../extensions/lib/lock.js";
 import {
@@ -314,7 +315,41 @@ describe("model catalog stability", () => {
     resetModelCatalog();
   });
 
+  it("answers tier aliases for a family that ships no effort variants", () => {
+    // A flagship whose id carries no tier token still exists for `pro` users.
+    const catalog = parseModelCatalog(
+      [
+        "gemini-3.8-flash-medium\tFlash Medium",
+        "gemini-pro-orchestrator-neon\tOrchestrator (Neon)",
+        "gemini-pro-orchestrator-g1-pro\tOrchestrator (Argon)",
+      ].join("\n"),
+    );
+    assert.equal(catalog["flash-medium"], "gemini-3.8-flash-medium");
+    assert.equal(catalog["pro-high"], "gemini-pro-orchestrator-neon");
+    assert.equal(catalog["pro-low"], "gemini-pro-orchestrator-neon");
+    resetModelCatalog();
+  });
+
+  it("never falls back to another tier of a tier-aware family", () => {
+    const catalog = parseModelCatalog("gemini-3.8-flash-high\tFlash High");
+    assert.equal(catalog["flash-high"], "gemini-3.8-flash-high");
+    // The retired tier fails loudly instead of silently resolving to `high`.
+    assert.equal(catalog["flash-low"], undefined);
+    assert.equal(catalog["flash-medium"], undefined);
+    resetModelCatalog();
+  });
+
+  it("counts an extra-high suffix as a tier variant", () => {
+    // `xhigh` is a tier too: it keeps the class tier-aware so `pro-high` fails
+    // loudly instead of being answered by an unrelated tier.
+    const catalog = parseModelCatalog("gemini-pro-4-orchestrator-xhigh\tOrchestrator XHigh");
+    assert.equal(catalog["pro-high"], undefined);
+    resetModelCatalog();
+  });
+
   it("passes task text without slash expansion", () => {
+    // Argv building needs a discovered catalog: no model id is hardcoded.
+    updateModelCatalog({ "flash-medium": "gemini-3.8-flash-medium" });
     const args = buildAgyArgs({
       prompt: "/dangerous --mode evil",
       mode: "plan",
@@ -324,6 +359,7 @@ describe("model catalog stability", () => {
     });
     assert.ok(args.includes("--disable-slash-commands"));
     assert.ok(args.includes("/dangerous --mode evil"));
+    resetModelCatalog();
   });
 });
 

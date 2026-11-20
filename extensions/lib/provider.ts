@@ -2,12 +2,13 @@
  * Antigravity provider turn runtime (`antigravity/*` models in `/model`).
  *
  * Each Pi turn runs on a persistent agy driver process (see
- * provider-driver.ts) with the transcript rendered as text. Response text
- * streams into Pi's TUI, and agy's tool activity appears as thinking events
- * (`[agy tool: …]`). By default, a loopback MCP bridge parks agy's Pi-tool
- * calls for execution by Pi, so its normal permissions, approvals, and diff
- * review apply. The bridge is separate from agy's own tools and can be disabled
- * with `providerBridge: false`.
+ * provider-driver.ts) with full transcript rendering on cold start and delta
+ * prompts on synced resumed conversations. Response text and real model
+ * thinking stream into Pi's TUI, while agy step/tool progress routes to Pi's
+ * live status bar. By default, a loopback MCP bridge parks agy's Pi-tool
+ * calls (micro-batched for parallel calls) for execution by Pi, so its normal
+ * permissions, approvals, and diff review apply. The bridge is separate from
+ * agy's own tools and can be disabled with `providerBridge: false`.
  */
 
 import { randomBytes } from "node:crypto";
@@ -22,9 +23,11 @@ import {
   collectImageBlocks,
   ensureImageStagingRoot,
   getLiveImageStagingCount,
+  renderProviderDeltaPrompt,
   renderProviderPrompt,
   stageImages,
   textOfContent,
+  transcriptFingerprint,
   type ProviderTranscriptMessage,
 } from "./provider-prompt.js";
 export {
@@ -32,12 +35,15 @@ export {
   collectImageBlocks,
   ensureImageStagingRoot,
   imageExtension,
+  renderProviderDeltaPrompt,
   renderProviderPrompt,
   stageImages,
+  transcriptFingerprint,
   MAX_IMAGE_BYTES,
   MAX_STAGED_IMAGES,
   type PromptImageBlock,
   type ProviderTranscriptMessage,
+  type RenderProviderPromptOptions,
   type StagedImages,
 } from "./provider-prompt.js";
 
@@ -46,6 +52,14 @@ import type { McpBridgeHandle } from "./provider-mcp.js";
 import type { BridgeToolDef } from "./provider-tools.js";
 import { getSession, saveSession } from "./sessions.js";
 import { AgyProviderDriver, PROVIDER_TURN_TIMEOUT_MS } from "./provider-driver.js";
+import type { NormalizedProviderUsage } from "./provider-usage.js";
+export {
+  diffAgyUsage,
+  validateAgyUsage,
+  ZERO_USAGE_BASELINE,
+  type NormalizedProviderUsage,
+  type ValidatedAgyUsage,
+} from "./provider-usage.js";
 import {
   toProviderEffort,
   validateAgyModelId,
@@ -64,7 +78,29 @@ export const AGY_PROVIDER_API = "agy-provider";
 
 export interface ProviderTurnCallbacks {
   onText?: (delta: string) => void;
+  onThinking?: (delta: string) => void;
   onActivity?: (label: string) => void;
+}
+
+/**
+ * Build session-only `agy --settings` JSON that denies agy's built-in shell
+ * and file-write tools when Pi already bridges their equivalents via MCP,
+ * preventing built-in tools from shadowing Pi's native approvals and diffs.
+ * Intentionally emits only `deny` rules (no blanket `allow`) so other MCP
+ * servers keep the user's configured permission policy.
+ */
+export function buildBridgeSettings(bridgedTools: readonly BridgeToolDef[]): string | undefined {
+  if (bridgedTools.length === 0) return undefined;
+  const names = new Set(bridgedTools.map((tool) => tool.piName.toLowerCase()));
+  const deny: string[] = [];
+  if (names.has("bash") || names.has("shell") || names.has("run_command")) {
+    deny.push("command(*)");
+  }
+  if (names.has("write") || names.has("edit") || names.has("write_file") || names.has("edit_file")) {
+    deny.push("write_file(*)");
+  }
+  if (deny.length === 0) return undefined;
+  return JSON.stringify({ permissions: { deny } });
 }
 
 export interface ProviderTurnRequest {
@@ -99,7 +135,7 @@ export interface ProviderTurnOwnership {
 
 export type ProviderRunEnd =
   | { kind: "done"; result: ProviderTurnResult }
-  | { kind: "parked"; park: ProviderToolPark; ownership?: ProviderTurnOwnership };
+  | { kind: "parked"; park: ProviderToolPark; parks?: ProviderToolPark[]; ownership?: ProviderTurnOwnership };
 
 export interface ProviderToolDelivery {
   callId: string;
@@ -134,6 +170,8 @@ export interface ProviderTurnResult {
   /** Bounded agy tool-activity labels observed during the turn. */
   activity: string[];
   deniedActions?: Array<{ action?: string; display_name?: string }>;
+  /** Validated per-turn native usage delta, when available. */
+  usage?: NormalizedProviderUsage;
 }
 
 /**
@@ -212,10 +250,12 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
             dir: request.dir, fullModel: request.fullModel, effort: request.effort,
             skipPermissions: request.skipPermissions, bridgeDir: bridge?.configDir,
             bridgeTools: bridge ? fingerprint : undefined, imageRoot,
+            settingsJson: bridge ? buildBridgeSettings(request.bridgedTools) : undefined,
           }, {
             prompt: request.prompt, resumeConversationId: request.resumeConversationId,
             signal: request.signal, timeoutMs: remaining,
-            onText: request.callbacks?.onText, onActivity: request.callbacks?.onActivity,
+            onText: request.callbacks?.onText, onThinking: request.callbacks?.onThinking,
+            onActivity: request.callbacks?.onActivity,
           });
           return finishPhase(owned, end);
         } catch (error) {
@@ -241,7 +281,8 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
         }
         const end = await driver.continueTurn({
           signal: resumeSignal, timeoutMs: resumeTimeoutMs,
-          onText: callbacks?.onText, onActivity: callbacks?.onActivity,
+          onText: callbacks?.onText, onThinking: callbacks?.onThinking,
+          onActivity: callbacks?.onActivity,
         });
         return finishPhase(owned, end);
       } catch (error) {
@@ -261,9 +302,22 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
   return runner;
 }
 
-function toRunEnd(end: { kind: "done"; outcome: ProviderTurnResult } | { kind: "parked"; park: { callId: string; toolName: string; args: Record<string, unknown> } }): ProviderRunEnd {
+function toRunEnd(
+  end:
+    | { kind: "done"; outcome: ProviderTurnResult }
+    | {
+        kind: "parked";
+        park: { callId: string; toolName: string; args: Record<string, unknown> };
+        parks?: Array<{ callId: string; toolName: string; args: Record<string, unknown> }>;
+      },
+): ProviderRunEnd {
   if (end.kind === "parked") {
-    return { kind: "parked", park: { callId: end.park.callId, toolName: end.park.toolName, args: end.park.args } };
+    const parks = (end.parks && end.parks.length > 0 ? end.parks : [end.park]).map((park) => ({
+      callId: park.callId,
+      toolName: park.toolName,
+      args: park.args,
+    }));
+    return { kind: "parked", park: parks[0], parks };
   }
   return { kind: "done", result: end.outcome };
 }
@@ -377,7 +431,9 @@ export function getProviderStatus(dir: string): ProviderStatus {
   const suspended: ProviderStatusSuspended[] = [];
   for (const [suspendedDir, entry] of suspendedByDir) {
     if (suspendedDir === key) {
-      suspended.push({ toolCallId: entry.toolCallId, toolName: entry.park.toolName, modelId: entry.modelId });
+      for (const call of entry.calls) {
+        suspended.push({ toolCallId: call.toolCallId, toolName: call.park.toolName, modelId: entry.modelId });
+      }
     }
   }
   try {
@@ -425,6 +481,8 @@ export interface AgyProviderStreamDeps {
   timeoutMs?: number;
   /** Pi tools to bridge into agy turns (projected per turn by the caller). */
   tools?: ProviderToolSource[];
+  /** Live status callback for agy step/tool progress (undefined clears status). */
+  onActivity?: (label: string | undefined) => void;
 }
 
 export interface AgyStreamSimpleModel {
@@ -521,16 +579,33 @@ function hasUserMessageAfterToolCall(messages: ProviderTranscriptMessage[], tool
   return false;
 }
 
+interface SuspendedToolCall {
+  toolCallId: string;
+  park: ProviderToolPark;
+}
+
 interface SuspendedTurn {
   /** Original executed selector, retained across reasoning/catalog changes and re-parks. */
   rawModelId: AgyModelId;
   runner: ProviderTurnRunner;
   ownership?: ProviderTurnOwnership;
-  toolCallId: string;
-  park: ProviderToolPark;
+  calls: SuspendedToolCall[];
   modelId: string;
+  /** System prompt actually sent on the originating turn, preserved for delta sync. */
+  systemPrompt: string;
+  /** Bridged tool catalog fingerprint sent on the originating turn. */
+  bridgeToolsKey: string;
   /** Image staging cleanups owned by the suspended turn. */
   imageCleanups: Array<() => Promise<void>>;
+}
+
+interface ConversationSyncState {
+  conversationId: string;
+  systemPrompt: string;
+  bridgeToolsKey: string;
+  syncedInputCount: number;
+  syncedInputFingerprint: string;
+  syncedAssistantFingerprint: string;
 }
 
 /** Run cleanups sequentially, never throwing. */
@@ -576,6 +651,7 @@ export function createAgyStreamSimple(
   options?: AgyStreamSimpleOptions,
 ) => AgyEventStream {
   const resumeByModel = new Map<string, string>();
+  const syncByModel = new Map<string, ConversationSyncState>();
   const getRunner = (dir: string): ProviderTurnRunner => deps.runner ?? getProviderRunner(dir);
 
   return (model, messages, options) => {
@@ -591,6 +667,7 @@ export function createAgyStreamSimple(
         output: number;
         cacheRead: number;
         cacheWrite: number;
+        reasoning?: number;
         totalTokens: number;
         cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
       };
@@ -634,6 +711,13 @@ export function createAgyStreamSimple(
       // park transfers ownership into the suspension entry. Declared here
       // so both the try body and the catch below can clean it.
       const pendingImageCleanups: Array<() => Promise<void>> = [];
+      const setActivityStatus = (label: string | undefined): void => {
+        try {
+          deps.onActivity?.(label);
+        } catch {
+          // Live status surfaces must never disrupt a turn.
+        }
+      };
 
       try {
         const systemPrompt = factory.getSystemPrompt(messages);
@@ -642,68 +726,87 @@ export function createAgyStreamSimple(
         // conversation instead of inheriting stale context.
         const hasPriorAssistantTurn = messages.some((message) => message.role === "assistant");
 
-      let textIndex = -1;
-      let thinkingIndex = -1;
-      const ensureText = (): number => {
-        if (textIndex === -1) {
-          output.content.push({ type: "text", text: "" });
-          textIndex = output.content.length - 1;
-          stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
-        }
-        return textIndex;
-      };
-      const ensureThinking = (): number => {
-        if (thinkingIndex === -1) {
-          output.content.push({ type: "thinking", thinking: "" });
-          thinkingIndex = output.content.length - 1;
-          stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
-        }
-        return thinkingIndex;
-      };
+        let textIndex = -1;
+        let thinkingIndex = -1;
+        const ensureText = (): number => {
+          if (textIndex === -1) {
+            output.content.push({ type: "text", text: "" });
+            textIndex = output.content.length - 1;
+            stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
+          }
+          return textIndex;
+        };
+        const ensureThinking = (): number => {
+          if (thinkingIndex === -1) {
+            output.content.push({ type: "thinking", thinking: "" });
+            thinkingIndex = output.content.length - 1;
+            stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
+          }
+          return thinkingIndex;
+        };
 
         const callbacks: ProviderTurnCallbacks = {
           onText: (delta) => {
             const index = ensureText();
             const block = output.content[index] as { text: string };
             block.text += delta;
-            output.usage.output += delta.length;
             stream.push({ type: "text_delta", contentIndex: index, delta, partial: output });
           },
-          onActivity: (label) => {
+          onThinking: (delta) => {
             const index = ensureThinking();
             const block = output.content[index] as { thinking: string };
-            block.thinking += (block.thinking ? "\n" : "") + label;
-            stream.push({ type: "thinking_delta", contentIndex: index, delta: label, partial: output });
+            block.thinking += delta;
+            stream.push({ type: "thinking_delta", contentIndex: index, delta, partial: output });
+          },
+          onActivity: (label) => {
+            setActivityStatus(label);
           },
         };
 
         const runner = getRunner(dir);
         const skey = path.resolve(dir);
         const prior = suspendedByDir.get(skey);
-        const bodies = prior ? collectParkedDeliveries(messages, prior.toolCallId) : [];
+        const deliveredByCall = prior
+          ? prior.calls.map((call) => ({
+              call,
+              bodies: collectParkedDeliveries(messages, call.toolCallId),
+            }))
+          : [];
+        const hasCompleteDelivery =
+          !!prior &&
+          deliveredByCall.length > 0 &&
+          deliveredByCall.every((entry) => entry.bodies.length > 0);
         let end: ProviderRunEnd;
         let executedRawModelId: AgyModelId;
-        if (prior && bodies.length > 0) {
+        let activeSystemPrompt = systemPrompt;
+        let activeBridgeToolsKey = "";
+        if (prior && hasCompleteDelivery) {
           executedRawModelId = prior.rawModelId;
+          activeSystemPrompt = prior.systemPrompt;
+          activeBridgeToolsKey = prior.bridgeToolsKey;
           prior.ownership?.assertValid();
           suspendedByDir.delete(skey);
-          // Images riding on the delivered tool results are staged too:
-          // the resumed agy turn reads them by path. Owned by this
-          // invocation; cleaned on its terminal settle below.
-          const deliveryImages = await stageImages(collectImageBlocks(messages, prior.toolCallId));
-          const resumeCleanups = [...prior.imageCleanups, deliveryImages.cleanup];
-          const imageRefs = [...deliveryImages.paths.values()];
+          const resumeCleanups = [...prior.imageCleanups];
           // Deliver by bridge park id (what agy waits on), matched via the
-          // shadow toolCall id (what Pi's transcript carries).
-          const deliveries: ProviderToolDelivery[] = bodies.map((body) => ({
-            callId: prior.park.callId,
-            text:
-              body.text +
-              (imageRefs.length > 0
-                ? `\n[attached images saved at: ${imageRefs.join(", ")} — open them with your file tools to view]`
-                : ""),
-            isError: body.isError,
-          }));
+          // shadow toolCall id (what Pi's transcript carries). Images riding
+          // on each delivered tool result are staged per tool call.
+          const deliveries: ProviderToolDelivery[] = [];
+          for (const { call, bodies } of deliveredByCall) {
+            const deliveryImages = await stageImages(collectImageBlocks(messages, call.toolCallId));
+            resumeCleanups.push(deliveryImages.cleanup);
+            const imageRefs = [...deliveryImages.paths.values()];
+            for (const body of bodies) {
+              deliveries.push({
+                callId: call.park.callId,
+                text:
+                  body.text +
+                  (imageRefs.length > 0
+                    ? `\n[attached images saved at: ${imageRefs.join(", ")} — open them with your file tools to view]`
+                    : ""),
+                isError: body.isError,
+              });
+            }
+          }
           try {
             end = await runner.resume(
               deliveries,
@@ -726,7 +829,7 @@ export function createAgyStreamSimple(
           // park carries it into the suspension, terminal settle cleans it.
           pendingImageCleanups.push(...resumeCleanups);
         } else {
-          if (prior && hasUserMessageAfterToolCall(messages, prior.toolCallId)) {
+          if (prior && prior.calls.some((call) => hasUserMessageAfterToolCall(messages, call.toolCallId))) {
             // Our own transcript moved on without delivering (abort, reject,
             // retry): cancel the stale suspension and start fresh instead
             // of bricking the directory behind the suspended guard.
@@ -749,13 +852,35 @@ export function createAgyStreamSimple(
               // Session-store failures must never block a turn.
             }
           }
-          // Materialize attached images as files agy's tools can open;
-          // paths render inline, failures degrade to omitted notes. Held
-          // for the driver turn: terminal settle below cleans it, a park
-          // carries it into the suspension.
-          const staged = await stageImages(collectImageBlocks(messages));
-          pendingImageCleanups.push(staged.cleanup);
-          const prompt = renderProviderPrompt(messages, systemPrompt || undefined, staged.paths);
+          const bridgedTools = projectBridgeTools(options?.tools ?? deps.tools ?? []);
+          activeBridgeToolsKey = bridgeToolsFingerprint(bridgedTools);
+          const sync = resume ? syncByModel.get(model.id) : undefined;
+          const canDelta =
+            !!sync &&
+            sync.conversationId === resume &&
+            sync.systemPrompt === systemPrompt &&
+            sync.bridgeToolsKey === activeBridgeToolsKey &&
+            messages.length > sync.syncedInputCount + 1 &&
+            messages[sync.syncedInputCount]?.role === "assistant" &&
+            transcriptFingerprint(messages.slice(0, sync.syncedInputCount)) === sync.syncedInputFingerprint &&
+            transcriptFingerprint([messages[sync.syncedInputCount]]) === sync.syncedAssistantFingerprint;
+          let prompt: string;
+          if (canDelta) {
+            const deltaMessages = messages.slice(sync.syncedInputCount + 1);
+            const staged = await stageImages(collectImageBlocks(deltaMessages));
+            pendingImageCleanups.push(staged.cleanup);
+            prompt = renderProviderDeltaPrompt(deltaMessages, staged.paths);
+          } else {
+            // Materialize attached images as files agy's tools can open;
+            // paths render inline, failures degrade to omitted notes. Held
+            // for the driver turn: terminal settle below cleans it, a park
+            // carries it into the suspension.
+            const staged = await stageImages(collectImageBlocks(messages));
+            pendingImageCleanups.push(staged.cleanup);
+            prompt = renderProviderPrompt(messages, systemPrompt || undefined, staged.paths, {
+              bridgedToolNames: bridgedTools.map((tool) => tool.name),
+            });
+          }
           // Capture before execution: later invocations can resolve a different
           // profile while this child remains parked on its original target.
           executedRawModelId = validateAgyModelId(
@@ -770,16 +895,17 @@ export function createAgyStreamSimple(
             timeoutMs: deps.timeoutMs ?? PROVIDER_TURN_TIMEOUT_MS,
             resumeConversationId: resume,
             skipPermissions: deps.skipPermissions ?? true,
-            bridgedTools: projectBridgeTools(options?.tools ?? deps.tools ?? []),
+            bridgedTools,
             callbacks,
           });
         }
 
         if (end.kind === "parked") {
-          // A bridged Pi tool call: end any open blocks, then emit a REAL
-          // shadow toolCall so Pi executes it with normal permissions,
-          // approvals, and review. The Pi turn delivering the matching
-          // toolResult resumes this driver turn.
+          setActivityStatus(undefined);
+          // Bridged Pi tool call(s): end any open blocks, then emit REAL
+          // shadow toolCall blocks so Pi executes them with normal
+          // permissions, approvals, and review. The Pi turn delivering the
+          // matching toolResults resumes this driver turn.
           if (thinkingIndex !== -1) {
             const thinking = (output.content[thinkingIndex] as { thinking: string }).thinking;
             stream.push({ type: "thinking_end", contentIndex: thinkingIndex, content: thinking, partial: output });
@@ -788,23 +914,41 @@ export function createAgyStreamSimple(
             const text = (output.content[textIndex] as { text: string }).text;
             stream.push({ type: "text_end", contentIndex: textIndex, content: text, partial: output });
           }
-          const toolCallId = `agybridge-${randomBytes(8).toString("hex")}`;
-          const toolCall = {
-            type: "toolCall",
-            id: toolCallId,
-            name: end.park.toolName,
-            arguments: end.park.args,
-          };
+          const parks = end.parks && end.parks.length > 0 ? end.parks : [end.park];
+          const calls: SuspendedToolCall[] = [];
+          const toolCalls: Array<{
+            type: "toolCall";
+            id: string;
+            name: string;
+            arguments: Record<string, unknown>;
+          }> = [];
+          for (const park of parks) {
+            const toolCallId = `agybridge-${randomBytes(8).toString("hex")}`;
+            calls.push({ toolCallId, park });
+            toolCalls.push({
+              type: "toolCall",
+              id: toolCallId,
+              name: park.toolName,
+              arguments: park.args,
+            });
+          }
           end.ownership?.assertValid();
           suspendedByDir.set(skey, {
-            runner, ownership: end.ownership, toolCallId, park: end.park,
+            runner,
+            ownership: end.ownership,
+            calls,
             rawModelId: executedRawModelId,
-            modelId: model.id, imageCleanups: pendingImageCleanups,
+            modelId: model.id,
+            systemPrompt: activeSystemPrompt,
+            bridgeToolsKey: activeBridgeToolsKey,
+            imageCleanups: pendingImageCleanups,
           });
-          output.content.push(toolCall);
-          const toolIndex = output.content.length - 1;
-          stream.push({ type: "toolcall_start", contentIndex: toolIndex, partial: output });
-          stream.push({ type: "toolcall_end", contentIndex: toolIndex, toolCall, partial: output });
+          for (const toolCall of toolCalls) {
+            output.content.push(toolCall);
+            const toolIndex = output.content.length - 1;
+            stream.push({ type: "toolcall_start", contentIndex: toolIndex, partial: output });
+            stream.push({ type: "toolcall_end", contentIndex: toolIndex, toolCall, partial: output });
+          }
           output.usage.totalTokens =
             output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
           output.stopReason = "toolUse";
@@ -813,6 +957,7 @@ export function createAgyStreamSimple(
           return;
         }
         const result = end.result;
+        setActivityStatus(undefined);
 
         if (thinkingIndex !== -1) {
           const thinking = (output.content[thinkingIndex] as { thinking: string }).thinking;
@@ -833,7 +978,19 @@ export function createAgyStreamSimple(
         block.text = finalText;
         stream.push({ type: "text_end", contentIndex: index, content: finalText, partial: output });
 
-        output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+        if (result.usage) {
+          output.usage.input = result.usage.input;
+          output.usage.output = result.usage.output;
+          output.usage.cacheRead = result.usage.cacheRead;
+          output.usage.cacheWrite = result.usage.cacheWrite;
+          if (result.usage.reasoning !== undefined) {
+            output.usage.reasoning = result.usage.reasoning;
+          }
+          output.usage.totalTokens = result.usage.totalTokens;
+        } else {
+          output.usage.totalTokens =
+            output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+        }
         // Partial turns must never masquerade as clean stops: surface the
         // real terminal state so Pi retries or reports instead of accepting
         // truncated text as a complete answer.
@@ -842,6 +999,18 @@ export function createAgyStreamSimple(
         else output.stopReason = "stop";
         if (result.conversationId) {
           resumeByModel.set(model.id, result.conversationId);
+          if (!result.aborted && !result.timedOut) {
+            syncByModel.set(model.id, {
+              conversationId: result.conversationId,
+              systemPrompt: activeSystemPrompt,
+              bridgeToolsKey: activeBridgeToolsKey,
+              syncedInputCount: messages.length,
+              syncedInputFingerprint: transcriptFingerprint(messages),
+              syncedAssistantFingerprint: transcriptFingerprint([output]),
+            });
+          } else {
+            syncByModel.delete(model.id);
+          }
           const latestUser = [...messages].reverse().find((message) => message.role === "user");
           const summary = textOfContent(latestUser?.content).trim().slice(0, 80) || undefined;
           try {
@@ -860,6 +1029,8 @@ export function createAgyStreamSimple(
         stream.end();
         await runImageCleanups(pendingImageCleanups);
       } catch (error) {
+        syncByModel.delete(model.id);
+        setActivityStatus(undefined);
         output.stopReason = signal.aborted ? "aborted" : "error";
         output.errorMessage = error instanceof Error ? error.message : String(error);
         stream.push({ type: "error", reason: output.stopReason, error: output });

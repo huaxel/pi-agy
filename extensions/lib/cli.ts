@@ -44,6 +44,7 @@ export {
   checkAgyUsage,
   getModelCatalog,
   inspectAgyAgents,
+  inspectAgyModelIds,
   inspectAgyModels,
   inspectAgyVersion,
   isStableModelId,
@@ -57,6 +58,7 @@ export { isTransientAgyFailure } from "./retry.js";
 export {
   buildAgyArgs,
   buildAgyPrompt,
+  requireAgyModelId,
   resolveAgyModelAlias,
   resolveAgyModelId,
   supportsAgyEffort,

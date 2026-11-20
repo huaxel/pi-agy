@@ -20,18 +20,11 @@ const PRINT_TIMEOUT_BUFFER_MS = 5_000;
 // unbucketed value it replaces (Pi's hard kill still governs the run).
 const PRINT_TIMEOUT_BUCKET_S = 30;
 
-// Static fallback for when `agy models` output is unavailable. The live
-// catalog (updated during preflight) overrides these per alias.
-const MODEL_MAP: Record<AgyModel, string> = {
-  "flash-low": "gemini-3.8-flash-low",
-  "flash-medium": "gemini-3.8-flash-medium",
-  "flash-high": "gemini-3.8-flash-high",
-  "pro-low": "gemini-3.1-pro-low",
-  "pro-high": "gemini-3.1-pro-high",
-  sonnet: "claude-sonnet-4-6",
-  opus: "claude-opus-4-6-thinking",
-  "gpt-oss": "gpt-oss-120b-medium",
-};
+/**
+ * Alias selected when the caller names nothing. Deliberately an alias: a
+ * concrete id here would be a hardcoded model name that goes stale silently.
+ */
+const DEFAULT_MODEL_ALIAS: AgyModel = "flash-medium";
 
 const TIER_MAP: Record<NonNullable<AgyOptions["tier"]>, AgyModel> = {
   flash: "flash-high",
@@ -47,19 +40,51 @@ export function resolveAgyModelAlias(
   return model ?? (tier ? TIER_MAP[tier] : undefined);
 }
 
-/** Resolve a model alias to a concrete agy model id, preferring the live catalog. */
-export function resolveAgyModelId(model?: AgyModel, tier?: AgyOptions["tier"]): string {
-  const alias = resolveAgyModelAlias(model, tier) ?? "flash-medium";
-  return getModelCatalog()[alias] ?? MODEL_MAP[alias];
+/**
+ * Resolve a model alias to a concrete agy model id from the live catalog.
+ *
+ * Returns `undefined` when the catalog was never observed or the vendor no
+ * longer ships a matching id. No id is ever invented: a fabricated fallback
+ * turns a retired tier into a runtime failure far from its cause.
+ */
+export function resolveAgyModelId(model?: AgyModel, tier?: AgyOptions["tier"]): string | undefined {
+  const alias = resolveAgyModelAlias(model, tier) ?? DEFAULT_MODEL_ALIAS;
+  return getModelCatalog()[alias];
 }
 
 /**
- * Gemini aliases already select a low/medium/high model variant. Claude's
- * thinking models also reject --effort; keep the flag for model families that
- * expose it without turning a valid tool call into an argument error.
+ * Same resolution for argv and prompt paths, where an absent id is fatal.
+ * The message names the alias and the exact recovery, so a stale catalog is
+ * never mistaken for a bad request.
+ */
+export function requireAgyModelId(model?: AgyModel, tier?: AgyOptions["tier"]): string {
+  const alias = resolveAgyModelAlias(model, tier) ?? DEFAULT_MODEL_ALIAS;
+  const id = resolveAgyModelId(model, tier);
+  if (id) return id;
+  throw new Error(
+    `agy model alias "${alias}" matches nothing in the current catalog; run \`agy models\` (sign in if needed) or pass model=<exact id>`,
+  );
+}
+
+/**
+ * Families verified to accept a base slug plus `--effort`. A capability
+ * assumption rather than a catalog entry, but it must stay narrow: agy turns a
+ * stray `--effort` on a fixed-thinking model into an argument error.
+ */
+const EFFORT_CAPABLE_ID = /^gpt-oss-/;
+
+/** Effort capability for a concrete id, the single source of that rule. */
+export function supportsAgyEffortId(id: string): boolean {
+  return EFFORT_CAPABLE_ID.test(id);
+}
+
+/**
+ * Tier-suffixed aliases already select a low/medium/high variant and fixed
+ * thinking families reject the flag; only the families above take it.
  */
 export function supportsAgyEffort(model?: AgyModel, tier?: AgyOptions["tier"]): boolean {
-  return resolveAgyModelId(model, tier).startsWith("gpt-oss-");
+  const id = resolveAgyModelId(model, tier);
+  return id !== undefined && supportsAgyEffortId(id);
 }
 
 export function buildAgyArgs(options: AgyOptions): string[] {
@@ -68,7 +93,7 @@ export function buildAgyArgs(options: AgyOptions): string[] {
   }
 
   validateModelSelector(options);
-  const model = options.model_id ?? resolveAgyModelId(options.model, options.tier);
+  const model = options.model_id ?? requireAgyModelId(options.model, options.tier);
   const agent = normalizeAgyAgentName(options.agent);
   const unbucketedSec = Math.ceil((options.timeout_ms + PRINT_TIMEOUT_BUFFER_MS) / 1000);
   const timeoutSec = Math.ceil(unbucketedSec / PRINT_TIMEOUT_BUCKET_S) * PRINT_TIMEOUT_BUCKET_S;
@@ -77,6 +102,10 @@ export function buildAgyArgs(options: AgyOptions): string[] {
   const skipPermissions = options.skipPermissions ?? true;
   const useStream = options.stream ?? true;
   const structured = mode !== "accept-edits" || useStream;
+  // An exact id is asked about directly; an alias is resolved through the catalog.
+  const effortCapable = options.model_id
+    ? supportsAgyEffortId(options.model_id)
+    : supportsAgyEffort(options.model, options.tier);
 
   const args = [
     "--model",
@@ -89,9 +118,7 @@ export function buildAgyArgs(options: AgyOptions): string[] {
     "--disable-slash-commands",
     ...(mode === "sandbox" ? ["--sandbox"] : ["--mode", mode]),
     ...(writes && skipPermissions ? ["--dangerously-skip-permissions"] : []),
-    ...(options.effort && (options.model_id ? options.model_id.startsWith("gpt-oss-") : supportsAgyEffort(options.model, options.tier))
-      ? ["--effort", options.effort]
-      : []),
+    ...(options.effort && effortCapable ? ["--effort", options.effort] : []),
     ...(agent ? ["--agent", agent] : []),
   ];
 

@@ -226,16 +226,14 @@ export function providerEntryName(entry: AgyProviderModelEntry): string {
 }
 
 /**
- * Fallback catalog when `agy models` fails at load (binary missing, auth not
- * yet done, network stall). Keeps the picker populated so selection yields a
- * clear runtime error instead of an empty list. Update when agy ships new
- * Gemini versions.
+ * Pre-discovery catalog.
+ *
+ * Intentionally empty: `agy models` is the only source of model names, so a
+ * built-in list would silently offer ids the installed CLI no longer serves
+ * (a retired tier then fails at launch instead of at selection). Callers treat
+ * an empty catalog as "not discovered yet" and surface the discovery error.
  */
-export const FALLBACK_PROVIDER_MODELS: AgyProviderModelEntry[] = [
-  { full: "gemini-3.8-flash", id: "gemini-3-8-flash", efforts: ["low", "medium", "high"] },
-  { full: "gemini-3.1-pro", id: "gemini-3-1-pro", efforts: ["low", "high"] },
-  { full: "claude-sonnet-4-6", id: "claude-sonnet-4-6" },
-];
+export const FALLBACK_PROVIDER_MODELS: readonly AgyProviderModelEntry[] = [];
 
 /**
  * Plain provider model definition (structurally compatible with Pi's

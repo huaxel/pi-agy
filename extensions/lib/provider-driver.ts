@@ -36,6 +36,13 @@ import {
 import type {
   AgyProviderEffort,
 } from "./provider-models.js";
+import {
+  diffAgyUsage,
+  validateAgyUsage,
+  ZERO_USAGE_BASELINE,
+  type NormalizedProviderUsage,
+  type ValidatedAgyUsage,
+} from "./provider-usage.js";
 
 export interface ProviderDriverProfile {
   dir: string;
@@ -48,6 +55,8 @@ export interface ProviderDriverProfile {
   imageRoot?: string;
   /** Fingerprint of the bridged Pi-tool catalog; changes recycle (fresh ListTools). */
   bridgeTools?: string;
+  /** Session-only `--settings` JSON (e.g. denying shadowed built-in tools). */
+  settingsJson?: string;
 }
 
 export interface ProviderDriverTurn {
@@ -56,6 +65,7 @@ export interface ProviderDriverTurn {
   signal: AbortSignal;
   timeoutMs: number;
   onText?: (delta: string) => void;
+  onThinking?: (delta: string) => void;
   onActivity?: (label: string) => void;
 }
 
@@ -67,6 +77,8 @@ export interface ProviderDriverOutcome {
   conversationId?: string;
   activity: string[];
   deniedActions?: Array<{ action?: string; display_name?: string }>;
+  /** Validated per-turn native usage delta, when a same-generation baseline is known. */
+  usage?: NormalizedProviderUsage;
 }
 
 /** A bridged Pi-tool call parked mid-turn: agy waits on the MCP response. */
@@ -82,7 +94,7 @@ export interface DriverPark {
  */
 export type DriverTurnEnd =
   | { kind: "done"; outcome: ProviderDriverOutcome }
-  | { kind: "parked"; park: DriverPark };
+  | { kind: "parked"; park: DriverPark; parks: DriverPark[] };
 
 export interface ProviderDriverStats {
   spawns: number;
@@ -115,11 +127,14 @@ interface TurnPhase {
 
 /** Wall-clock cap for a suspended (parked) turn without Pi progress. */
 export const SUSPENDED_TURN_MAX_MS = 30 * 60_000;
+/** Micro-batch window for collecting parallel bridged MCP tool calls into one Pi turn. */
+export const PROVIDER_PARK_BATCH_MS = 15;
 
 interface ActiveTurn {
   signal: AbortSignal;
   timeoutMs: number;
   onText?: (delta: string) => void;
+  onThinking?: (delta: string) => void;
   onActivity?: (label: string) => void;
   text: string;
   truncated: boolean;
@@ -130,6 +145,10 @@ interface ActiveTurn {
   settled: boolean;
   /** Suspended mid-turn on a parked bridge call: child alive, timers off. */
   suspended: boolean;
+  /** Parks collected in the current micro-batch before flushing to Pi. */
+  pendingParks: DriverPark[];
+  /** Micro-batch flush timer. */
+  parkBatchTimer?: NodeJS.Timeout;
   /** Live waiter for the current phase (turn() or continueTurn()). */
   phase?: TurnPhase;
   /** Terminal envelope received during a park; owned until consumed or abandoned. */
@@ -140,7 +159,7 @@ interface ActiveTurn {
 }
 
 function profileKey(profile: ProviderDriverProfile): string {
-  return `${profile.dir}::${profile.fullModel}::${profile.effort ?? ""}::${profile.skipPermissions ? "skip" : "ask"}::${profile.bridgeDir ?? ""}::${profile.bridgeTools ?? ""}::${profile.imageRoot ?? ""}`;
+  return `${profile.dir}::${profile.fullModel}::${profile.effort ?? ""}::${profile.skipPermissions ? "skip" : "ask"}::${profile.bridgeDir ?? ""}::${profile.bridgeTools ?? ""}::${profile.imageRoot ?? ""}::${profile.settingsJson ?? ""}`;
 }
 
 export class AgyProviderDriver {
@@ -148,10 +167,13 @@ export class AgyProviderDriver {
   private generation = 0;
   private profile?: ProviderDriverProfile;
   private boundConversationId?: string;
+  /** Committed cumulative usage baseline for this child process generation (undefined until primed on external resume). */
+  private usageBaseline?: ValidatedAgyUsage;
   private active?: ActiveTurn;
   private queue: Promise<void> = Promise.resolve();
   private idleTimer?: NodeJS.Timeout;
   private readonly idleMs: number;
+  private readonly parkBatchMs: number;
   private lineBuffer = "";
   private readonly decoder = new StringDecoder("utf8");
   /**
@@ -168,8 +190,9 @@ export class AgyProviderDriver {
   private lifecycle: string[] = [];
   private closed = false;
 
-  constructor(options?: { idleMs?: number }) {
+  constructor(options?: { idleMs?: number; parkBatchMs?: number }) {
     this.idleMs = options?.idleMs ?? PROVIDER_DRIVER_IDLE_MS;
+    this.parkBatchMs = options?.parkBatchMs ?? PROVIDER_PARK_BATCH_MS;
   }
 
   /**
@@ -193,18 +216,48 @@ export class AgyProviderDriver {
   onParksOrphaned?: (message: string) => void;
 
   /**
-   * Accept a parked bridge call for the active turn. Suspends the turn
+   * Accept a parked bridge call for the active turn. Collects parallel
+   * calls within `parkBatchMs` into a single Pi turn, then suspends the turn
    * (timers off, child alive) and ends the current phase as parked.
    * Returns false when no turn can take the park — the caller must fail it.
    */
   notifyPark(park: DriverPark): boolean {
     const turn = this.active;
     if (!turn || turn.settled || turn.suspended || !turn.phase) return false;
-    turn.suspended = true;
+    turn.pendingParks.push(park);
     if (turn.timer) {
       clearTimeout(turn.timer);
       turn.timer = undefined;
     }
+    this.log(`park:${park.toolName}`);
+    if (!turn.parkBatchTimer) {
+      if (this.parkBatchMs <= 0) {
+        this.flushParks(turn);
+      } else {
+        turn.parkBatchTimer = setTimeout(() => {
+          turn.parkBatchTimer = undefined;
+          this.flushParks(turn);
+        }, this.parkBatchMs);
+        (turn.parkBatchTimer as unknown as { unref?: () => void }).unref?.();
+      }
+    }
+    return true;
+  }
+
+  private clearParkBatchTimer(turn: ActiveTurn): void {
+    if (turn.parkBatchTimer) {
+      clearTimeout(turn.parkBatchTimer);
+      turn.parkBatchTimer = undefined;
+    }
+  }
+
+  private flushParks(turn: ActiveTurn): void {
+    if (this.active !== turn || turn.settled || turn.suspended || !turn.phase || turn.pendingParks.length === 0) {
+      return;
+    }
+    const parks = turn.pendingParks;
+    turn.pendingParks = [];
+    turn.suspended = true;
     // Keep this deadline through terminal-awaiting-consumption too: a lost
     // Pi continuation must not hold the child, parks, images or driver forever.
     turn.suspendedTimer = setTimeout(() => {
@@ -216,9 +269,7 @@ export class AgyProviderDriver {
     (turn.suspendedTimer as unknown as { unref?: () => void }).unref?.();
     const phase = turn.phase;
     turn.phase = undefined;
-    this.log(`park:${park.toolName}`);
-    phase.resolve({ kind: "parked", park });
-    return true;
+    phase.resolve({ kind: "parked", park: parks[0], parks });
   }
 
   private clearSuspendedTimer(turn: ActiveTurn): void {
@@ -239,9 +290,11 @@ export class AgyProviderDriver {
   /** Abandonment has no future consumer: orphan parks once and release ownership. */
   private abandonTurn(turn: ActiveTurn, error: Error): void {
     if (this.active !== turn) return;
-    const parked = turn.suspended || !!turn.pendingTerminal;
+    this.clearParkBatchTimer(turn);
+    const parked = turn.suspended || turn.pendingParks.length > 0 || !!turn.pendingTerminal;
     // Teardown must also release a retained terminal, but must never replace it
     // with an abort/transport failure during ordinary terminal settlement.
+    turn.pendingParks = [];
     turn.pendingTerminal = undefined;
     turn.suspended = false;
     if (parked) this.failParksOrphaned(error.message);
@@ -257,7 +310,7 @@ export class AgyProviderDriver {
   private interruptTurn(turn: ActiveTurn, flag: "aborted" | "timedOut", message: string): void {
     if (turn.settled || this.active !== turn) return;
     this.killChild();
-    if (turn.suspended) this.abandonTurn(turn, new Error(message));
+    if (turn.suspended || turn.pendingParks.length > 0) this.abandonTurn(turn, new Error(message));
     else if (turn.text) this.settleDone(turn, flag === "aborted" ? { aborted: true } : { timedOut: true });
     else this.settleError(turn, new Error(message));
   }
@@ -273,6 +326,7 @@ export class AgyProviderDriver {
     signal?: AbortSignal;
     timeoutMs?: number;
     onText?: (delta: string) => void;
+    onThinking?: (delta: string) => void;
     onActivity?: (label: string) => void;
   }): Promise<DriverTurnEnd> {
     const turn = this.active;
@@ -296,6 +350,7 @@ export class AgyProviderDriver {
       turn.suspended = false;
       this.clearSuspendedTimer(turn);
       if (options?.onText) turn.onText = options.onText;
+      if (options?.onThinking) turn.onThinking = options.onThinking;
       if (options?.onActivity) turn.onActivity = options.onActivity;
       if (options?.timeoutMs !== undefined) turn.timeoutMs = options.timeoutMs;
       if (turn.onAbort) {
@@ -389,6 +444,7 @@ export class AgyProviderDriver {
       if ((this.profile.bridgeDir ?? "") !== (profile.bridgeDir ?? "")) return "bridge-changed";
       if ((this.profile.imageRoot ?? "") !== (profile.imageRoot ?? "")) return "images-changed";
       if ((this.profile.bridgeTools ?? "") !== (profile.bridgeTools ?? "")) return "tools-changed";
+      if ((this.profile.settingsJson ?? "") !== (profile.settingsJson ?? "")) return "settings-changed";
       return "permissions-changed";
     }
     if ((resume ?? undefined) !== this.boundConversationId) return "conversation-changed";
@@ -401,6 +457,7 @@ export class AgyProviderDriver {
     this.child = undefined;
     this.profile = undefined;
     this.boundConversationId = undefined;
+    this.usageBaseline = undefined;
     if (child) killProcessTree(child);
   }
 
@@ -410,6 +467,7 @@ export class AgyProviderDriver {
     if (profile.effort) args.push("--effort", profile.effort);
     if (resume) args.push("--conversation", resume);
     if (profile.skipPermissions) args.push("--dangerously-skip-permissions");
+    if (profile.settingsJson) args.push("--settings", profile.settingsJson);
     if (profile.bridgeDir) args.push("--add-dir", profile.bridgeDir);
     if (profile.imageRoot) args.push("--add-dir", profile.imageRoot);
     // Same flags as the former per-turn spawn, minus `-p`: turns arrive on stdin.
@@ -424,6 +482,10 @@ export class AgyProviderDriver {
     this.child = child;
     this.profile = profile;
     this.boundConversationId = resume ?? undefined;
+    // Fresh processes start at known zero cumulative usage; externally resumed
+    // conversations prime their baseline on the first terminal snapshot so
+    // prior session history is never charged to the first resumed turn.
+    this.usageBaseline = resume ? undefined : { ...ZERO_USAGE_BASELINE };
     this.lineBuffer = "";
     this.pendingLines = [];
     this.primed = false;
@@ -465,6 +527,7 @@ export class AgyProviderDriver {
       this.child = undefined;
       this.profile = undefined;
       this.boundConversationId = undefined;
+      this.usageBaseline = undefined;
       this.log(`exit:${code ?? "signal"}`);
       // Abort/timeout paths settle the turn themselves before killing; an
       // unsettled turn here means the child died mid-turn: fail closed.
@@ -510,10 +573,21 @@ export class AgyProviderDriver {
     }
   }
 
+  private pushThinking(turn: ActiveTurn, delta: string): void {
+    if (!delta || turn.settled) return;
+    try {
+      turn.onThinking?.(delta);
+    } catch {
+      // Same dead-stream tolerance as text deltas.
+    }
+  }
+
   private pushActivity(turn: ActiveTurn, label: string): void {
-    if (turn.settled || turn.seenActivity.has(label) || turn.activity.length >= MAX_ACTIVITY_ENTRIES) return;
-    turn.seenActivity.add(label);
-    turn.activity.push(label);
+    if (turn.settled) return;
+    if (!turn.seenActivity.has(label) && turn.activity.length < MAX_ACTIVITY_ENTRIES) {
+      turn.seenActivity.add(label);
+      turn.activity.push(label);
+    }
     try {
       turn.onActivity?.(label);
     } catch {
@@ -553,6 +627,17 @@ export class AgyProviderDriver {
     const parsed = parseStreamLine(line);
     if (!parsed) return;
     const step = parsed.step_update;
+    if (step) {
+      const thinkingDelta =
+        typeof step.thinking_delta === "string" && step.thinking_delta
+          ? step.thinking_delta
+          : typeof step.thought_delta === "string" && step.thought_delta
+            ? step.thought_delta
+            : step.step_type === "thinking" && typeof step.text_delta === "string" && step.text_delta
+              ? step.text_delta
+              : undefined;
+      if (thinkingDelta) this.pushThinking(turn, thinkingDelta);
+    }
     if (step?.step_type === "agent_response") {
       this.pushLiveText(turn, step.text_delta, undefined);
       // response_text may arrive on the same record family in other builds.
@@ -600,14 +685,24 @@ export class AgyProviderDriver {
       text = text.slice(0, MAX_TURN_TEXT_CHARS);
       turn.truncated = true;
     }
-    this.settleDone(turn, { text });
+    let usage: NormalizedProviderUsage | undefined;
+    const validatedUsage = validateAgyUsage(result.usage);
+    if (validatedUsage) {
+      if (this.usageBaseline) {
+        usage = diffAgyUsage(validatedUsage, this.usageBaseline);
+      }
+      this.usageBaseline = validatedUsage;
+    }
+    this.settleDone(turn, { text, usage });
   }
 
   private settleDone(
     turn: ActiveTurn,
-    overrides?: { text?: string; aborted?: boolean; timedOut?: boolean },
+    overrides?: { text?: string; aborted?: boolean; timedOut?: boolean; usage?: NormalizedProviderUsage },
   ): void {
     if (turn.settled) return;
+    this.clearParkBatchTimer(turn);
+    turn.pendingParks = [];
     const retain = turn.suspended && !turn.phase;
     turn.settled = true;
     turn.suspended = false;
@@ -638,6 +733,7 @@ export class AgyProviderDriver {
         conversationId: turn.runResult.conversation_id,
         activity: turn.activity,
         deniedActions: turn.runResult.denied_actions,
+        ...(overrides?.usage ? { usage: overrides.usage } : {}),
       },
     };
     if (retain) turn.pendingTerminal = { kind: "done", end };
@@ -647,6 +743,8 @@ export class AgyProviderDriver {
 
   private settleError(turn: ActiveTurn, error: Error): void {
     if (turn.settled) return;
+    this.clearParkBatchTimer(turn);
+    turn.pendingParks = [];
     const retain = turn.suspended && !turn.phase;
     turn.settled = true;
     turn.suspended = false;
@@ -702,6 +800,7 @@ export class AgyProviderDriver {
         signal: options.signal,
         timeoutMs: options.timeoutMs,
         onText: options.onText,
+        onThinking: options.onThinking,
         onActivity: options.onActivity,
         text: "",
         truncated: false,
@@ -710,6 +809,7 @@ export class AgyProviderDriver {
         runResult: { response: "" },
         settled: false,
         suspended: false,
+        pendingParks: [],
         phase: { resolve, reject },
       };
       this.active = turn;

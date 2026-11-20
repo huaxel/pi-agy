@@ -9,6 +9,7 @@ import {
   findAgyQuotaEntries,
   formatAgyUsage,
   inspectAgyAgents,
+  inspectAgyModels,
   isAgyQuotaExhausted,
   normalizeAgyAgentName,
   resolveAgyModelAlias,
@@ -510,6 +511,11 @@ export function registerAgyTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const cwd = await resolveToolDir(ctx.cwd, params.dir);
       const quota = await checkAgyUsage(cwd, signal);
+      if (params.model) {
+        // Alias resolution reads the live catalog only. Discovery failure is not
+        // fatal here: the report degrades to "unknown" instead of naming a model.
+        await inspectAgyModels(cwd, signal).catch(() => undefined);
+      }
       const selectedModel = params.model ? resolveAgyModelId(params.model) : undefined;
       const selectedEntries = selectedModel ? findAgyQuotaEntries(quota, selectedModel) : [];
       const quotaStatus = selectedModel

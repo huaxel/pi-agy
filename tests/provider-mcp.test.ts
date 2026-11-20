@@ -282,8 +282,7 @@ describe("MCP bridge", () => {
         const catalog = (await client.callTool({ name: "agy_model_catalog", arguments: {} })) as {
           content: Array<{ text: string }>;
         };
-        assert.match(catalog.content[0].text, /fallback catalog/);
-        assert.match(catalog.content[0].text, /gemini-3-8-flash/);
+        assert.match(catalog.content[0].text, /no agy models resolved/);
       } finally {
         if (previousPath === undefined) delete process.env.PATH;
         else process.env.PATH = previousPath;

@@ -48,7 +48,19 @@ function registerAgyProvider(pi: ExtensionAPI): void {
   // Only a generation-checked publication may mutate these entries.
   const entries: AgyProviderModelEntry[] = [...FALLBACK_PROVIDER_MODELS];
   const shutdown = new AbortController();
-  pi.on?.("session_shutdown", () => { shutdown.abort(); });
+  let activeUi: { setStatus?: (key: string, text: string | undefined) => void } | undefined;
+  const setLiveStatus = (label: string | undefined): void => {
+    try {
+      activeUi?.setStatus?.(AGY_PROVIDER_ID, label);
+    } catch {
+      // Status updates are best effort and must never disrupt a turn.
+    }
+  };
+  pi.on?.("session_shutdown", () => {
+    setLiveStatus(undefined);
+    activeUi = undefined;
+    shutdown.abort();
+  });
   const streamSimple = createAgyStreamSimple(
     {
       createStream: () => {
@@ -65,7 +77,7 @@ function registerAgyProvider(pi: ExtensionAPI): void {
       getSystemPrompt: (messages) =>
         getCurrentSystemPrompt(messages as unknown as Parameters<typeof getCurrentSystemPrompt>[0]),
     },
-    { entries },
+    { entries, onActivity: setLiveStatus },
   );
   const baseUrl = "agy-provider://antigravity";
   const modelDefinitions = (catalog: readonly AgyProviderModelEntry[]): Model<any>[] =>
@@ -129,6 +141,9 @@ function registerAgyProvider(pi: ExtensionAPI): void {
     return;
   }
   pi.on?.("session_start", (_event, ctx) => {
+    if (ctx.hasUI && typeof ctx.ui?.setStatus === "function") {
+      activeUi = ctx.ui;
+    }
     const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(10_000)]);
     // Keep provider discovery off Pi's session-start critical path. The model
     // picker also refreshes on demand, so startup can use the cached catalog.

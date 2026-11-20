@@ -26,6 +26,8 @@ export interface AgyStepUpdate {
   step_type?: string;
   tool_name?: string;
   text_delta?: string;
+  thinking_delta?: string;
+  thought_delta?: string;
   duration_seconds?: number;
   usage?: AgyUsage;
   tool_info?: {

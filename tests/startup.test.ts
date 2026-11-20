@@ -26,7 +26,9 @@ it("registers the Antigravity provider, command and tools without loading the br
     assert.ok(commands.includes("agy"));
     assert.ok(tools.includes("agy_execute"));
     assert.equal(providers[0]?.id, "antigravity");
-    assert.ok(providers[0].getModels().length > 0);
+    // agy models is the only source of model ids, so registration offers an
+    // empty picker rather than a builtin list that can go stale.
+    assert.deepEqual(providers[0].getModels(), []);
   } finally {
     hooks.deregister();
   }

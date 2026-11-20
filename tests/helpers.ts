@@ -12,7 +12,18 @@ export async function withFakeAgy<T>(
   failureConversationId = "",
   usageOutput = "{}",
   hangAfterOutputMs = 0,
-  modelsOutput = "fake-model",
+  // Every alias resolves structurally against this roster, so argv building
+  // never depends on a hardcoded production fallback. Test fixture names only.
+  modelsOutput = [
+    "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
+    "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)",
+    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+    "gemini-3.1-pro-low\tGemini 3.1 Pro (Low)",
+    "gemini-3.1-pro-high\tGemini 3.1 Pro (High)",
+    "claude-sonnet-4-6\tClaude Sonnet 4.6",
+    "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)",
+    "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
+  ].join("\n"),
   agentsOutput = "fake-agent",
   agentsFailureOutput = "",
 ): Promise<T> {

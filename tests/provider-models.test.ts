@@ -85,10 +85,12 @@ describe("provider catalog", () => {
     assert.equal(areProviderCatalogsEqual(base, base.slice(0, -1)), false);
   });
 
-  it("returns no entries for empty output so the fallback engages", () => {
+  it("returns no entries for empty output and ships no builtin catalog", () => {
     assert.deepEqual(parseProviderCatalog(""), []);
     assert.deepEqual(parseProviderCatalog("Fetching models…\n"), []);
-    assert.ok(FALLBACK_PROVIDER_MODELS.length > 0);
+    // agy models is the only source of model names; a builtin list would offer
+    // ids the installed CLI may no longer serve.
+    assert.deepEqual(FALLBACK_PROVIDER_MODELS, []);
   });
 
   it("slugifies display-shaped ids", () => {
