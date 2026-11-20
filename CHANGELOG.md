@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.17
 
 - Stop discarding arguments from bridged Pi tools whose schema composes at the root. A root `oneOf`/`anyOf`/`allOf`/`$ref` was replaced by `{type: "object", properties: {}}`, which told the model the tool took no arguments and made every call fail. Unambiguous wrappers are now unwrapped (a nullable branch keeps its real object, `allOf` merges), and an ambiguous root is passed through unchanged rather than emptied, since an empty schema is worse than a complex one.
 - Document that agy keeps one merged MCP registry: `~/.gemini/antigravity-cli/mcp/` holds the bridge's `pi-agy-tools` alongside any globally configured server, and `agy mcp` has no session-scoped restriction. A Pi-driven turn therefore reaches the user's global MCP servers too, and agy's own 60 built-in tools remain available; only shell and file writes are denied while Pi owns them.
