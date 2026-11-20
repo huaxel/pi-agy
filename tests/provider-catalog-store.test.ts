@@ -6,8 +6,10 @@ import { describe, it } from "node:test";
 
 import {
   clearProviderCatalogCache,
+  getProviderCatalogProvenance,
   loadProviderCatalogCache,
   providerCatalogCachePath,
+  recordProviderCatalogProvenance,
   saveProviderCatalogCache,
 } from "../extensions/lib/provider-catalog-store.js";
 import type { AgyProviderModelEntry } from "../extensions/lib/provider-models.js";
@@ -111,6 +113,31 @@ describe("provider catalog store", () => {
       clearProviderCatalogCache(configPath);
       assert.deepEqual(loadProviderCatalogCache(configPath), []);
     } finally {
+      await cleanup();
+    }
+  });
+
+  it("reports only the roster the provider records, not incidental cache reads", async () => {
+    const { configPath, cleanup } = await configPathIn();
+    const entries: AgyProviderModelEntry[] = [{ full: "gemini-9-neon", id: "gemini-9-neon" }];
+    try {
+      recordProviderCatalogProvenance("cache", 0);
+      assert.deepEqual(getProviderCatalogProvenance(configPath), { source: "empty", count: 0 });
+      recordProviderCatalogProvenance("live", entries.length);
+      // A failed discovery elsewhere (the bridge) reads the cache as a fallback;
+      // that must not relabel the live roster the provider is serving.
+      saveProviderCatalogCache(entries, configPath);
+      loadProviderCatalogCache(configPath);
+      clearProviderCatalogCache(configPath);
+      loadProviderCatalogCache(configPath);
+      const live = getProviderCatalogProvenance(configPath);
+      assert.equal(live.source, "live");
+      assert.equal(live.count, entries.length);
+      assert.ok((live.ageMs ?? -1) >= 0);
+      recordProviderCatalogProvenance("cache", entries.length);
+      assert.equal(getProviderCatalogProvenance(configPath).source, "cache");
+    } finally {
+      recordProviderCatalogProvenance("cache", 0);
       await cleanup();
     }
   });

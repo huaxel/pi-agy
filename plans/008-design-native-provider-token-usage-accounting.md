@@ -6,6 +6,13 @@
 
 ## Status
 
+> **Current outcome:** The design's native-usage path shipped in v0.7.17
+> (`a5df269`, `feat: drive aliases, usage, and turn delivery from live agy state`).
+> `extensions/lib/provider-usage.ts`, the driver, and provider runtime now validate
+> cumulative usage and report phase-scoped Pi totals. The remaining semantic
+> blockers recorded below describe the pre-implementation design checkpoint;
+> consult the shipped code/tests and v0.7.17 changelog for the implemented contract.
+
 - **Priority:** P2
 - **Effort:** S (design/spike only; subsequent implementation likely M)
 - **Risk:** LOW (report only)

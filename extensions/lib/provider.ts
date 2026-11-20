@@ -327,6 +327,7 @@ function toRunEnd(
  * across turns. Reset via closeProviderDrivers() (session shutdown, tests).
  */
 const providerDrivers = new Map<string, AgyProviderDriver>();
+const providerDiagnostics = new Map<string, { promptMode?: "full" | "delta"; promptFallbackReason?: string; deniedActions: number }>();
 
 export function getProviderDriver(dir: string): AgyProviderDriver {
   // Resolve spelling variants (./, ../) to one driver per directory. (Symlink
@@ -387,7 +388,8 @@ export function describeProviderBridges(): ProviderBridgeStatus[] {
   const out: ProviderBridgeStatus[] = [];
   try {
     for (const [dir, bridge] of providerBridges) {
-      out.push({ dir, running: !!bridge, toolCount: bridge?.describe().toolCount });
+      const description = bridge?.describe();
+      out.push({ dir, running: description?.listening ?? false, toolCount: description?.toolCount });
     }
   } catch {
     // Status surfaces must never break callers.
@@ -413,9 +415,11 @@ export interface ProviderStatus {
     boundConversationId?: string;
   };
   /** Bridge description, when a bridge is running for the directory. */
-  bridge?: { toolCount: number; pendingResults: number };
+  bridge?: { toolCount: number; pendingResults: number; listening: boolean };
   /** Suspended turns awaiting Pi tool results. */
   suspended: ProviderStatusSuspended[];
+  /** Most recent prompt construction and denied-action observations for this workspace. */
+  diagnostics?: { promptMode?: "full" | "delta"; promptFallbackReason?: string; deniedActions: number };
   /** Live image staging dirs process-wide. */
   stagedImages: number;
 }
@@ -439,7 +443,7 @@ export function getProviderStatus(dir: string): ProviderStatus {
   try {
     const driver = providerDrivers.get(key);
     const snapshot = driver?.snapshot();
-    const bridge = providerBridges.get(key);
+    const description = providerBridges.get(key)?.describe();
     return {
       dir: key,
       driver: snapshot
@@ -452,7 +456,14 @@ export function getProviderStatus(dir: string): ProviderStatus {
             boundConversationId: snapshot.boundConversationId,
           }
         : undefined,
-      bridge: bridge ? { toolCount: bridge.describe().toolCount, pendingResults: bridge.describe().pendingResults } : undefined,
+      bridge: description
+        ? {
+            toolCount: description.toolCount,
+            pendingResults: description.pendingResults,
+            listening: description.listening,
+          }
+        : undefined,
+      diagnostics: providerDiagnostics.get(key),
       suspended,
       stagedImages: getLiveImageStagingCount(),
     };
@@ -465,6 +476,7 @@ export function getProviderStatus(dir: string): ProviderStatus {
 export async function closeProviderDrivers(): Promise<void> {
   const drivers = [...providerDrivers.values()];
   providerDrivers.clear();
+  providerDiagnostics.clear();
   providerRunners.clear();
   clearSuspendedTurns();
   await clearImageStaging();
@@ -855,18 +867,30 @@ export function createAgyStreamSimple(
           const bridgedTools = projectBridgeTools(options?.tools ?? deps.tools ?? []);
           activeBridgeToolsKey = bridgeToolsFingerprint(bridgedTools);
           const sync = resume ? syncByModel.get(model.id) : undefined;
-          const canDelta =
-            !!sync &&
-            sync.conversationId === resume &&
-            sync.systemPrompt === systemPrompt &&
-            sync.bridgeToolsKey === activeBridgeToolsKey &&
-            messages.length > sync.syncedInputCount + 1 &&
-            messages[sync.syncedInputCount]?.role === "assistant" &&
-            transcriptFingerprint(messages.slice(0, sync.syncedInputCount)) === sync.syncedInputFingerprint &&
-            transcriptFingerprint([messages[sync.syncedInputCount]]) === sync.syncedAssistantFingerprint;
+          const deltaFailureReason = !resume
+            ? "no conversation to resume"
+            : !sync
+              ? "no synchronized in-memory prompt"
+              : sync.conversationId !== resume
+                ? "conversation changed"
+                : sync.systemPrompt !== systemPrompt
+                  ? "system prompt changed"
+                  : sync.bridgeToolsKey !== activeBridgeToolsKey
+                    ? "tool catalog changed"
+                    : messages.length <= sync.syncedInputCount + 1
+                      ? "no new messages"
+                      : messages[sync.syncedInputCount]?.role !== "assistant"
+                        ? "assistant anchor missing"
+                        : transcriptFingerprint(messages.slice(0, sync.syncedInputCount)) !== sync.syncedInputFingerprint
+                          ? "earlier transcript changed"
+                          : transcriptFingerprint([messages[sync.syncedInputCount]]) !== sync.syncedAssistantFingerprint
+                            ? "assistant anchor changed"
+                            : undefined;
+          const canDelta = deltaFailureReason === undefined;
           let prompt: string;
           if (canDelta) {
-            const deltaMessages = messages.slice(sync.syncedInputCount + 1);
+            const deltaSync = sync!;
+            const deltaMessages = messages.slice(deltaSync.syncedInputCount + 1);
             const staged = await stageImages(collectImageBlocks(deltaMessages));
             pendingImageCleanups.push(staged.cleanup);
             prompt = renderProviderDeltaPrompt(deltaMessages, staged.paths);
@@ -881,6 +905,12 @@ export function createAgyStreamSimple(
               bridgedToolNames: bridgedTools.map((tool) => tool.name),
             });
           }
+          providerDiagnostics.set(skey, {
+            ...providerDiagnostics.get(skey),
+            promptMode: canDelta ? "delta" : "full",
+            promptFallbackReason: canDelta ? undefined : deltaFailureReason,
+            deniedActions: providerDiagnostics.get(skey)?.deniedActions ?? 0,
+          });
           // Capture before execution: later invocations can resolve a different
           // profile while this child remains parked on its original target.
           executedRawModelId = validateAgyModelId(
@@ -957,6 +987,11 @@ export function createAgyStreamSimple(
           return;
         }
         const result = end.result;
+        const previousDiagnostics = providerDiagnostics.get(skey);
+        providerDiagnostics.set(skey, {
+          ...previousDiagnostics,
+          deniedActions: result.deniedActions?.length ?? 0,
+        });
         setActivityStatus(undefined);
 
         if (thinkingIndex !== -1) {

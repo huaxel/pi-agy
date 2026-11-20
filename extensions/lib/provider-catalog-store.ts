@@ -15,7 +15,7 @@
  * corrupt or unwritable cache degrades to today's empty-start behaviour.
  */
 
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 
 import { getDefaultConfigPath } from "./config.js";
@@ -28,6 +28,46 @@ import {
 const CACHE_FILENAME = "agy-provider-models.json";
 const MAX_CACHED_ENTRIES = 500;
 const EFFORT_VALUES: readonly AgyProviderEffort[] = ["low", "medium", "high"];
+
+let observedCatalog: { source: "cache" | "live"; count: number; observedAt: number } | undefined;
+
+export interface ProviderCatalogProvenance {
+  source: "live" | "cache" | "empty";
+  count: number;
+  ageMs?: number;
+}
+
+/**
+ * Record the roster the provider is actually serving. Only the provider's
+ * catalog owner calls this: loading the cache for another reason (the bridge's
+ * discovery fallback) or failing to persist a live roster must not change what
+ * status surfaces report about the provider.
+ */
+export function recordProviderCatalogProvenance(source: "cache" | "live", count: number): void {
+  observedCatalog = count > 0 ? { source, count, observedAt: Date.now() } : undefined;
+}
+
+/** Passive provenance for the roster the provider last started from or discovered. */
+export function getProviderCatalogProvenance(
+  configPath = getDefaultConfigPath(),
+): ProviderCatalogProvenance {
+  if (!observedCatalog || observedCatalog.count === 0) {
+    return { source: "empty", count: 0 };
+  }
+  let observedAt = observedCatalog.observedAt;
+  if (observedCatalog.source === "cache") {
+    try {
+      observedAt = statSync(providerCatalogCachePath(configPath)).mtimeMs;
+    } catch {
+      // Keep the in-memory observation time if the cache disappears.
+    }
+  }
+  return {
+    source: observedCatalog.source,
+    count: observedCatalog.count,
+    ageMs: Math.max(0, Date.now() - observedAt),
+  };
+}
 
 export function providerCatalogCachePath(configPath = getDefaultConfigPath()): string {
   return path.join(path.dirname(configPath), CACHE_FILENAME);

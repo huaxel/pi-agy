@@ -52,7 +52,48 @@ describe("agy doctor", () => {
         assert.match(report.text, /✓ Sessions: 1 recorded for this workspace/);
         assert.match(report.text, /✓ Workspace lock: free/);
         assert.match(report.text, /✓ Verify: npm test/);
-        assert.match(report.text, /• Provider: driver idle \(no provider turns yet\) · bridge off/);
+        assert.match(report.text, /• Provider: driver idle \(no provider turns yet\) · bridge configured, not started · catalog empty/);
+      } finally {
+        if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousDir;
+      }
+    }, 0, 0, "", "", usage, 0, "gemini-3.8-flash-medium");
+  });
+
+  it("keeps provider runtime state when the config file is unreadable", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-doctor-bad-config-"));
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-doctor-agent-"));
+    await writeFile(path.join(agentDir, "agy-config.json"), "{ not json");
+    const usage = JSON.stringify({
+      groups: [{ name: "Gemini Models", buckets: [{ remainingFraction: 0.5 }] }],
+    });
+    await withFakeAgy("", async () => {
+      const previousDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      try {
+        const report = await runAgyDoctor(cwd);
+        assert.match(report.text, /• Provider: driver idle \(no provider turns yet\) · bridge configured, not started · catalog empty/);
+      } finally {
+        if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousDir;
+      }
+    }, 0, 0, "", "", usage, 0, "gemini-3.8-flash-medium");
+  });
+
+  it("reports an explicitly disabled provider bridge without starting it", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-agy-doctor-bridge-off-"));
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-doctor-agent-"));
+    await writeFile(path.join(agentDir, "agy-config.json"), JSON.stringify({ providerBridge: false }));
+    const usage = JSON.stringify({
+      groups: [{ name: "Gemini Models", buckets: [{ remainingFraction: 0.5 }] }],
+    });
+    await withFakeAgy("", async () => {
+      const previousDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      try {
+        const report = await runAgyDoctor(cwd);
+        assert.equal(report.status, "ok");
+        assert.match(report.text, /bridge disabled by configuration · catalog empty/);
       } finally {
         if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = previousDir;

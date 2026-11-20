@@ -667,6 +667,7 @@ describe("MCP bridge", () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
       const handle = await startBridge(dir);
       assert.equal(handle.describe().toolCount, 5);
+      assert.equal(handle.describe().listening, true);
       handle.setTools([
         { name: "read", piName: "read", description: "Read", inputSchema: { type: "object" } },
       ]);

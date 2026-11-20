@@ -54,7 +54,25 @@ export function resolveAgyModelAlias(
  */
 export function resolveAgyModelId(model?: AgyModel, tier?: AgyOptions["tier"]): string | undefined {
   const alias = resolveAgyModelAlias(model, tier) ?? DEFAULT_MODEL_ALIAS;
-  return getModelCatalog()[alias];
+  const catalog = getModelCatalog();
+  const id = catalog[alias];
+  if (id || model || !tier) return id;
+  // A tierless family answers only one canonical alias (see parseModelCatalog),
+  // and a legacy tier names the family rather than an effort. Resolve it
+  // through that alias, but only to an id that offers no effort tiers, so a
+  // tier-aware family's retired tier still fails loudly.
+  const family = alias.split("-")[0];
+  for (const [candidate, candidateId] of Object.entries(catalog)) {
+    if (
+      candidateId &&
+      candidate.startsWith(`${family}-`) &&
+      !namesEffortTierInId(candidateId) &&
+      effortTiersForModelId(candidateId).length === 0
+    ) {
+      return candidateId;
+    }
+  }
+  return undefined;
 }
 
 /**

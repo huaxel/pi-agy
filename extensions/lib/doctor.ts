@@ -10,7 +10,8 @@ import {
   isAgyQuotaExhausted,
   type AgyUsageSnapshot,
 } from "./cli.js";
-import { getDefaultConfigPath } from "./config.js";
+import { getDefaultConfigPath, loadAgyConfig } from "./config.js";
+import { getProviderCatalogProvenance } from "./provider-catalog-store.js";
 import { canonicalDir, getDirLockPath } from "./lock.js";
 import { getProviderStatus } from "./provider.js";
 import { getDefaultStorePath, getHistory } from "./sessions.js";
@@ -108,7 +109,7 @@ export async function runAgyDoctor(
 
   checks.push(await configCheck(signal));
   throwIfCancelled(signal);
-  checks.push(providerCheck(resolvedCwd));
+  checks.push(await providerCheck(resolvedCwd, signal));
   throwIfCancelled(signal);
   checks.push(await sessionsCheck(resolvedCwd, signal));
   throwIfCancelled(signal);
@@ -303,10 +304,17 @@ async function lockCheck(cwd: string): Promise<AgyDoctorCheck> {
   }
 }
 
-/** Provider runtime state: driver, bridge, suspensions, staging. Never throws. */
-function providerCheck(cwd: string): AgyDoctorCheck {
+/** Provider runtime state and passive model-catalog provenance. Never throws. */
+async function providerCheck(cwd: string, signal?: AbortSignal): Promise<AgyDoctorCheck> {
   try {
     const status = getProviderStatus(cwd);
+    // The Config check owns config errors; a bad file must not hide runtime state.
+    const bridgeSetting = await loadAgyConfig(undefined, signal).then(
+      (config) => config.providerBridge,
+      () => undefined,
+    );
+    throwIfCancelled(signal);
+    const catalog = getProviderCatalogProvenance();
     const parts: string[] = [];
     if (status.driver) {
       const stats = status.driver;
@@ -318,7 +326,22 @@ function providerCheck(cwd: string): AgyDoctorCheck {
     } else {
       parts.push("driver idle (no provider turns yet)");
     }
-    parts.push(status.bridge ? `bridge ${status.bridge.toolCount} tools` : "bridge off");
+    const bridgeEnabled = bridgeSetting !== false;
+    parts.push(!bridgeEnabled
+      ? "bridge disabled by configuration"
+      : status.bridge?.listening
+        ? `bridge listening (${status.bridge.toolCount} tools${status.bridge.pendingResults ? `, ${status.bridge.pendingResults} pending` : ""})`
+        : status.bridge
+          ? "bridge started, listener unavailable"
+          : "bridge configured, not started");
+    if (status.driver && status.driver.turns > 0) parts.push("provider used");
+    if (status.diagnostics?.promptMode) {
+      parts.push(`last prompt ${status.diagnostics.promptMode}${status.diagnostics.promptFallbackReason ? ` (${status.diagnostics.promptFallbackReason})` : ""}`);
+    }
+    if (status.diagnostics) parts.push(`${status.diagnostics.deniedActions} denied action(s) last turn`);
+    parts.push(catalog.source === "empty"
+      ? "catalog empty"
+      : `catalog ${catalog.source} (${catalog.count} models${catalog.ageMs === undefined ? "" : `, observed ${Math.floor(catalog.ageMs / 60_000)}m ago`})`);
     if (status.suspended.length > 0) {
       const names = status.suspended.map((entry) => entry.toolName).join(", ");
       parts.push(`${status.suspended.length} suspended awaiting Pi tools (${names})`);

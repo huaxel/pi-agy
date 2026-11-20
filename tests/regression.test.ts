@@ -315,8 +315,9 @@ describe("model catalog stability", () => {
     resetModelCatalog();
   });
 
-  it("answers tier aliases for a family that ships no effort variants", () => {
-    // A flagship whose id carries no tier token still exists for `pro` users.
+  it("keeps one canonical tier alias for a family whose ids carry no effort tier", () => {
+    // A tierless flagship still serves the canonical `pro` selector without
+    // falsely implying that low and high choose different models.
     const catalog = parseModelCatalog(
       [
         "gemini-3.8-flash-medium\tFlash Medium",
@@ -326,7 +327,15 @@ describe("model catalog stability", () => {
     );
     assert.equal(catalog["flash-medium"], "gemini-3.8-flash-medium");
     assert.equal(catalog["pro-high"], "gemini-pro-orchestrator-neon");
-    assert.equal(catalog["pro-low"], "gemini-pro-orchestrator-neon");
+    assert.equal(catalog["pro-low"], undefined);
+    resetModelCatalog();
+  });
+
+  it("prefers the middle tier when a tierless family has three aliases", () => {
+    const catalog = parseModelCatalog("gemini-flash-orchestrator\tFlash Orchestrator");
+    assert.equal(catalog["flash-medium"], "gemini-flash-orchestrator");
+    assert.equal(catalog["flash-low"], undefined);
+    assert.equal(catalog["flash-high"], undefined);
     resetModelCatalog();
   });
 

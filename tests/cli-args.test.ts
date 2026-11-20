@@ -324,6 +324,29 @@ describe("model catalog", () => {
     }
   });
 
+  it("resolves legacy tiers through a tierless family's canonical alias", () => {
+    resetModelCatalog();
+    updateModelCatalog(parseModelCatalog("gemini-flash-orchestrator\tFlash Orchestrator"));
+    try {
+      assert.equal(resolveAgyModelId(undefined, "flash"), "gemini-flash-orchestrator");
+      assert.equal(resolveAgyModelId(undefined, "flash-lo"), "gemini-flash-orchestrator");
+      // Explicit aliases stay exact: only the canonical one is advertised.
+      assert.equal(resolveAgyModelId("flash-high"), undefined);
+    } finally {
+      resetModelCatalog();
+    }
+  });
+
+  it("still fails a retired legacy tier in a tier-aware family", () => {
+    resetModelCatalog();
+    updateModelCatalog({ "flash-medium": "gemini-9.9-flash-medium" });
+    try {
+      assert.equal(resolveAgyModelId(undefined, "flash"), undefined);
+    } finally {
+      resetModelCatalog();
+    }
+  });
+
   it("accepts only known model aliases", () => {
     for (const alias of AGY_MODEL_ALIASES) assert.ok(isAgyModel(alias), alias);
     for (const value of ["gpt-4", "", "FLASH-LOW", undefined, null, 1, {}]) {

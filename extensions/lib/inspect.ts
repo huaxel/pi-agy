@@ -80,17 +80,22 @@ export function aliasMatchesModelId(alias: string, id: string): boolean {
 /**
  * Class-level match used only when a family ships no effort variants at all.
  *
- * Vendors do move effort out of the id: a `…-pro-orchestrator-neon` flagship
- * carries no tier token, so every `pro-*` alias would stop resolving and a
- * legacy `tier: "pro"` would fail for a model that plainly exists. Such a
- * family answers its tier aliases with its top id instead. A family that does
- * ship variants never reaches this path, so a retired tier still fails loudly
- * rather than silently upgrading.
+ * Some families have tierless IDs. Since the catalog then provides no evidence
+ * that low/high aliases are distinct, only one canonical alias is retained for
+ * that class (medium when offered, otherwise high, then another available
+ * tier). This preserves one useful legacy selector without falsely advertising
+ * multiple effort choices that all execute the same model. A family that does
+ * ship variants never reaches this path, so a retired tier still fails loudly.
  */
 function classMatchesModelId(classTokens: readonly string[], id: string): boolean {
   const idTokens = id.toLowerCase().split("-").filter(Boolean);
   return findTokenRun(idTokens, classTokens) !== -1;
 }
+
+// Tierless families have no evidence for distinguishing their effort aliases.
+// Keep only one canonical alias: prefer the ordinary middle tier, then the
+// strongest available tier, then the first remaining supported tier.
+const TIERLESS_ALIAS_PREFERENCE = ["medium", "high", "low", "xhigh", "max"] as const;
 
 /** Does this concrete id already name its tier (`…-flash-low`)? */
 export function namesEffortTierInId(id: string): boolean {
@@ -167,16 +172,32 @@ export function parseModelCatalog(output: string, allowPreview = false): AgyMode
     if (found[alias] === undefined) unanswered.push(alias);
   }
 
+  const fallbackGroups = new Map<string, { classTokens: string[]; aliases: AgyModel[] }>();
   for (const alias of unanswered) {
     const classTokens = classTokensOf(alias);
     if (!classTokens) continue;
+    const key = classTokens.join("-");
+    const group = fallbackGroups.get(key) ?? { classTokens, aliases: [] };
+    group.aliases.push(alias);
+    fallbackGroups.set(key, group);
+  }
+  for (const { classTokens, aliases } of fallbackGroups.values()) {
     const candidates = ids.filter((id) => classMatchesModelId(classTokens, id));
     // A class that ships any effort variant is tier-aware: its aliases must
     // match the requested tier or fail, never fall back to another tier.
     if (candidates.length === 0 || candidates.some(namesEffortTierInId)) continue;
-    for (const id of candidates) {
-      if (compareModelIds(id, found[alias] ?? "") > 0) found[alias] = id;
-    }
+    const canonicalAlias = aliases.sort((left, right) => {
+      const leftTier = aliasTokens(left).at(-1) ?? "";
+      const rightTier = aliasTokens(right).at(-1) ?? "";
+      return TIERLESS_ALIAS_PREFERENCE.indexOf(leftTier as typeof TIERLESS_ALIAS_PREFERENCE[number]) -
+        TIERLESS_ALIAS_PREFERENCE.indexOf(rightTier as typeof TIERLESS_ALIAS_PREFERENCE[number]);
+    })[0];
+    if (!canonicalAlias) continue;
+    const latest = candidates.reduce(
+      (selected, id) => compareModelIds(id, selected) > 0 ? id : selected,
+      "",
+    );
+    if (latest) found[canonicalAlias] = latest;
   }
 
   return found;

@@ -30,6 +30,7 @@ import {
 } from "./lib/provider-models.js";
 import {
   loadProviderCatalogCache,
+  recordProviderCatalogProvenance,
   saveProviderCatalogCache,
 } from "./lib/provider-catalog-store.js";
 import { runPreflightCommand } from "./lib/spawn.js";
@@ -54,6 +55,7 @@ function registerAgyProvider(pi: ExtensionAPI): void {
   // model scopes during startup, and an empty catalog there reports a real
   // model as "No models match pattern" before discovery can answer.
   const cached = loadProviderCatalogCache();
+  recordProviderCatalogProvenance("cache", cached.length);
   const entries: AgyProviderModelEntry[] = [
     ...(cached.length > 0 ? cached : FALLBACK_PROVIDER_MODELS),
   ];
@@ -146,6 +148,7 @@ function registerAgyProvider(pi: ExtensionAPI): void {
       if (areProviderCatalogsEqual(entries, live)) {
         // Same roster, possibly only now confirmed on disk (first run after an
         // older version, or a cache cleared by hand).
+        recordProviderCatalogProvenance("live", live.length);
         saveProviderCatalogCache(live);
         return;
       }
@@ -159,6 +162,7 @@ function registerAgyProvider(pi: ExtensionAPI): void {
           models = definitions;
         },
       });
+      recordProviderCatalogProvenance("live", live.length);
       saveProviderCatalogCache(live);
     },
     stream: (model, context, options) => stream(model, context, options as SimpleStreamOptions),

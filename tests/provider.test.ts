@@ -385,11 +385,19 @@ describe("provider streamSimple", () => {
         getSystemPrompt: () => currentSystemPrompt,
       };
       const prompts: string[] = [];
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-delta-status-"));
       const streamSimple = createAgyStreamSimple(factory, {
         entries: [...TEST_CATALOG],
+        dir,
         runner: makeStaticRunner(async (request) => {
           prompts.push(request.prompt);
-          return { text: `reply-${prompts.length}`, truncated: false, conversationId: "conv-delta", activity: [] };
+          return {
+            text: `reply-${prompts.length}`,
+            truncated: false,
+            conversationId: "conv-delta",
+            activity: [],
+            ...(prompts.length === 6 ? { deniedActions: [{ action: "write" }] } : {}),
+          };
         }),
       });
 
@@ -409,6 +417,11 @@ describe("provider streamSimple", () => {
       );
       await waitForStreamEnd(factory, start);
       assert.equal(prompts[1], "second question");
+      assert.deepEqual(getProviderStatus(dir).diagnostics, {
+        promptMode: "delta",
+        promptFallbackReason: undefined,
+        deniedActions: 0,
+      });
 
       // Turn 3: /tree rewind (changed prefix) -> falls back to full prompt
       start = factory.events.length;
@@ -477,6 +490,11 @@ describe("provider streamSimple", () => {
       );
       await waitForStreamEnd(factory, start);
       assert.match(prompts[5], /System instructions:\nNew rules\./);
+      assert.deepEqual(getProviderStatus(dir).diagnostics, {
+        promptMode: "full",
+        promptFallbackReason: "system prompt changed",
+        deniedActions: 1,
+      });
     });
   });
 

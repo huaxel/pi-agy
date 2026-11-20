@@ -177,7 +177,7 @@ export interface McpBridgeHandle {
   /** Release call IDs whose owning provider operation can no longer poll them. */
   discardParks: (callIds: Iterable<string>) => void;
   /** Point-in-time description for status surfaces. */
-  describe: () => { configDir: string; url: string; toolCount: number; pendingResults: number };
+  describe: () => { configDir: string; url: string; toolCount: number; pendingResults: number; listening: boolean };
 }
 
 export interface BridgePark {
@@ -715,6 +715,7 @@ export async function startMcpBridge(
         url: `http://127.0.0.1:${port}${BRIDGE_MCP_PATH}`,
         toolCount: bridgedTools.length + BUILTIN_TOOL_COUNT,
         pendingResults: escalations.size,
+        listening: http.listening,
       }),
       setTools: (tools: BridgeToolDef[]) => {
         bridgedTools = tools;

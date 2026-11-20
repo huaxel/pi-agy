@@ -2,16 +2,12 @@
 
 ## Full /agy command model discovery — 018
 
-**DONE — integrated locally, independently approved; uncommitted/unpublished.**
-User's remaining issue was the separate /agy picker: even successful discovery
-still rendered only fixed alias rows. Full raw roster, exact-ID execution and
-resume now work, with visible failures/last-good fallback and model=<id> syntax.
-Advisor isolated and original gates:106/106 focused,490/490 full,types/45-entrypack.
-[Current diagnosis/acceptance](evidence/018-agy-command-model-discovery.md),
+**DONE — released in v0.7.13.** The separate `/agy` picker now shows the full
+raw roster, supports exact-ID execution/resume, and reports discovery failures
+with last-good fallback. [Diagnosis/acceptance](evidence/018-agy-command-model-discovery.md),
 [independent review](evidence/018-command-models-independent-review.md).
-User subsequently authorized commit/push/publication as v0.7.13 and updating Pi's
-installed extension. The implementation checkpoint above predates that release.
-Baseline89a805a; release and managed-update outcomes are reported separately.
+Historical verification at implementation: 106/106 focused, 490/490 full,
+typecheck and package check.
 
 ## Automatic full model catalog refresh — 017
 
@@ -27,12 +23,10 @@ The earlier016 parser-only checkpoint below is superseded by this full fix.
 
 ## Nonhyphen provider model discovery — 016
 
-**DONE — integrated locally, uncommitted/unpublished.** Model IDs such as `argon`
-were rejected solely for lacking a hyphen. Generic nonhyphen parsing and public
-registration regressions now pass: advisor 70/70 focused, 457/457 full, types/pack.
-[Diagnosis and evidence](evidence/016-nonhyphen-model-discovery.md).
-Installed Pi package remains 0.7.11, unchanged; live `agy models` currently fails
-authentication. No claim of live Argon access. Baseline HEAD `ed9adcc`.
+**DONE — included in v0.7.12; superseded
+by the automatic refresh work in 017.** Model IDs such as `argon` now parse
+without a hyphen. [Diagnosis and historical evidence](evidence/016-nonhyphen-model-discovery.md).
+Implementation verification: 70/70 focused, 457/457 full, typecheck and pack.
 
 ## Provider lifecycle fixes — 015
 
@@ -86,7 +80,7 @@ Read a plan completely before executing it. Each is self-contained; follow its d
 
 ## Completion summary
 
-**All originally selected deliverables are complete and reviewed.** The dependency investigation, five correctness fixes and bounded timing-fixture follow-up are approved. The two direction reports are **design complete; implementation unstarted**. No new feature implementation is implied by their DONE status.
+**Historical audit deliverables are complete and reviewed.** Current follow-up status: native provider usage shipped in v0.7.17; passive `/agy doctor` provenance improvements are implemented in the current worktree; the isolated functional bridge-contract gate from 007 is implemented locally as `npm run test:bridge-contract` and is not yet part of a release. The remaining paragraphs below preserve execution-time facts and should not be read as the current release state.
 
 - Final all-fixes worktree: `/var/folders/nj/qr5wt0616qvfzt3x7y4wv9440000gn/T/pi-agy-luna-006-yxx758z7/worktree`. Independent Node22 verification: **330/330 tests**, typecheck and package dry-run pass; named cancellation3/3, driver19/19, provider40/40, diagnostic/MCP/parser51/51.
 - [Final correctness/composition review](evidence/006-cancelled-resume-review.md). Retained patch order:002,003,004,009,005,006;005/006 are incremental. All remain uncommitted and unapplied to the original checkout.
@@ -113,8 +107,8 @@ Remaining limits: four moderate production SDK package entries remain. The insta
 | [009](009-stabilize-timing-verification.md) | Diagnose and stabilize timing verification without production deadline changes | P1 | M | 001; blocked003 evidence as input | DONE — APPROVE; base309/309; combined003+009314/314 twice independently |
 | [005](005-preserve-authoritative-terminal-provider-responses.md) | Fix final response reconciliation and preserve provider bounds | P1 | S–M | 001; accepted003+009 bundle | DONE — APPROVE; independent319/319, typecheck and packaging |
 | [006](006-settle-provider-resumes-with-already-aborted-signals.md) | Fix pre-aborted continuation settlement | P1 | S | 001; approved prior patches | DONE — APPROVE; all-fixes stack330/330 independently, types/pack pass |
-| [007](007-design-truthful-end-to-end-bridge-diagnostics.md) | Design a truthful, bounded, zero-inference bridge diagnostic | P2 | S design | 003, 004, 006 | DONE — design complete; implementation unstarted; independently approved |
-| [008](008-design-native-provider-token-usage-accounting.md) | Design native usage mapping and phase accounting | P2 | S design | 005, 006 | DONE — design complete; implementation unstarted; explicit semantic blockers |
+| [007](007-design-truthful-end-to-end-bridge-diagnostics.md) | Design a truthful, bounded, zero-inference bridge diagnostic | P2 | S design | 003, 004, 006 | DONE — passive provenance and isolated `test:bridge-contract` gate implemented locally; no functional-health claim or release yet |
+| [008](008-design-native-provider-token-usage-accounting.md) | Design native usage mapping and phase accounting | P2 | S design | 005, 006 | DONE — design and implementation shipped in v0.7.17 (`a5df269`) |
 | [010](010-bound-mcp-validation-and-refresh-vulnerable-dependencies.md) | Bound bridge validation and refresh vulnerable dependencies | P1 | M implementation | 001; accepted all-fixes stack through006 | DONE — APPROVE; subsequently applied locally; isolated and original-checkout341/341, types/pack pass |
 | [011](011-qualify-patched-pi-development-host.md) | Qualify a patched Pi development-host baseline | P2 | M qualification | Integrated stack through010 | DONE — APPROVE; explicitly applied and clean-installed locally;341/341, types/pack,0 high/critical root audits,0 installed-lock drift; old tree retained |
 
