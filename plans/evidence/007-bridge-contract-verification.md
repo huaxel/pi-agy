@@ -67,15 +67,16 @@ and logs it, so the mutant report leads with the real cause.
 - Does not prove: that a real `agy` child connects, discovers a model, selects the
   bridged tool, or answers a turn. Those remain the territory of the billable
   `test:bridge` and `test:provider` runs.
-- Not run here: Linux CI, Windows, a `npm ci` clean-install graph, or any
-  independent review.
+- Run since: the first Linux CI execution of the gate landed with commit
+  `91c4e2a` (run `44831711257`, "Bridge contract (isolated, no agy process)"
+  passed inside a 1m02s job) after `npm ci` on Node 22. Still not run: Windows,
+  and any independent review.
 
 ## Open decisions
 
-1. **CI wiring.** The gate is deliberately not part of `npm test` (`tests/*.test.ts`
-   glob) and takes ~2.6 s, so adding one step to `.github/workflows/ci.yml` and the
-   publish `verify` job would cost little and stop it from rotting silently. It
-   cannot be enabled before the file is committed, so this is a post-commit choice.
+1. **CI wiring.** Done: `.github/workflows/ci.yml` and the publish `verify` job both
+   run the gate. It stays outside `npm test` on purpose, since that glob is for
+   in-process tests only.
 2. **CHANGELOG shape.** The entry sits under a new `## Unreleased` heading, while
    earlier project practice logged only released versions. Folding it into the
    next release section is equally acceptable.
