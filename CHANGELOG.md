@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.18
 
 - Validate cached model ids with the same rule the live `agy models` parser applies. `full` is passed as `--model <full>`, so an unvalidated cache entry could smuggle a flag into agy's argv (`--dangerously-skip-permissions` as a "model id"). Cache entries with whitespace, control characters, or a leading `-` are now dropped.
 - Gate CI and the publish verify job on `npm audit --audit-level=high` and `npm audit signatures`, so a high or critical advisory or an unattested package cannot be released silently.
