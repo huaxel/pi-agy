@@ -106,7 +106,7 @@ Resolution order: `defaultModel` → `defaultModelCommand` → `quotaBalancing` 
 ## Notes for the curious
 
 - **The bridge is local and locked down.** It listens on `127.0.0.1` only, requires a per-process secret header, and caps each authenticated request at 1 MiB and 10,000 structural elements across 64 levels, rejecting oversized input before any session or tool work happens.
-- **Dependencies are pinned deliberately.** One runtime dependency (`@modelcontextprotocol/sdk`, floor `^1.32.2`), which is where the whole install comes from: it declares 17 sub-dependencies, so a fresh install is 94 production packages including both `express` and `hono`, plus `ajv`, `jose`, `cors` and `eventsource`. This package imports three things from it: the server, the streamable-HTTP transport, and two request schemas. `npm audit` reports no known vulnerabilities in the pinned graph, and CI blocks on high or critical plus missing registry attestations. A consumer still resolves its own tree, so audit yours — a patched lockfile here is not a guarantee downstream.
+- **No runtime dependencies.** Everything the bridge needs from MCP lives in `extensions/lib/mcp-transport.ts`: JSON-RPC 2.0 dispatch, the initialize handshake, `tools/list`, `tools/call`, `ping`, session ids, and both JSON and SSE framing. The official SDK is a dev dependency, so the bridge tests keep driving this server with a real client and `agy` itself still connects to it — while an install of this package pulls nothing. Pi supplies the peer packages. `npm audit` is clean, and CI blocks on high or critical advisories and missing registry attestations.
 - **Turns in flight are serialized** per directory, so a delegated run can never race a provider turn in the same project.
 
 ## Development

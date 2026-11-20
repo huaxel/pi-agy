@@ -26,12 +26,10 @@ import { chmod, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+  McpServer,
+  StreamableHTTPServerTransport,
+} from "./mcp-transport.js";
 
 import { getDefaultConfigPath } from "./config.js";
 import { loadProviderCatalogCache } from "./provider-catalog-store.js";
@@ -244,7 +242,7 @@ export async function startMcpBridge(
       { capabilities: { tools: {} } },
     );
 
-    mcp.setRequestHandler(ListToolsRequestSchema, () => {
+    mcp.setToolListHandler(() => {
     const skills = scanSkills(dir);
     return {
       tools: [
@@ -312,7 +310,7 @@ export async function startMcpBridge(
     };
   });
 
-  mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+  mcp.setToolCallHandler(async (request) => {
     try {
       const name = request.params.name;
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;

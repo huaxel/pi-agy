@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0
+
+### Zero runtime dependencies
+
+- Implement the MCP slice this bridge actually uses in `extensions/lib/mcp-transport.ts` and drop `@modelcontextprotocol/sdk` from `dependencies`. The SDK declared seventeen sub-dependencies — both `express` and `hono`, `ajv`, `jose`, `cors`, `eventsource`, `express-rate-limit`, `pkce-challenge` — for 94 production packages, and every advisory this package has carried came through it. The shipped server now has none.
+- Cover the framing decisions a well-behaved client hides: SSE-only clients, notifications answered with an empty 202, unknown methods as JSON-RPC errors, malformed bodies as `-32700`, batches answered per element, and session termination. Seven new protocol tests.
+- Keep the SDK as a dev dependency. The bridge suite still drives the new server with the real SDK client, and `npm run test:bridge` still connects a real `agy` child to it, so compatibility is tested rather than assumed.
+
 ## 0.7.19
 
 - Clear every known dependency advisory. `npm audit` reported four moderates, all transitive through `@modelcontextprotocol/sdk` rather than this package's own code: `hono` 4.13.10 → 4.13.19, `@hono/node-server` 2.1.1 → 2.1.11, `fast-uri` 3.1.8 → 3.1.9 (via `ajv`), `ip-address` 10.7.2 → 10.7.6 (via `express-rate-limit`). No direct dependency changed; `npm audit` now reports zero vulnerabilities at any severity, and the bridge transport suites pass repeatedly against the new `hono` versions.
