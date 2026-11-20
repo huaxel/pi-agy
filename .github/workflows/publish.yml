@@ -56,3 +56,40 @@ jobs:
       - run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ steps.npm-token.outputs.token }}
+      # npm reports success before the tarball is downloadable: metadata and
+      # dist-tags commit first, and `latest` then points at a 404 for several
+      # minutes, which breaks a bare `npm install` for everyone. Verified on
+      # 0.7.15 through 0.7.18 (2-6 minutes each). Poll the artifact the registry
+      # itself names instead of inferring a filename, and fail loudly if it
+      # never materializes.
+      - name: Verify the published artifact is installable
+        run: |
+          set -euo pipefail
+          PKG=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          ENCODED=$(node -e "process.stdout.write(encodeURIComponent(process.argv[1]))" "$PKG")
+          echo "waiting for ${PKG}@${VER} to become downloadable"
+          deadline=$((SECONDS + 900))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            manifest=$(curl -fsS "https://registry.npmjs.org/${ENCODED}/${VER}" || true)
+            tarball=$(printf '%s' "$manifest" | jq -r '.dist.tarball // empty')
+            if [ -n "$tarball" ]; then
+              code=$(curl -s -o /tmp/artifact.tgz -w '%{http_code}' "$tarball")
+              if [ "$code" = "200" ]; then
+                tar tzf /tmp/artifact.tgz > /dev/null
+                inner=$(tar xzOf /tmp/artifact.tgz package/package.json | jq -r '.version')
+                if [ "$inner" != "$VER" ]; then
+                  echo "::error::tarball reports version ${inner}, expected ${VER}"
+                  exit 1
+                fi
+                echo "artifact verified: ${tarball} (${VER})"
+                exit 0
+              fi
+              echo "tarball returned ${code}; retrying"
+            else
+              echo "manifest has no tarball yet; retrying"
+            fi
+            sleep 15
+          done
+          echo "::error::${PKG}@${VER} never became downloadable; the 'latest' tag points at a missing artifact"
+          exit 1

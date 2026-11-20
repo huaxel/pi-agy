@@ -131,10 +131,13 @@ describe("MCP bridge", () => {
     });
   });
 
-  it("bounds sessions and reclaims idle slots", async () => {
+  it("bounds sessions", async () => {
     await withIsolatedAgentDir(async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
-      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: 50 });
+      // A long idle window keeps the reaper out of the picture: this test is
+      // about the cap refusing a second session, and a short window let the
+      // reaper free the slot mid-assertion, making the rejection flap.
+      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: 60_000 });
       assert.ok(handle);
       handles.push(handle);
       const token = await readToken(handle.configDir);
@@ -155,12 +158,39 @@ describe("MCP bridge", () => {
       const clientA = await connectClient(handle.url, token);
       await assert.rejects(connectClient(handle.url, token), /503|Service Unavailable|Streamable HTTP error/);
       await clientA.close();
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const clientB = await connectClient(handle.url, token);
+    });
+  });
+
+  it("reclaims an idle slot", async () => {
+    await withIsolatedAgentDir(async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
+      const idleMs = 50;
+      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: idleMs });
+      assert.ok(handle);
+      handles.push(handle);
+      const token = await readToken(handle.configDir);
+      const first = await connectClient(handle.url, token);
+      await first.close();
+      // The reaper closes an idle session on its own timer (here every 50ms),
+      // and `active` returns to 0 between the handshake's requests, so a fixed
+      // sleep raced it: too early left the cap full, while a slow handshake
+      // could also be reaped mid-connect. Wait for the observable condition
+      // instead of guessing a duration.
+      const deadline = Date.now() + 10_000;
+      let second: Awaited<ReturnType<typeof connectClient>> | undefined;
+      for (;;) {
+        try {
+          second = await connectClient(handle.url, token);
+          break;
+        } catch (error) {
+          if (Date.now() > deadline) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
       try {
-        assert.equal((await clientB.listTools()).tools.length, 5);
+        assert.equal((await second.listTools()).tools.length, 5);
       } finally {
-        await clientB.close();
+        await second.close();
       }
     });
   });

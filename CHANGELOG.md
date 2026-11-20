@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Remove the timing races behind the intermittently failing bridge session tests. Both used a 50ms idle window against a 50ms reaper sweep: the cap assertion could see the slot freed before it asserted a rejection, and a fresh connect could be reaped between `initialize` and the follow-up notification (the observed 404 from `Client.notification`). Cap enforcement and idle reclamation are now separate tests, and reclamation waits for the observable condition instead of a fixed sleep.
+
+- Fail the release when the published artifact is not actually downloadable. npm reports success while metadata and `dist-tags` commit first, so `latest` points at a 404 tarball for minutes and a bare `npm install` fails in that window — observed on every release from 0.7.15 through 0.7.18 (2-6 minutes). The publish job now resolves the tarball URL from the registry's own manifest and polls it, bounded, verifying the version inside the archive.
+
 ## 0.7.18
 
 - Validate cached model ids with the same rule the live `agy models` parser applies. `full` is passed as `--model <full>`, so an unvalidated cache entry could smuggle a flag into agy's argv (`--dangerously-skip-permissions` as a "model id"). Cache entries with whitespace, control characters, or a leading `-` are now dropped.
