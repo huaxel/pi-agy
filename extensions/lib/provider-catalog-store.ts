@@ -19,7 +19,11 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "
 import * as path from "node:path";
 
 import { getDefaultConfigPath } from "./config.js";
-import type { AgyProviderEffort, AgyProviderModelEntry } from "./provider-models.js";
+import {
+  isAgyModelId,
+  type AgyProviderEffort,
+  type AgyProviderModelEntry,
+} from "./provider-models.js";
 
 const CACHE_FILENAME = "agy-provider-models.json";
 const MAX_CACHED_ENTRIES = 500;
@@ -29,12 +33,19 @@ export function providerCatalogCachePath(configPath = getDefaultConfigPath()): s
   return path.join(path.dirname(configPath), CACHE_FILENAME);
 }
 
-/** Validate one cached entry; anything malformed is dropped, not repaired. */
+/**
+ * Validate one cached entry; anything malformed is dropped, not repaired.
+ *
+ * `full` becomes an argv value (`--model <full>`), so it is held to the same
+ * rule the live parser applies to `agy models` output: no whitespace, no
+ * control characters, and no leading `-`. Without that, a writable cache file
+ * could smuggle a flag into the argv stream — `--dangerously-skip-permissions`
+ * as a "model id" — which the discovery path already refuses.
+ */
 function toEntry(value: unknown): AgyProviderModelEntry | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (typeof record.full !== "string" || !record.full.trim()) return undefined;
-  if (typeof record.id !== "string" || !record.id.trim()) return undefined;
+  if (!isAgyModelId(record.full) || !isAgyModelId(record.id)) return undefined;
   const entry: AgyProviderModelEntry = { full: record.full, id: record.id };
   if (Array.isArray(record.efforts)) {
     const efforts = record.efforts.filter(

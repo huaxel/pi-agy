@@ -20,3 +20,7 @@ jobs:
       - run: npm run typecheck
       - run: git diff --exit-code
       - run: npm run pack:check
+      - name: Dependency advisories (high or critical block)
+        run: npm audit --audit-level=high
+      - name: Registry attestations
+        run: npm audit signatures

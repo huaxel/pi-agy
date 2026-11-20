@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Validate cached model ids with the same rule the live `agy models` parser applies. `full` is passed as `--model <full>`, so an unvalidated cache entry could smuggle a flag into agy's argv (`--dangerously-skip-permissions` as a "model id"). Cache entries with whitespace, control characters, or a leading `-` are now dropped.
+- Gate CI and the publish verify job on `npm audit --audit-level=high` and `npm audit signatures`, so a high or critical advisory or an unattested package cannot be released silently.
+
 ## 0.7.17
 
 - Stop discarding arguments from bridged Pi tools whose schema composes at the root. A root `oneOf`/`anyOf`/`allOf`/`$ref` was replaced by `{type: "object", properties: {}}`, which told the model the tool took no arguments and made every call fail. Unambiguous wrappers are now unwrapped (a nullable branch keeps its real object, `allOf` merges), and an ambiguous root is passed through unchanged rather than emptied, since an empty schema is worse than a complex one.

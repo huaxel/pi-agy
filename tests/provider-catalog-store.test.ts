@@ -76,6 +76,33 @@ describe("provider catalog store", () => {
     }
   });
 
+  it("refuses ids that would become argv flags", async () => {
+    const { configPath, cleanup } = await configPathIn();
+    try {
+      // `full` is passed as `--model <full>`. A writable cache must not be able
+      // to smuggle a flag in, which is why it gets the same validation the live
+      // `agy models` parser applies.
+      await writeFile(
+        providerCatalogCachePath(configPath),
+        JSON.stringify({
+          version: 1,
+          models: [
+            { full: "--dangerously-skip-permissions", id: "--evil" },
+            { full: "--model=/etc/passwd", id: "also-bad" },
+            { full: "has whitespace", id: "spacey" },
+            { full: "ok-model", id: "ok-model" },
+          ],
+        }),
+        "utf8",
+      );
+      assert.deepEqual(loadProviderCatalogCache(configPath), [
+        { full: "ok-model", id: "ok-model" },
+      ]);
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("treats a corrupt cache as absent", async () => {
     const { configPath, cleanup } = await configPathIn();
     try {
