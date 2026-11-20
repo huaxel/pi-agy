@@ -1,7 +1,7 @@
 {
   "name": "@juanbenjumea/pi-agy",
   "version": "0.7.19",
-  "description": "Antigravity (agy) provider and delegation for Pi — /model picker, background tasks, loopback MCP tool bridge, quota awareness, and repo verification.",
+  "description": "Antigravity (agy) provider and delegation for Pi \u2014 /model picker, background tasks, loopback MCP tool bridge, quota awareness, and repo verification.",
   "type": "module",
   "license": "MIT",
   "author": "Juan Benjumea",
@@ -61,14 +61,12 @@
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@earendil-works/pi-tui": "1.5.2",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@sinclair/typebox": "^0.34.41",
     "@types/node": "^22.20.4",
     "typescript": "^5.0.0"
   },
   "engines": {
     "node": ">=20.3.0"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.2"
   }
 }
