@@ -111,11 +111,44 @@ describe("provider catalog", () => {
       off: null,
       minimal: null,
       medium: null,
+      xhigh: null,
+      max: null,
     });
     assert.deepEqual(thinkingMapForEfforts(["low", "medium", "high"]), {
       off: null,
       minimal: null,
+      xhigh: null,
+      max: null,
     });
+    // xhigh is a real stop on the Neon/Hydrogen families, so it must stay
+    // visible there instead of collapsing onto high.
+    assert.deepEqual(thinkingMapForEfforts(["low", "medium", "high", "xhigh"]), {
+      off: null,
+      minimal: null,
+      max: null,
+    });
+  });
+
+  it("folds an xhigh sibling into its family instead of a separate entry", () => {
+    const entries = parseProviderCatalog(
+      [
+        "gemini-9-neon-high\tNeon (High)",
+        "gemini-9-neon-xhigh\tNeon (XHigh)",
+        "gemini-9-neon-medium\tNeon (Medium)",
+        "gemini-9-neon-low\tNeon (Low)",
+      ].join("\n"),
+    );
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].full, "gemini-9-neon");
+    assert.deepEqual(entries[0].efforts, ["low", "medium", "high", "xhigh"]);
+  });
+
+  it("keeps a single-tier family qualified so --effort is never attached", () => {
+    // agy: `--model gpt-oss-120b-medium --effort high` is a conflict.
+    const entries = parseProviderCatalog("gpt-oss-9-9-medium\tGPT-OSS 9.9 (Medium)");
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].full, "gpt-oss-9-9-medium");
+    assert.equal(entries[0].efforts, undefined);
   });
 
   it("projects bridge tools with exclusions and safe names", async () => {

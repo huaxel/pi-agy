@@ -1,0 +1,90 @@
+import assert from "node:assert/strict";
+import * as os from "node:os";
+import * as path from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { describe, it } from "node:test";
+
+import {
+  clearProviderCatalogCache,
+  loadProviderCatalogCache,
+  providerCatalogCachePath,
+  saveProviderCatalogCache,
+} from "../extensions/lib/provider-catalog-store.js";
+import type { AgyProviderModelEntry } from "../extensions/lib/provider-models.js";
+
+const configPathIn = async (): Promise<{ dir: string; configPath: string; cleanup: () => Promise<void> }> => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-catalog-"));
+  return {
+    dir,
+    configPath: path.join(dir, "agy-config.json"),
+    cleanup: () => rm(dir, { recursive: true, force: true }),
+  };
+};
+
+describe("provider catalog store", () => {
+  it("returns nothing before a roster has been observed", async () => {
+    const { configPath, cleanup } = await configPathIn();
+    try {
+      assert.deepEqual(loadProviderCatalogCache(configPath), []);
+      // Persisting nothing must never create a fabricated roster.
+      saveProviderCatalogCache([], configPath);
+      assert.deepEqual(loadProviderCatalogCache(configPath), []);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("round-trips the roster, including effort tiers", async () => {
+    const { configPath, cleanup } = await configPathIn();
+    const entries: AgyProviderModelEntry[] = [
+      { full: "gemini-9-neon", id: "gemini-9-neon", efforts: ["low", "high"] },
+      { full: "gpt-oss-9-9-medium", id: "gpt-oss-9-9-medium" },
+    ];
+    try {
+      saveProviderCatalogCache(entries, configPath);
+      assert.deepEqual(loadProviderCatalogCache(configPath), entries);
+      assert.equal(providerCatalogCachePath(configPath), path.join(path.dirname(configPath), "agy-provider-models.json"));
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("drops malformed entries instead of trusting them", async () => {
+    const { configPath, cleanup } = await configPathIn();
+    try {
+      await writeFile(
+        providerCatalogCachePath(configPath),
+        JSON.stringify({
+          version: 1,
+          models: [
+            { full: "ok-model", id: "ok-model", efforts: ["high", "bogus", 7] },
+            { full: "", id: "no-full" },
+            { full: "no-id" },
+            { full: "dup", id: "dup" },
+            { full: "dup2", id: "dup" },
+            "not-an-object",
+          ],
+        }),
+        "utf8",
+      );
+      assert.deepEqual(loadProviderCatalogCache(configPath), [
+        { full: "ok-model", id: "ok-model", efforts: ["high"] },
+        { full: "dup", id: "dup" },
+      ]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("treats a corrupt cache as absent", async () => {
+    const { configPath, cleanup } = await configPathIn();
+    try {
+      await writeFile(providerCatalogCachePath(configPath), "{ not json", "utf8");
+      assert.deepEqual(loadProviderCatalogCache(configPath), []);
+      clearProviderCatalogCache(configPath);
+      assert.deepEqual(loadProviderCatalogCache(configPath), []);
+    } finally {
+      await cleanup();
+    }
+  });
+});

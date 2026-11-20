@@ -19,7 +19,8 @@ export function isAgyModel(value: unknown): value is AgyModel {
   return typeof value === "string" && (AGY_MODEL_ALIASES as readonly string[]).includes(value);
 }
 
-export type AgyEffort = "low" | "medium" | "high";
+/** Reasoning-effort values `agy --effort` documents. */
+export type AgyEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type { AgyQuotaEntry, AgyUsageSnapshot } from "./usage.js";
 
@@ -42,12 +43,14 @@ export {
   checkAgyConnectivity,
   checkAgyHealth,
   checkAgyUsage,
+  effortTiersForModelId,
   getModelCatalog,
   inspectAgyAgents,
   inspectAgyModelIds,
   inspectAgyModels,
   inspectAgyVersion,
   isStableModelId,
+  namesEffortTierInId,
   normalizeAgyAgentName,
   parseAgyAgents,
   parseModelCatalog,
@@ -62,6 +65,7 @@ export {
   resolveAgyModelAlias,
   resolveAgyModelId,
   supportsAgyEffort,
+  supportsAgyEffortId,
 } from "./args.js";
 
 export { findAgyQuotaEntries, formatAgyUsage, isAgyQuotaExhausted, parseAgyUsage } from "./usage.js";

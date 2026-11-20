@@ -22,7 +22,7 @@ import { AGY_MODEL_ALIASES, type AgyModel } from "./cli.js";
  * and a tier the vendor retires stops matching instead of resolving to an
  * invented id. New families and renames resolve with no code change.
  */
-const EFFORT_TOKENS: readonly string[] = ["low", "medium", "high", "xhigh"];
+const EFFORT_TOKENS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
 
 /**
  * Release-channel qualifiers that may trail an id (`…-flash-medium-preview`).
@@ -92,9 +92,38 @@ function classMatchesModelId(classTokens: readonly string[], id: string): boolea
   return findTokenRun(idTokens, classTokens) !== -1;
 }
 
-function namesEffortTier(id: string): boolean {
+/** Does this concrete id already name its tier (`…-flash-low`)? */
+export function namesEffortTierInId(id: string): boolean {
   const idTokens = id.toLowerCase().split("-").filter(Boolean);
   return idTokens.length > 0 && EFFORT_TOKENS.includes(idTokens[idTokens.length - 1]!);
+}
+
+/**
+ * Effort tiers agy accepts on a base slug, derived from the live catalog.
+ *
+ * agy's own error text defines the rule: `--effort T` is accepted for a base
+ * `B` exactly when the catalog carries `B-T` ("has no \"high\" effort
+ * (available: low, medium, high)"), is a **conflict** for a tier-qualified id
+ * ("--model …-medium conflicts with --effort=high"), and is **unsupported**
+ * for a family that ships no tiers. A tier-qualified id therefore answers
+ * with no tiers at all, and no vendor name is consulted. Verified against
+ * agy 1.5.13.
+ */
+export function effortTiersForModelId(
+  baseId: string,
+  ids: readonly string[] = Object.values(modelCatalog),
+): string[] {
+  if (namesEffortTierInId(baseId)) return [];
+  const prefix = `${baseId}-`;
+  const tiers = new Set<string>();
+  for (const id of ids) {
+    if (!id.startsWith(prefix)) continue;
+    const suffix = id.slice(prefix.length).toLowerCase();
+    if (EFFORT_TOKENS.includes(suffix)) tiers.add(suffix);
+  }
+  return [...tiers].sort(
+    (left, right) => EFFORT_TOKENS.indexOf(left) - EFFORT_TOKENS.indexOf(right),
+  );
 }
 
 export type AgyModelCatalog = Partial<Record<AgyModel, string>>;
@@ -144,7 +173,7 @@ export function parseModelCatalog(output: string, allowPreview = false): AgyMode
     const candidates = ids.filter((id) => classMatchesModelId(classTokens, id));
     // A class that ships any effort variant is tier-aware: its aliases must
     // match the requested tier or fail, never fall back to another tier.
-    if (candidates.length === 0 || candidates.some(namesEffortTier)) continue;
+    if (candidates.length === 0 || candidates.some(namesEffortTierInId)) continue;
     for (const id of candidates) {
       if (compareModelIds(id, found[alias] ?? "") > 0) found[alias] = id;
     }

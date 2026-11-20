@@ -16,6 +16,7 @@ import {
   AGY_MODEL_ALIASES,
   buildAgyArgs,
   buildAgyPrompt,
+  effortTiersForModelId,
   isAgyModel,
   isTransientAgyFailure,
   normalizeAgyAgentName,
@@ -25,6 +26,7 @@ import {
   resetModelCatalog,
   resolveAgyModelId,
   supportsAgyEffort,
+  supportsAgyEffortId,
   updateModelCatalog,
 } from "../extensions/lib/cli.js";
 import { validateAgyModelId } from "../extensions/lib/provider-models.js";
@@ -190,8 +192,34 @@ describe("buildAgyArgs", () => {
     assert.ok(hasFlagPair(args, "--model", ARGV_CATALOG["pro-high"]));
   });
 
-  it("passes reasoning effort to models that expose it", () => {
-    const args = buildAgyArgs({
+  it("passes reasoning effort to a base slug whose catalog lists the tier", () => {
+    const base = buildAgyArgs({
+      prompt: "t",
+      model_id: validateAgyModelId("gemini-9.9-flash"),
+      mode: "plan",
+      dir: "/tmp",
+      timeout_ms: 60_000,
+      effort: "high",
+    });
+    assert.equal(base[base.indexOf("--effort") + 1], "high");
+  });
+
+  it("never layers --effort onto an id that already names its tier", () => {
+    // agy 1.5.13: `--model gpt-oss-120b-medium --effort high` fails with
+    // "--model gpt-oss-120b-medium conflicts with --effort=high". The former
+    // `/^gpt-oss-/` exception shipped exactly that broken argv.
+    for (const id of ["gpt-oss-120b-medium", "gemini-4-neon-high"] as const) {
+      const args = buildAgyArgs({
+        prompt: "t",
+        model_id: validateAgyModelId(id),
+        mode: "plan",
+        dir: "/tmp",
+        timeout_ms: 60_000,
+        effort: "high",
+      });
+      assert.equal(args.includes("--effort"), false, id);
+    }
+    const alias = buildAgyArgs({
       prompt: "t",
       model: "gpt-oss",
       mode: "plan",
@@ -199,30 +227,19 @@ describe("buildAgyArgs", () => {
       timeout_ms: 60_000,
       effort: "high",
     });
-    const idx = args.indexOf("--effort");
-    assert.equal(args[idx + 1], "high");
-    assert.equal(supportsAgyEffort("gpt-oss"), true);
+    assert.equal(alias.includes("--effort"), false);
+    assert.equal(supportsAgyEffort("gpt-oss"), false);
   });
 
-  it("decides effort for an exact model id without the catalog", () => {
-    const capable = buildAgyArgs({
-      prompt: "t",
-      model_id: validateAgyModelId("gpt-oss-120b-medium"),
-      mode: "plan",
-      dir: "/tmp",
-      timeout_ms: 60_000,
-      effort: "high",
-    });
-    assert.equal(capable[capable.indexOf("--effort") + 1], "high");
-    const fixed = buildAgyArgs({
-      prompt: "t",
-      model_id: validateAgyModelId("gemini-4-neon-high"),
-      mode: "plan",
-      dir: "/tmp",
-      timeout_ms: 60_000,
-      effort: "high",
-    });
-    assert.equal(fixed.includes("--effort"), false);
+  it("derives effort tiers from the catalog, per tier", () => {
+    // The same base answers only the tiers it actually ships.
+    assert.equal(supportsAgyEffortId("gemini-9.9-flash", "high"), true);
+    assert.equal(supportsAgyEffortId("gemini-9.9-flash", "xhigh"), false);
+    assert.deepEqual(effortTiersForModelId("gemini-9.9-flash"), ["low", "medium", "high"]);
+    // A tier-qualified id is a conflict, not a capability.
+    assert.deepEqual(effortTiersForModelId("gemini-9.9-flash-low"), []);
+    // A family with no tier variants offers nothing to pick.
+    assert.deepEqual(effortTiersForModelId("gemini-9.9-pro"), ["low", "high"]);
   });
 
   it("omits unsupported effort for Claude and Gemini aliases", () => {

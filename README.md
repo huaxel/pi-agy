@@ -40,7 +40,11 @@ In `accept-edits` mode, Pi confirms before writes. agy's own permission behavior
 
 ## Use agy as a Pi model
 
-The package registers an `antigravity` provider. Select discovered models as `antigravity/<model>` in Pi's `/model` picker. Models refresh automatically from `agy models` at session startup and whenever Pi opens the model picker (Pi 1.5.2 native refresh). New model names need no package update. Failed discovery keeps the last good catalog; before the first successful discovery the picker is empty rather than a stale built-in list, and `/agy doctor` reports why. Reopen `/model` after signing in to retry. Cache-only refreshes never run the CLI. Gemini thinking levels map to agy's supported effort tiers.
+The package registers an `antigravity` provider. Select discovered models as `antigravity/<model>` in Pi's `/model` picker. Models refresh automatically from `agy models` at session startup and whenever Pi opens the model picker (Pi 1.5.2 native refresh). New model names need no package update. Failed discovery keeps the last good catalog; before the first successful discovery the picker is empty rather than a stale built-in list, and `/agy doctor` reports why. Reopen `/model` after signing in to retry. Cache-only refreshes never run the CLI.
+
+The last observed roster is also cached in `agy-provider-models.json` next to `agy-config.json`. That file holds only ids `agy models` actually returned, and it exists because Pi resolves configured model scopes at startup: without it, a configured `antigravity/<id>` reports `No models match pattern` for a model that plainly exists, since the provider simply had not discovered anything yet.
+
+A family that ships several effort tiers appears as one picker entry with a thinking-level toggle, including `xhigh` and `max` where agy offers them, and `--effort` carries the chosen tier. Families with a single tier, or none, keep agy's exact qualified id and never receive `--effort` — agy rejects that combination as a conflict.
 
 Provider turns use a persistent agy process per working directory and can stage attached images for agy to read. By default, an MCP bridge gives agy read-only Pi context and lets it call active Pi tools through Pi's normal permission and approval flow. Set `"providerBridge": false` in `agy-config.json` to disable the bridge.
 

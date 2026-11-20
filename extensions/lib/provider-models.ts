@@ -6,17 +6,22 @@
  *
  * `agy models` prints one model per line: `<slug>  <display label>`. Only the
  * first column (the slug) is a valid `--model` value; the label is
- * display-only. Gemini bases with multiple effort tiers collapse to a single
- * base entry with a thinking-level toggle (the picked level is sent as agy
- * `--effort`); fixed-thinking families (Claude, GPT-OSS, single-tier Gemini)
- * keep agy's exact qualified slug and never receive `--effort`.
+ * display-only. A base whose catalog carries two or more effort tiers collapses
+ * to a single base entry with a thinking-level toggle (the picked level becomes
+ * agy `--effort`). A base with one tier or none keeps agy's exact qualified
+ * slug and never receives `--effort`.
+ *
+ * That grouping is derived from the catalog alone. Which families accept
+ * `--effort` is agy's own answer to "does `B-T` exist" — tier-qualified ids are
+ * rejected as a conflict and tierless families as unsupported — so no vendor
+ * name needs to be known here.
  *
  * Pure functions only — no spawning, no Pi imports — so the catalog is
  * unit-testable without the CLI.
  */
 
-/** Reasoning-effort tiers agy accepts via `--effort`. */
-export type AgyProviderEffort = "low" | "medium" | "high";
+/** Reasoning-effort tiers agy accepts via `--effort` (`agy --help`). */
+export type AgyProviderEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Pi thinking levels that map onto agy effort tiers. */
 export type AgyThinkingLevel =
@@ -28,12 +33,25 @@ export type AgyThinkingLevel =
   | "xhigh"
   | "max";
 
-const EFFORT_RANK: Record<AgyProviderEffort, number> = { low: 0, medium: 1, high: 2 };
+const EFFORT_RANK: Record<AgyProviderEffort, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  xhigh: 3,
+  max: 4,
+};
 
-const EFFORT_ORDER: readonly AgyProviderEffort[] = ["low", "medium", "high"];
+const EFFORT_ORDER: readonly AgyProviderEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
-/** Split an agy slug into (base, tier); tier is null without a tier suffix. */
-const TIER_RE = /^(.+)-(high|medium|low)$/;
+/**
+ * Split an agy slug into (base, tier); tier is null without a tier suffix.
+ *
+ * `xhigh` and `max` belong here: when they did not, `gemini-4-neon-xhigh`
+ * became its own base entry instead of a fourth stop inside the `gemini-4-neon`
+ * thinking picker. Longer alternatives come first so `-xhigh` can never be
+ * read as `-high`.
+ */
+const TIER_RE = /^(.+)-(xhigh|max|high|medium|low)$/;
 
 /**
  * Preserve the established hyphenated first-column format. A leading-dash
@@ -71,14 +89,6 @@ export function parseAgyModelIds(raw: string): AgyModelId[] {
   return [...new Set(ids.filter(isAgyModelId))];
 }
 
-/**
- * Families verified to accept base-slug + `--effort`. Only these collapse to
- * a base entry with a thinking toggle; every other family keeps agy's exact
- * qualified slug so unknown or fixed-thinking families degrade safely instead
- * of forcing an unsupported `--effort`.
- */
-const EFFORT_CAPABLE_FAMILIES: readonly RegExp[] = [/^gemini-/];
-
 export interface AgyProviderModelEntry {
   /**
    * Exact agy `--model` value: a base slug (e.g. `gemini-3.8-flash`) when
@@ -115,9 +125,15 @@ export function toProviderEffort(
       candidate = "medium";
       break;
     case "high":
-    case "xhigh":
-    case "max":
       candidate = "high";
+      break;
+    // agy exposes these as real stops, so pass them through instead of
+    // collapsing every strong level onto "high".
+    case "xhigh":
+      candidate = "xhigh";
+      break;
+    case "max":
+      candidate = "max";
       break;
     default:
       candidate = efforts[0] ?? "low";
@@ -144,8 +160,8 @@ export function slugifyProviderId(full: string): string {
 /**
  * Build the thinking-level map for an effort-driven base: `off` and `minimal`
  * are always hidden (agy has no no-thinking mode; a base requires an effort),
- * as is any of low/medium/high the base does not offer. Pi treats null as
- * hidden, so the toggle shows exactly agy's stops.
+ * as is any tier the base does not offer. Pi treats null as hidden, so the
+ * toggle shows exactly agy's stops.
  */
 export function thinkingMapForEfforts(
   efforts: readonly AgyProviderEffort[],
@@ -154,17 +170,17 @@ export function thinkingMapForEfforts(
     off: null,
     minimal: null,
   };
-  for (const level of ["low", "medium", "high"] as const) {
+  for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
     if (!efforts.includes(level)) map[level] = null;
   }
   return map;
 }
 
 /**
- * Parse raw `agy models` text into provider entries. Effort-capable Gemini
- * bases with >= 2 tier variants collapse to one base entry carrying the tiers
- * they accept; everything else keeps agy's exact qualified slug. Insertion
- * order of first-seen bases is preserved.
+ * Parse raw `agy models` text into provider entries. A base with >= 2 tier
+ * variants collapses to one base entry carrying the tiers it accepts;
+ * everything else keeps agy's exact qualified slug. Insertion order of
+ * first-seen bases is preserved.
  */
 export function parseProviderCatalog(raw: string): AgyProviderModelEntry[] {
   const groups = new Map<string, { lines: string[]; tiers: Set<AgyProviderEffort> }>();
@@ -191,7 +207,7 @@ export function parseProviderCatalog(raw: string): AgyProviderModelEntry[] {
   };
   for (const [base, group] of groups) {
     const efforts = [...group.tiers].sort((a, b) => EFFORT_RANK[a] - EFFORT_RANK[b]);
-    if (efforts.length >= 2 && EFFORT_CAPABLE_FAMILIES.some((re) => re.test(base))) {
+    if (efforts.length >= 2) {
       pushEntry({ full: base, id: slugifyProviderId(base), efforts });
     } else {
       for (const line of group.lines) {

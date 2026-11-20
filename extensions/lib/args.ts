@@ -8,8 +8,13 @@
 
 import { validateModelSelector } from "./model-selection.js";
 
-import { getModelCatalog, normalizeAgyAgentName } from "./inspect.js";
-import type { AgyModel, AgyOptions } from "./cli.js";
+import {
+  effortTiersForModelId,
+  getModelCatalog,
+  namesEffortTierInId,
+  normalizeAgyAgentName,
+} from "./inspect.js";
+import type { AgyEffort, AgyModel, AgyOptions } from "./cli.js";
 
 // agy >= 1.1.28 returns partial output with exit 0 when its own print timeout
 // fires. Keep that timeout behind Pi's hard parent deadline (and its 2s kill
@@ -67,20 +72,24 @@ export function requireAgyModelId(model?: AgyModel, tier?: AgyOptions["tier"]): 
 }
 
 /**
- * Families verified to accept a base slug plus `--effort`. A capability
- * assumption rather than a catalog entry, but it must stay narrow: agy turns a
- * stray `--effort` on a fixed-thinking model into an argument error.
+ * Effort capability is a catalog fact, never a vendor-name rule.
+ *
+ * agy rejects `--effort` for a tier-qualified id ("--model …-medium conflicts
+ * with --effort=high") and for a family that ships no tiers ("--effort is not
+ * supported"), and accepts it for a base slug whose catalog lists the tier
+ * asked for. The `/^gpt-oss-/` rule this replaces was wrong in exactly the
+ * observed way: `gpt-oss-120b-medium` conflicts, while `claude-opus-5-5`
+ * accepts `--effort`. Verified against agy 1.5.13.
  */
-const EFFORT_CAPABLE_ID = /^gpt-oss-/;
-
-/** Effort capability for a concrete id, the single source of that rule. */
-export function supportsAgyEffortId(id: string): boolean {
-  return EFFORT_CAPABLE_ID.test(id);
+export function supportsAgyEffortId(id: string, effort?: AgyEffort): boolean {
+  const tiers = effortTiersForModelId(id);
+  if (tiers.length === 0) return false;
+  return effort === undefined || tiers.includes(effort);
 }
 
 /**
- * Tier-suffixed aliases already select a low/medium/high variant and fixed
- * thinking families reject the flag; only the families above take it.
+ * Tier-suffixed aliases already select a low/medium/high variant, so an alias
+ * asking for effort of its own has nothing to add.
  */
 export function supportsAgyEffort(model?: AgyModel, tier?: AgyOptions["tier"]): boolean {
   const id = resolveAgyModelId(model, tier);
@@ -102,9 +111,13 @@ export function buildAgyArgs(options: AgyOptions): string[] {
   const skipPermissions = options.skipPermissions ?? true;
   const useStream = options.stream ?? true;
   const structured = mode !== "accept-edits" || useStream;
-  // An exact id is asked about directly; an alias is resolved through the catalog.
+  // An exact id only needs the one check agy reports on its own terms (`--model
+  // …-medium conflicts with --effort`): it names its tier, so no effort can be
+  // layered on. Catalog coverage is unnecessary there, and an unsupported tier
+  // is left to agy's precise "available: …" error. An alias resolves through
+  // the catalog and may only send a tier that catalog offers.
   const effortCapable = options.model_id
-    ? supportsAgyEffortId(options.model_id)
+    ? !namesEffortTierInId(options.model_id)
     : supportsAgyEffort(options.model, options.tier);
 
   const args = [

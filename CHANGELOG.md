@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.16
+
+- Derive `--effort` support from the catalog instead of a vendor pattern. The previous `/^gpt-oss-/` rule emitted exactly the argv agy rejects: `--model gpt-oss-120b-medium --effort high` fails with "conflicts with --effort=high", while `claude-opus-5-5` accepts the flag. A tier-qualified id now never receives `--effort`, and a base slug only receives a tier its catalog lists.
+- Collapse every family with two or more effort tiers into one picker entry with a thinking-level toggle, rather than only `gemini-*` families. The catalog decides, so `claude-*` bases stop appearing as separate per-tier entries.
+- Treat `xhigh` and `max` as effort tiers. `gemini-4-neon-xhigh` and `gemini-4-hydrogen-xhigh` previously did not match the tier suffix and appeared as standalone models instead of a fourth stop in their family's toggle.
+- Offer `xhigh` and `max` through `agy_execute`'s `effort` parameter, matching `agy --effort`.
+- Cache the last observed model roster so a cold process can answer `getModels()`. Pi resolves `enabledModels` during startup, so an undiscovered provider reported `No models match pattern "antigravity/<id>"` for an existing model. The cache stores only ids `agy models` returned, is written atomically, and degrades to the previous empty start when unreadable.
+
 ## 0.7.15
 
 - Resolve every model alias against the live `agy models` catalog; no production path ships a model id, a per-family regex, or a fallback roster, so a renamed or new family needs no package update. An unresolvable alias now fails with the alias name, the exact recovery, and the discovered-catalog requirement instead of launching a stale id.

@@ -28,6 +28,10 @@ import {
   toProviderModelDef,
   type AgyProviderModelEntry,
 } from "./lib/provider-models.js";
+import {
+  loadProviderCatalogCache,
+  saveProviderCatalogCache,
+} from "./lib/provider-catalog-store.js";
 import { runPreflightCommand } from "./lib/spawn.js";
 
 export { truncate } from "./lib/output.js";
@@ -45,8 +49,14 @@ export { truncate } from "./lib/output.js";
 function registerAgyProvider(pi: ExtensionAPI): void {
   if (typeof pi.registerProvider !== "function") return;
   // Keep one handler and catalog array for conversation/driver continuity.
-  // Only a generation-checked publication may mutate these entries.
-  const entries: AgyProviderModelEntry[] = [...FALLBACK_PROVIDER_MODELS];
+  // Only a generation-checked publication may mutate these entries. Start from
+  // the last roster this machine actually observed: Pi resolves configured
+  // model scopes during startup, and an empty catalog there reports a real
+  // model as "No models match pattern" before discovery can answer.
+  const cached = loadProviderCatalogCache();
+  const entries: AgyProviderModelEntry[] = [
+    ...(cached.length > 0 ? cached : FALLBACK_PROVIDER_MODELS),
+  ];
   const shutdown = new AbortController();
   let activeUi: { setStatus?: (key: string, text: string | undefined) => void } | undefined;
   const setLiveStatus = (label: string | undefined): void => {
@@ -118,7 +128,12 @@ function registerAgyProvider(pi: ExtensionAPI): void {
       signal.throwIfAborted();
       const live = parseProviderCatalog(raw);
       if (live.length === 0) throw new Error("agy models returned no usable models");
-      if (areProviderCatalogsEqual(entries, live)) return;
+      if (areProviderCatalogsEqual(entries, live)) {
+        // Same roster, possibly only now confirmed on disk (first run after an
+        // older version, or a cache cleared by hand).
+        saveProviderCatalogCache(live);
+        return;
+      }
       const definitions = modelDefinitions(live);
       await context.publish({
         update: () => {
@@ -129,6 +144,7 @@ function registerAgyProvider(pi: ExtensionAPI): void {
           models = definitions;
         },
       });
+      saveProviderCatalogCache(live);
     },
     stream: (model, context, options) => stream(model, context, options as SimpleStreamOptions),
     streamSimple: stream,

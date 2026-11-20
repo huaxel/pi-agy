@@ -88,10 +88,19 @@ export function registerAgyTools(pi: ExtensionAPI): void {
         modelAliasSchema({ description: "Model alias. Defaults to 'flash-medium'.", default: "flash-medium" }),
       ),
       effort: Type.Optional(
-        Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
-          description:
-            "Reasoning effort passed to agy (--effort). Optional; mostly useful for sonnet/opus/gpt-oss since Gemini aliases encode effort in the model id.",
-        }),
+        Type.Union(
+          [
+            Type.Literal("low"),
+            Type.Literal("medium"),
+            Type.Literal("high"),
+            Type.Literal("xhigh"),
+            Type.Literal("max"),
+          ],
+          {
+            description:
+              "Reasoning effort passed to agy (--effort). Only sent when the resolved model is a base slug that lists that tier; a tier-qualified id would conflict.",
+          },
+        ),
       ),
       agent: Type.Optional(
         Type.String({

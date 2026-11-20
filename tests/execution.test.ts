@@ -23,6 +23,7 @@ import {
   resolveAgyModelId,
   updateModelCatalog,
 } from "../extensions/lib/cli.js";
+import { validateAgyModelId } from "../extensions/lib/provider-models.js";
 import { resolveAgyMode, truncate } from "../extensions/index.js";
 import piAgyExtension from "../extensions/index.js";
 import { registerAgyCommand } from "../extensions/commands.js";
@@ -1700,7 +1701,9 @@ describe("shared executor", () => {
       await executeAgyTask(
         {
           prompt: "/review then implement",
-          model: "gpt-oss",
+          // A base slug whose catalog lists `high`. A tier-qualified id such as
+          // `gpt-oss-120b-medium` would make agy reject the flag as a conflict.
+          model_id: validateAgyModelId("gemini-3.8-flash"),
           effort: "high",
           mode: "plan",
           dir: process.cwd(),
@@ -1713,8 +1716,36 @@ describe("shared executor", () => {
 
       const args = await readFakeAgyArgs(bin);
       assert.ok(args.some((argv) => hasFlagPair(argv, "--effort", "high")));
-      assert.ok(args.some((argv) => hasFlagPair(argv, "--model", "gpt-oss-120b-medium")));
+      assert.ok(args.some((argv) => hasFlagPair(argv, "--model", "gemini-3.8-flash")));
       assert.ok(args.some((argv) => argv.includes("--disable-slash-commands")));
+    });
+  });
+
+  it("never attaches --effort to a tier-qualified id", async () => {
+    const raw =
+      JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
+    await withFakeAgy(raw, async (bin) => {
+      resetPreflightCache();
+      await executeAgyTask(
+        {
+          prompt: "t",
+          model_id: validateAgyModelId("gpt-oss-120b-medium"),
+          effort: "high",
+          mode: "plan",
+          dir: process.cwd(),
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: true,
+        },
+        undefined,
+      );
+
+      const args = await readFakeAgyArgs(bin);
+      assert.equal(
+        args.some((argv) => argv.includes("--effort")),
+        false,
+        "agy rejects --effort alongside a tier-qualified --model",
+      );
     });
   });
 
