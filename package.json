@@ -1,7 +1,7 @@
 {
   "name": "@juanbenjumea/pi-agy",
-  "version": "0.7.19",
-  "description": "Antigravity (agy) provider and delegation for Pi \u2014 /model picker, background tasks, loopback MCP tool bridge, quota awareness, and repo verification.",
+  "version": "0.8.0",
+  "description": "Antigravity (agy) provider and delegation for Pi — /model picker, background tasks, loopback MCP tool bridge, quota awareness, and repo verification.",
   "type": "module",
   "license": "MIT",
   "author": "Juan Benjumea",
