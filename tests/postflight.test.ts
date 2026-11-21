@@ -76,6 +76,30 @@ describe("git probes cannot execute repository configuration", () => {
   });
 });
 
+describe("change attribution", () => {
+  it("attributes a file created inside an already-untracked directory", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-attrib-"));
+    await execAsync("git", ["init", "-q"], { cwd: tmp });
+    await writeFile(path.join(tmp, "tracked.txt"), "hello\n");
+    await execAsync("git", ["add", "tracked.txt"], { cwd: tmp });
+    await execAsync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"], {
+      cwd: tmp,
+    });
+
+    // Already untracked before the run: git status collapses it to `notes/`.
+    await mkdir(path.join(tmp, "notes"));
+    await writeFile(path.join(tmp, "notes", "old.md"), "old\n");
+    const baseline = await captureGitBaseline(tmp);
+
+    // The run creates one file here and changes nothing tracked.
+    await writeFile(path.join(tmp, "notes", "new.md"), "new\n");
+
+    const attribution = await summarizeGitDiffSince(baseline, tmp);
+    assert.deepEqual(attribution.newFiles, ["notes/new.md"]);
+    assert.deepEqual(attribution.preexistingFiles, ["notes/old.md"]);
+  });
+});
+
 describe("parsePorcelainStatus", () => {
   it("keeps fixed porcelain columns for unstaged statuses", () => {
     const files = parsePorcelainStatus(" M src.ts\nA  added.ts\nM  staged.ts\n?? untracked.txt\n");

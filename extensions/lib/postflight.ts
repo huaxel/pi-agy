@@ -54,12 +54,21 @@ export function parsePorcelainStatus(stdout: string): Set<string> {
  * `status --porcelain` and does not fire with `-c core.fsmonitor=false`.
  */
 const SAFE_GIT_CONFIG = ["-c", "core.fsmonitor=false"];
+
+/**
+ * `git status` collapses a wholly-untracked directory to one `dir/` entry, so a
+ * file created inside a directory that was already untracked leaves the status
+ * output byte-identical — and the change attribution silently credits agy with
+ * nothing. `--untracked-files=all` lists the files, which is what the summary
+ * and the baseline comparison both need.
+ */
+const STATUS_ARGS = [...SAFE_GIT_CONFIG, "status", "--porcelain", "--untracked-files=all"];
 const SAFE_DIFF_FLAGS = ["--no-ext-diff", "--no-textconv"];
 
 /** Capture dirty state before accept-edits so the summary can attribute only new changes to agy. */
 export async function captureGitBaseline(cwd: string, signal?: AbortSignal): Promise<GitBaseline> {
   try {
-    const { stdout } = await execFileAsync("git", [...SAFE_GIT_CONFIG, "status", "--porcelain"], {
+    const { stdout } = await execFileAsync("git", STATUS_ARGS, {
       cwd,
       maxBuffer: 64 * 1024,
       signal,
@@ -103,7 +112,7 @@ export async function summarizeGitDiff(cwd: string, signal?: AbortSignal): Promi
         [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--name-only"],
         opts,
       ),
-      execFileAsync("git", [...SAFE_GIT_CONFIG, "status", "--short"], opts),
+      execFileAsync("git", [...SAFE_GIT_CONFIG, "status", "--short", "--untracked-files=all"], opts),
     ]);
     const unstagedStat = workingStat.stdout.trim();
     const cachedStat = stagedStat.stdout.trim();
@@ -157,7 +166,7 @@ export async function summarizeGitDiffSince(
         [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--name-only"],
         opts,
       ),
-      execFileAsync("git", [...SAFE_GIT_CONFIG, "status", "--porcelain"], opts),
+      execFileAsync("git", STATUS_ARGS, opts),
     ]);
     const current = new Set<string>();
     for (const name of uniqueLines(`${workingNames.stdout}\n${stagedNames.stdout}`)) {
