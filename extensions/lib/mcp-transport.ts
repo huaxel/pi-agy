@@ -88,6 +88,19 @@ function hasId(message: JsonRpcRequest): boolean {
   return message.id !== undefined && message.id !== null;
 }
 
+/** JSON-RPC ids are strings or numbers; anything else cannot be echoed safely. */
+function isValidRequestId(id: unknown): boolean {
+  return id === undefined || id === null || typeof id === "string" || typeof id === "number";
+}
+
+/**
+ * Methods that only make sense as requests. MCP has no notification form of
+ * `tools/call`: an id-less call cannot be correlated with its result, and Pi
+ * parks bridged calls by that id, so an id-less call is rejected instead of
+ * silently executed with the reply suppressed.
+ */
+const REQUEST_ONLY_METHODS = new Set(["initialize", "ping", "tools/list", "tools/call"]);
+
 function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
@@ -147,7 +160,16 @@ export class McpServer {
 
   /** Dispatch one JSON-RPC request. Notifications answer `undefined`. */
   async handle(message: JsonRpcRequest): Promise<Record<string, unknown> | undefined> {
+    // A closed session must not run tools: the batch that was already being
+    // dispatched when DELETE arrived is still holding resolved messages.
+    if (this.closed) throw new Error("server is closed");
     const id = hasId(message) ? message.id ?? null : undefined;
+    if (REQUEST_ONLY_METHODS.has(message.method) && id === undefined) {
+      return errorResponse(null, {
+        code: INVALID_REQUEST,
+        message: `${message.method} requires a string or numeric id`,
+      });
+    }
     const reply = (result: unknown): Record<string, unknown> | undefined =>
       id === undefined ? undefined : resultResponse(id, result);
     const fail = (code: number, text: string): Record<string, unknown> | undefined =>
@@ -282,8 +304,20 @@ export class StreamableHTTPServerTransport {
 
     const responses: Record<string, unknown>[] = [];
     for (const message of messages) {
+      // Session state is re-checked per item: a batch can be closed partway
+      // through, and the remaining messages must not dispatch work.
+      if (this.closed) break;
       if (!this.server) {
         if (hasId(message)) responses.push(errorResponse(message.id ?? null, { code: INTERNAL_ERROR, message: "server not attached" }));
+        continue;
+      }
+      if (!isValidRequestId(message.id)) {
+        responses.push(
+          errorResponse(null, {
+            code: INVALID_REQUEST,
+            message: "request id must be a string or a number",
+          }),
+        );
         continue;
       }
       try {

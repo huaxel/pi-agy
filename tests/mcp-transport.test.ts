@@ -32,11 +32,14 @@ interface Harness {
   stop: () => Promise<void>;
   closed: string[];
   sessions: string[];
+  /** Tool names the server actually dispatched, in order. */
+  calls: string[];
 }
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(options?: { closeOn?: string }): Promise<Harness> {
   const sessions: string[] = [];
   const closed: string[] = [];
+  const calls: string[] = [];
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const sid = req.headers[SESSION_HEADER];
@@ -65,9 +68,15 @@ async function startHarness(): Promise<Harness> {
     });
     const mcp = new McpServer({ name: "test-server", version: "1" });
     mcp.setToolListHandler(() => ({ tools: TOOLS }));
-    mcp.setToolCallHandler((request) => ({
-      content: [{ type: "text", text: `echo: ${String(request.params.arguments?.text ?? "")}` }],
-    }));
+    mcp.setToolCallHandler(async (request) => {
+      calls.push(request.params.name);
+      if (options?.closeOn === request.params.name) {
+        // The client DELETEs the session while this call is in flight.
+        const sid = sessions.at(-1);
+        if (sid) await transports.get(sid)?.close();
+      }
+      return { content: [{ type: "text", text: `echo: ${String(request.params.arguments?.text ?? "")}` }] };
+    });
     await mcp.connect(transport);
     await transport.handleRequest(req, res);
   });
@@ -77,6 +86,7 @@ async function startHarness(): Promise<Harness> {
     url: `http://127.0.0.1:${port}/mcp`,
     sessions,
     closed,
+    calls,
     stop: () =>
       new Promise<void>((resolve) => {
         (server as Server).closeAllConnections?.();
@@ -157,6 +167,72 @@ describe("dependency-free MCP transport", () => {
       const list = await post(harness.url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, sid, "text/event-stream");
       const listRaw = await list.text();
       assert.match(listRaw, /tools/);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("stops dispatching a batch once the session closes mid-batch", async () => {
+    const harness = await startHarness({ closeOn: "first" });
+    try {
+      const init = await post(harness.url, INITIALIZE);
+      const sid = init.headers.get(SESSION_HEADER)!;
+      await init.arrayBuffer();
+
+      await (
+        await post(
+          harness.url,
+          [
+            { jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "first" } },
+            { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "second" } },
+          ],
+          sid,
+        )
+      ).text();
+
+      // Both messages were resolved before the first handler ran; only the one
+      // that was already executing may have run.
+      assert.deepEqual(harness.calls, ["first"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("rejects a tools/call that carries no id instead of running it silently", async () => {
+    const harness = await startHarness();
+    try {
+      const init = await post(harness.url, INITIALIZE);
+      const sid = init.headers.get(SESSION_HEADER)!;
+      await init.arrayBuffer();
+
+      // A notification-shaped call cannot be correlated with a result, and the
+      // park/approval flow keys on that id — so nothing may run.
+      const notification = (await (
+        await post(harness.url, { jsonrpc: "2.0", method: "tools/call", params: { name: "echo", arguments: { text: "hi" } } }, sid)
+      ).json()) as { error?: { code: number; message: string }; result?: unknown };
+      assert.equal(notification.error?.code, -32600);
+      assert.match(notification.error?.message ?? "", /requires a string or numeric id/);
+      assert.deepEqual(harness.calls, []);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("rejects ids that JSON-RPC cannot echo", async () => {
+    const harness = await startHarness();
+    try {
+      const init = await post(harness.url, INITIALIZE);
+      const sid = init.headers.get(SESSION_HEADER)!;
+      await init.arrayBuffer();
+
+      for (const id of [{ nested: 1 }, true, [7]]) {
+        const response = (await (
+          await post(harness.url, { jsonrpc: "2.0", id, method: "tools/call", params: { name: "echo" } }, sid)
+        ).json()) as { error?: { code: number; message: string } };
+        assert.equal(response.error?.code, -32600, JSON.stringify(id));
+        assert.match(response.error?.message ?? "", /string or a number/);
+      }
+      assert.deepEqual(harness.calls, []);
     } finally {
       await harness.stop();
     }
