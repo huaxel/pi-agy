@@ -261,7 +261,12 @@ for (const raw of ["unknown.future", "gemini-3.8-flash-medium"]) it(`provider pe
     const stream = createAgyStreamSimple({createStream: () => ({push: e => events.push(e),end: () => finish()}),getSystemPrompt: () => ""}, {
       dir:h.dir,entries,runner:{run:async request => { seen.push(request); return {kind:"done", result:{text:"ok",truncated:false,conversationId:"provider-conv",activity:[]}}; },resume:async () => {throw new Error("unexpected park");},cancel:() => {}},
     });
-    stream({id:modelId},[...(priorAssistant ? [{role:"assistant" as const,content:"prior"}] : []),{role:"user",content:"task"}],{reasoning:"medium"});
+    // A continuation appends to what the conversation consumed; it does not
+    // rewrite the prefix. The saved transcript anchor is what proves the record
+    // belongs to this transcript, so the shape here has to be the real one.
+    stream({id:modelId}, priorAssistant
+      ? [{role:"user" as const,content:"task"},{role:"assistant" as const,content:"ok"},{role:"user" as const,content:"follow up"}]
+      : [{role:"user" as const,content:"task"}],{reasoning:"medium"});
     await done;
     assert.ok(!events.some(e => e.type === "error"),JSON.stringify(events));
   }
