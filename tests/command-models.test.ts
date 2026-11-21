@@ -8,6 +8,12 @@ import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@
 import { registerAgyCommand, parseAgyCommandArgs } from "../extensions/commands.js";
 import { buildAgyArgs } from "../extensions/lib/cli.js";
 import { isAgyModelId, parseAgyModelIds, parseProviderCatalog, validateAgyModelId } from "../extensions/lib/provider-models.js";
+import {
+  getModelCatalog,
+  parseModelCatalog,
+  resetModelCatalog,
+  updateModelCatalog,
+} from "../extensions/lib/inspect.js";
 import { createAgyStreamSimple } from "../extensions/lib/provider.js";
 import { storedModelSelection } from "../extensions/lib/model-selection.js";
 import { resetPreflightCache } from "../extensions/lib/preflight.js";
@@ -109,6 +115,34 @@ for (const id of roster) it(`picker passes ${id} unchanged through confirmation,
   assert.equal(calls.at(-1)[1], id);
   assert.ok(calls.at(-1).includes("conv-exact"));
 }));
+
+it("spawns the model the dialog showed even when the roster refreshes during approval", async () => harness(async h => {
+  let shown = "";
+  let inference: string[] | undefined;
+  h.ctx.ui.confirm = async (_: string, body: string) => {
+    shown = body;
+    // A live refresh lands while the user is reading the dialog: the newest
+    // catalog names a newer id for the same alias. Resolving the alias again
+    // after approval would spawn something the user never saw.
+    await h.state({ roster: [...roster, "claude-sonnet-9-9"].join("\n") });
+    return true;
+  };
+  await h.run("accept-edits sonnet task text");
+  inference = (await h.calls()).filter((a: string[]) => a.includes("--model")).at(-1);
+  assert.ok(inference, h.notices.join("\n"));
+  const spawned = inference[inference.indexOf("--model") + 1];
+  assert.match(shown, /claude-sonnet-5-5/);
+  assert.equal(spawned, "claude-sonnet-5-5");
+  assert.ok(!(await h.calls()).some((a: string[]) => a.includes("claude-sonnet-9-9")));
+}));
+
+it("a successful refresh retires aliases the roster no longer offers", async () => {
+  updateModelCatalog(parseModelCatalog("gemini-3.8-flash-medium\nclaude-sonnet-5-5"));
+  assert.equal(getModelCatalog()["sonnet"], "claude-sonnet-5-5");
+  updateModelCatalog(parseModelCatalog("gemini-3.8-flash-medium"));
+  assert.equal(getModelCatalog()["sonnet"], undefined);
+  assert.equal(getModelCatalog()["flash-medium"], "gemini-3.8-flash-medium");
+});
 
 it("explicit model= preserves IDs and prompt grammar; rejects unsafe IDs and conflicts", () => {
   assert.deepEqual(parseAgyCommandArgs("plan model=unknown.future examine\nthis"), {mode:"plan", model_id:"unknown.future", prompt:"examine\nthis"});

@@ -22,6 +22,8 @@ import {
   type AgyContextMode,
 } from "./lib/context.js";
 import { describePreRunDirt } from "./lib/postflight.js";
+import { resolveModelForApproval } from "./lib/model-approval.js";
+import type { AgyModelId } from "./lib/provider-models.js";
 import { buildAcceptEditsConfirm } from "./lib/confirm.js";
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./lib/command-args.js";
 import {
@@ -215,10 +217,26 @@ export function registerAgyTools(pi: ExtensionAPI): void {
               ctx.sessionManager.buildContextEntries(),
               effectiveContextMode,
             );
+      // Accept-edits must show the model that will run, so it is resolved
+      // before the dialog and carried as an id: preflight refreshes the shared
+      // catalog after approval, and a second resolution could spawn something
+      // else. Other modes keep the alias so the configured default still wins.
+      let approvedModelId: AgyModelId | undefined;
+      if (mode === "accept-edits") {
+        if (!ctx.hasUI) {
+          throw new Error("accept-edits requires interactive confirmation");
+        }
+        approvedModelId = await resolveModelForApproval({
+          model,
+          tier: params.tier,
+          cwd,
+          signal: abortSignal,
+        });
+      }
+
       const executionOptions = {
         prompt: params.prompt,
-        model,
-        tier: params.tier,
+        ...(approvedModelId ? { model_id: approvedModelId } : { model, tier: params.tier }),
         effort: params.effort,
         agent,
         mode,
@@ -235,13 +253,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
       validateAgyExecutionOptions(executionOptions);
 
       if (mode === "accept-edits") {
-        if (!ctx.hasUI) {
-          throw new Error("accept-edits requires interactive confirmation");
-        }
-        const requestedModel = resolveAgyModelAlias(model, params.tier);
-        const modelLabel = requestedModel
-          ? `${requestedModel} (${resolveAgyModelId(model, params.tier)})`
-          : "configured default (fallback flash-medium)";
+        const modelLabel = approvedModelId ?? "configured default";
         const dirt = await describePreRunDirt(cwd, abortSignal).catch(() => null);
         const { title, body } = buildAcceptEditsConfirm({
           modelLabel,

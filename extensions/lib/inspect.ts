@@ -203,9 +203,18 @@ export function parseModelCatalog(output: string, allowPreview = false): AgyMode
   return found;
 }
 
-/** Merge freshly observed catalog entries over the in-process catalog. */
+/**
+ * Install a freshly observed catalog.
+ *
+ * This replaces the snapshot instead of merging into it. Both callers pass a
+ * complete `agy models` roster, so an alias missing from a successful response
+ * has been retired — merging kept the old id selectable, and a delegation could
+ * launch a model the live roster no longer offers. Callers that only have a
+ * partial view must not install it (an incomplete roster would look like a
+ * retirement).
+ */
 export function updateModelCatalog(catalog: AgyModelCatalog): void {
-  modelCatalog = { ...modelCatalog, ...catalog };
+  modelCatalog = { ...catalog };
 }
 
 export function getModelCatalog(): AgyModelCatalog {

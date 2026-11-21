@@ -1,6 +1,7 @@
 import { storedModelSelection, type AgyModelSelection } from "./lib/model-selection.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { resolveAgyModelId } from "./lib/cli.js";
+import { resolveModelForApproval } from "./lib/model-approval.js";
+import type { AgyModelId } from "./lib/provider-models.js";
 import { buildAgyContextFromEntries, effectiveResumeContextMode, type AgyContextMode } from "./lib/context.js";
 import { describePreRunDirt } from "./lib/postflight.js";
 import { DEFAULT_TIMEOUT_MS } from "./lib/command-args.js";
@@ -112,10 +113,28 @@ export async function executeConfirmedRun(
       ? undefined
       : buildAgyContextFromEntries(ctx.sessionManager.buildContextEntries(), contextMode);
 
+  // Only the approval path pins the model. Accept-edits shows it before
+  // anything is written, and preflight refreshes the shared catalog between the
+  // dialog and the spawn, so a second resolution could run a model the user
+  // never saw. Plan and sandbox keep the alias, so the configured default still
+  // applies and receipts stay human-readable.
+  let approvedModelId: AgyModelId | undefined;
   if (run.mode === "accept-edits") {
+    try {
+      approvedModelId = await resolveModelForApproval({
+        modelId: run.model_id,
+        model: run.model,
+        tier: run.tier,
+        cwd,
+        signal: ctx.signal,
+      });
+    } catch (error) {
+      ctx.ui.notify(`agy: ${error instanceof Error ? error.message : String(error)}`, "error");
+      return;
+    }
     const dirt = await describePreRunDirt(cwd, ctx.signal).catch(() => null);
     const { title, body } = buildAcceptEditsConfirm({
-      modelLabel: run.model_id ?? `${run.model} (${resolveAgyModelId(run.model)})`,
+      modelLabel: approvedModelId ?? "configured default",
       agent: run.agent,
       cwd,
       prompt: run.prompt,
@@ -134,11 +153,18 @@ export async function executeConfirmedRun(
   // a second LLM turn and the command works even when tools are limited.
   const status = createStatusThrottler(ctx);
   try {
-    status(`starting (${run.model_id ?? run.model} · ${run.mode}${run.agent ? ` · agent ${run.agent}` : ""})`);
+    status(`starting (${approvedModelId ?? run.model ?? "configured default"} · ${run.mode}${run.agent ? ` · agent ${run.agent}` : ""})`);
     const result = await executeAgyTask(
       {
         prompt: run.prompt,
-        ...(run.model_id ? { model_id: run.model_id } : { model: run.model, tier: run.tier }),
+        // An exact id from the picker or the recorded session outranks the
+        // alias pair in every mode; only accept-edits replaces it, with the id
+        // the dialog showed.
+        ...(approvedModelId
+          ? { model_id: approvedModelId }
+          : run.model_id
+            ? { model_id: run.model_id }
+            : { model: run.model, tier: run.tier }),
         agent: run.agent,
         mode: run.mode,
         dir: cwd,
