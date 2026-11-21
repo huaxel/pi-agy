@@ -309,6 +309,35 @@ describe("dependency-free MCP transport", () => {
     }
   });
 
+  it("refuses an oversized batch instead of executing it", async () => {
+    const harness = await startHarness();
+    try {
+      const init = await post(harness.url, INITIALIZE);
+      const sid = init.headers.get(SESSION_HEADER)!;
+      await init.arrayBuffer();
+      // 33 entries is one past the cap. Each `tools/call` would do real work, so
+      // the request has to be refused before the first one dispatches.
+      const batch = await post(
+        harness.url,
+        Array.from({ length: 33 }, (_, index) => ({ jsonrpc: "2.0", id: index, method: "ping" })),
+        sid,
+      );
+      const body = (await batch.json()) as { error: { code: number; message: string } };
+      assert.equal(body.error.code, -32600);
+      assert.match(body.error.message, /exceeds 32 entries/);
+
+      // The largest accepted batch still works.
+      const ok = await post(
+        harness.url,
+        Array.from({ length: 32 }, (_, index) => ({ jsonrpc: "2.0", id: index, method: "ping" })),
+        sid,
+      );
+      assert.equal(((await ok.json()) as unknown[]).length, 32);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("closes the session on DELETE and refuses server-initiated streams", async () => {
     const harness = await startHarness();
     try {

@@ -30,6 +30,15 @@ const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_V
 export const SESSION_HEADER = "mcp-session-id";
 
 /** JSON-RPC 2.0 error codes used here. */
+/**
+ * Batches were removed from the spec in 2025-06-18 and are answered per element
+ * only for older clients. The input cap bounds the bytes of a request, not the
+ * work inside it: every entry may be a `tools/call` that reads a whole skill or
+ * launches an `agy` probe, and all replies are accumulated before any is sent.
+ * A single request therefore must not be able to ask for unbounded work.
+ */
+const MAX_BATCH_ENTRIES = 32;
+
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
@@ -290,6 +299,17 @@ export class StreamableHTTPServerTransport {
       return;
     }
     const raw = Array.isArray(body) ? body : [body];
+    if (raw.length > MAX_BATCH_ENTRIES) {
+      // Refuse the whole request: dispatching the head and erroring the tail
+      // would still do the work it was built to amplify.
+      this.respond(req, res, [
+        errorResponse(null, {
+          code: INVALID_REQUEST,
+          message: `batch exceeds ${MAX_BATCH_ENTRIES} entries`,
+        }),
+      ]);
+      return;
+    }
     const messages = raw.filter(isRequest);
     if (messages.length === 0) {
       this.respond(req, res, [errorResponse(null, { code: INVALID_REQUEST, message: "not a JSON-RPC request" })]);

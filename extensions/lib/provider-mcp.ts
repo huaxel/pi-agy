@@ -63,6 +63,52 @@ export { BUILTIN_BRIDGE_TOOL_NAMES } from "./provider-tools.js";
 export const DEFAULT_PARK_ESCALATE_MS = 20_000;
 const BRIDGE_MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 1024 * 1024;
+
+/**
+ * Bridge tools that shell out to `agy` are capped and collapsed.
+ *
+ * The session cap bounds how many sessions exist, not how much work one can
+ * ask for. `agy_quota_report` and `agy_model_catalog` each launch an `agy`
+ * subprocess, and a burst of concurrent cache misses used to launch one per
+ * request — a local client with a valid bridge token could fill the process
+ * table before the individual probe timeouts expired.
+ *
+ * Beyond the cap the call fails fast instead of queueing: a queue would let a
+ * hung probe stall everyone behind it, and "retry shortly" is the honest
+ * answer for a client that asked for more than the bridge runs at once.
+ */
+const MAX_CONCURRENT_PROBES = 2;
+let activeProbes = 0;
+
+const inflightProbes = new Map<string, Promise<unknown>>();
+
+/** Collapse identical concurrent probes; every caller sees the same answer. */
+function singleFlight<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const existing = inflightProbes.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const promise = run();
+  inflightProbes.set(key, promise);
+  void promise
+    .catch(() => undefined)
+    .finally(() => {
+      if (inflightProbes.get(key) === promise) inflightProbes.delete(key);
+    });
+  return promise;
+}
+
+async function withProbeSlot<T>(run: () => Promise<T>): Promise<T> {
+  if (activeProbes >= MAX_CONCURRENT_PROBES) {
+    throw new Error(
+      `bridge is running ${MAX_CONCURRENT_PROBES} agy probes already; retry this call shortly`,
+    );
+  }
+  activeProbes += 1;
+  try {
+    return await run();
+  } finally {
+    activeProbes -= 1;
+  }
+}
 /**
  * Characters of a Pi tool result relayed to agy. The bridge bounds what agy
  * sends in, so it bounds what it hands back: a tool that returns megabytes
@@ -350,12 +396,16 @@ export async function startMcpBridge(
       }
       if (name === "agy_quota_report") {
         const model = stringArg(args.model);
-        const quota = await checkAgyUsage(dir, undefined);
+        const quota = await singleFlight(`quota:${dir}`, () =>
+          withProbeSlot(() => checkAgyUsage(dir, undefined)),
+        );
         const report = formatAgyUsage(quota, model) ?? "agy quota information is unavailable";
         return toolText(report);
       }
       if (name === "agy_model_catalog") {
-        const entries = await readCatalog(dir, catalogCache);
+        const entries = await singleFlight(`catalog:${dir}`, () =>
+          withProbeSlot(() => readCatalog(dir, catalogCache)),
+        );
         catalogCache = entries.cache;
         // Never name models from memory: a retired id would look selectable
         // here and then fail at launch.

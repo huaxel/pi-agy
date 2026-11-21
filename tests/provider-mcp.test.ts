@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { AgyProviderDriver } from "../extensions/lib/provider-driver.js";
 import { withTimingFakeAgy, awaitWithWatchdog } from "./timing-helpers.js";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -359,6 +359,47 @@ describe("MCP bridge", () => {
       assert.equal(poll.status, 200);
       await poll.arrayBuffer();
       assert.equal(handle.completePark(parked.callId, { text: "done", isError: false }), true);
+    });
+  });
+
+  it("collapses concurrent catalog probes into one agy launch", async () => {
+    await withIsolatedAgentDir(async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
+      const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-bin-"));
+      const counter = path.join(bin, "launches");
+      const agy = path.join(bin, "agy");
+      await writeFile(
+        agy,
+        [
+          "#!/bin/sh",
+          `printf 'x\\n' >> '${counter}'`,
+          "sleep 0.2",
+          "printf 'gemini-3.8-flash-medium\\tFixture model\\n'",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const handle = await startBridge(dir);
+      const client = await connectClient(handle.url, await readToken(handle.configDir));
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+      try {
+        // Four simultaneous cache misses used to launch four `agy models`
+        // subprocesses. They are one probe with one answer.
+        const results = await Promise.all(
+          Array.from({ length: 4 }, () =>
+            client.callTool({ name: "agy_model_catalog", arguments: {} }),
+          ),
+        );
+        for (const result of results as Array<{ content: Array<{ text: string }> }>) {
+          assert.match(result.content[0].text, /gemini-3\.8-flash/);
+        }
+        assert.equal((await readFile(counter, "utf8")).trim().split("\n").length, 1);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+        await client.close();
+      }
     });
   });
 
