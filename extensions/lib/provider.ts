@@ -15,7 +15,12 @@ import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 
 import { loadAgyConfig } from "./config.js";
-import { projectBridgeTools, bridgeToolsFingerprint, type ProviderToolSource } from "./provider-tools.js";
+import {
+  BUILTIN_BRIDGE_TOOL_NAMES,
+  projectBridgeTools,
+  bridgeToolsFingerprint,
+  type ProviderToolSource,
+} from "./provider-tools.js";
 export { projectBridgeTools, bridgeToolsFingerprint, type ProviderToolSource } from "./provider-tools.js";
 
 import {
@@ -924,7 +929,9 @@ export function createAgyStreamSimple(
               // Session-store failures must never block a turn.
             }
           }
-          const bridgedTools = projectBridgeTools(options?.tools ?? deps.tools ?? []);
+          const bridgedTools = projectBridgeTools(options?.tools ?? deps.tools ?? [], {
+            reserved: BUILTIN_BRIDGE_TOOL_NAMES,
+          });
           activeBridgeToolsKey = bridgeToolsFingerprint(bridgedTools);
           const sync = resume ? syncByModel.get(model.id) : undefined;
           const deltaFailureReason = !resume

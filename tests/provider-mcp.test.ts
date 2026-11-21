@@ -9,6 +9,11 @@ import { afterEach, describe, it } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {
+  BUILTIN_BRIDGE_TOOL_NAMES,
+  projectBridgeTools,
+  type ProviderToolSource,
+} from "../extensions/lib/provider-tools.js";
 
 import {
   BRIDGE_TOKEN_HEADER,
@@ -65,6 +70,57 @@ async function connectClient(url: string, token: string): Promise<Client> {
   await client.connect(transport);
   return client;
 }
+
+/** Built-in tool names a real bridge server advertises, via the SDK client. */
+async function advertisedBuiltinNames(): Promise<string[]> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-builtin-names-"));
+  const bridge = await startBridge(dir);
+  const token = await readToken(bridge.configDir);
+  bridge.setTools([]);
+  const client = await connectClient(bridge.url, token);
+  try {
+    const listed = await client.listTools();
+    return listed.tools.map((tool) => tool.name);
+  } finally {
+    await client.close();
+  }
+}
+
+describe("bridge tool name reservation", () => {
+  it("renames a Pi tool that sanitizes onto a built-in name", () => {
+    const tools = projectBridgeTools(
+      [
+        { name: "activate skill", description: "d", parameters: { type: "object" } },
+        { name: "bridge poll result", description: "d", parameters: { type: "object" } },
+        { name: "activate skill", description: "dup", parameters: { type: "object" } },
+      ] as ProviderToolSource[],
+      { reserved: BUILTIN_BRIDGE_TOOL_NAMES },
+    );
+    // Advertised under distinct names, still carrying their Pi identities.
+    assert.deepEqual(
+      tools.map((tool) => [tool.name, tool.piName]),
+      [
+        ["activate_skill_pi", "activate skill"],
+        ["bridge_poll_result_pi", "bridge poll result"],
+      ],
+    );
+    for (const tool of tools) assert.ok(!BUILTIN_BRIDGE_TOOL_NAMES.has(tool.name));
+  });
+
+  it("advertises exactly the built-ins the reservation set protects", async () => {
+    // The set lives in provider-tools.ts so projection never loads the MCP SDK;
+    // this is the mechanical check that the two stay in step.
+    const advertised = await advertisedBuiltinNames();
+    assert.deepEqual([...advertised].sort(), [...BUILTIN_BRIDGE_TOOL_NAMES].sort());
+  });
+
+  it("leaves a Pi tool alone when nothing reserves its name", () => {
+    const tools = projectBridgeTools([
+      { name: "activate skill", description: "d", parameters: { type: "object" } },
+    ] as ProviderToolSource[]);
+    assert.equal(tools[0]?.name, "activate_skill");
+  });
+});
 
 describe("MCP bridge", () => {
   it("writes a loopback config with a shared secret", async () => {

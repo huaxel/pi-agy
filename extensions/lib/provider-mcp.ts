@@ -57,6 +57,8 @@ export const BRIDGE_MCP_KEY = "pi-agy-tools";
 const BUILTIN_TOOL_COUNT = 5;
 export const BRIDGE_TOKEN_HEADER = "x-pi-agy-token";
 export const POLL_TOOL_NAME = "bridge_poll_result";
+
+export { BUILTIN_BRIDGE_TOOL_NAMES } from "./provider-tools.js";
 /** Async escalation threshold: park requests longer than this early-ack so agy's 180s timeout is avoided. */
 export const DEFAULT_PARK_ESCALATE_MS = 20_000;
 const BRIDGE_MCP_PATH = "/mcp";

@@ -124,16 +124,46 @@ function unwrapRootComposition(
  * sanitize MCP names, drop unserializable schemas. First-seen wins on
  * collisions so output is deterministic.
  */
-export function projectBridgeTools(sources: ProviderToolSource[]): BridgeToolDef[] {
+/**
+ * Names the bridge answers itself (sessions, quota, catalog, activate_skill,
+ * bridge_poll_result). A projected Pi tool must never take one: `tools/list`
+ * would advertise the Pi tool while dispatch routes the name to the built-in
+ * first, leaving the advertised tool unreachable. Declared here rather than in
+ * provider-mcp.ts so projection does not pull the MCP SDK onto the extension
+ * startup path; `provider-mcp.test.ts` asserts the advertised built-ins are
+ * exactly this set.
+ */
+export const BUILTIN_BRIDGE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "agy_sessions_list",
+  "agy_quota_report",
+  "agy_model_catalog",
+  "activate_skill",
+  "bridge_poll_result",
+]);
+
+export function projectBridgeTools(
+  sources: ProviderToolSource[],
+  options?: {
+    /**
+     * Names owned by the bridge's own tools. A Pi tool that sanitizes onto one
+     * of them is advertised under a distinct name instead of shadowing the
+     * built-in — the built-ins win dispatch, so the Pi tool would otherwise be
+     * listed and unreachable.
+     */
+    reserved?: ReadonlySet<string>;
+  },
+): BridgeToolDef[] {
   const defs: BridgeToolDef[] = [];
+  const reserved = options?.reserved ?? new Set<string>();
   const seenNames = new Set<string>();
   const seenPiNames = new Set<string>();
   for (const source of sources) {
     if (defs.length >= MAX_BRIDGED_TOOLS) break;
     if (typeof source.name !== "string" || !isBridgableToolName(source.name)) continue;
     if (seenPiNames.has(source.name)) continue;
-    const name = toSafeBridgeName(source.name);
-    if (seenNames.has(name)) continue;
+    const safe = toSafeBridgeName(source.name);
+    if (seenNames.has(safe)) continue;
+    const name = reserved.has(safe) ? freeReservedName(safe, seenNames, reserved) : safe;
     const inputSchema = normalizeBridgeInputSchema(source.parameters);
     seenPiNames.add(source.name);
     seenNames.add(name);
@@ -151,6 +181,19 @@ export function projectBridgeTools(sources: ProviderToolSource[]): BridgeToolDef
 }
 
 /** Fingerprint the bridged catalog: changes recycle the driver (fresh ListTools). */
+/** First `name_pi`, `name_pi2`, … that neither the bridge nor a prior tool owns. */
+function freeReservedName(
+  base: string,
+  seenNames: ReadonlySet<string>,
+  reserved: ReadonlySet<string>,
+): string {
+  const taken = (candidate: string) => seenNames.has(candidate) || reserved.has(candidate);
+  let candidate = `${base}_pi`;
+  let suffix = 2;
+  while (taken(candidate)) candidate = `${base}_pi${suffix++}`;
+  return candidate;
+}
+
 export function bridgeToolsFingerprint(tools: BridgeToolDef[]): string {
   const canonical = JSON.stringify(
     tools.map((tool) => [tool.name, tool.piName, tool.description, tool.inputSchema]),
