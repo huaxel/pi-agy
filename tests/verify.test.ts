@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, stat as statFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  stat as statFile,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -31,6 +40,7 @@ import { withDirLock } from "../extensions/lib/lock.js";
 import {
   detectVerifyCommand,
   detectVerifyCommandSource,
+  formatVerifyCommand,
   resetVerifyDetectionCache,
 } from "../extensions/lib/verify.js";
 import { summarizeGitDiff } from "../extensions/lib/postflight.js";
@@ -44,6 +54,33 @@ import {
 import { parseJsonResponse } from "../extensions/lib/parse.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
+describe("verify discovery across symlinks and ancestors", () => {
+  it("inspects the physical checkout when the workspace is a symlink", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-repo-"));
+    await mkdir(path.join(repo, "deep", "sub"), { recursive: true });
+    await writeFile(path.join(repo, "justfile"), "ci:\n\techo ok\n");
+    await mkdir(path.join(repo, ".git"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-link-"));
+    const link = path.join(outside, "workspace");
+    await symlink(path.join(repo, "deep", "sub"), link);
+
+    // Lexical parents of the symlink lead nowhere near the checkout; only the
+    // physical path reaches the justfile and the .git boundary.
+    assert.equal(
+      await detectVerifyCommand(link, { justAvailable: async () => true }),
+      "just ci",
+    );
+  });
+
+  it("names the directory that defines a gate found above the workspace", () => {
+    assert.equal(formatVerifyCommand({ command: "pnpm run ci", definedIn: "package.json" }), "pnpm run ci");
+    assert.match(
+      formatVerifyCommand({ command: "pnpm run ci", definedIn: "../../package.json" }),
+      /defined in \.\.\/\.\.\/package\.json; run it from that directory/,
+    );
+  });
+});
+
 describe("detectVerifyCommand", () => {
   it("prefers just ci when justfile has ci recipe", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));

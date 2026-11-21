@@ -211,6 +211,41 @@ describe("extension registration", () => {
     }, 0, 0, "", "", usage);
   });
 
+  it("tells the agent to run an ancestor-defined gate from its own directory", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-ancestor-"));
+    await writeFile(
+      path.join(repo, "package.json"),
+      JSON.stringify({ scripts: { ci: "echo gate" } }),
+    );
+    const workspace = path.join(repo, "nested", "workspace");
+    await mkdir(workspace, { recursive: true });
+    // A nearer manifest without a `ci` script: running the discovered command
+    // here would resolve this one instead of the gate's.
+    await writeFile(path.join(workspace, "package.json"), JSON.stringify({ scripts: {} }));
+    const raw =
+      JSON.stringify({ event: "result", result: { response: "done", status: "SUCCESS" } }) + "\n";
+    await withFakeAgy(raw, async (bin) => {
+      resetPreflightCache();
+      await executeAgyTask(
+        {
+          prompt: "edit the file",
+          mode: "accept-edits",
+          dir: workspace,
+          timeout_ms: 60_000,
+          new_session: true,
+          stream: true,
+        },
+        undefined,
+      );
+      const printArgs = (await readFakeAgyArgs(bin)).find(
+        (argv) => argv.includes("-p") && !argv.includes("/usage"),
+      )!;
+      // The fake writes one argv per line, so a multi-line prompt spans entries.
+      const prompt = printArgs.slice(printArgs.indexOf("-p") + 1).join("\n");
+      assert.match(prompt, /npm run ci \(defined in \.\.\/\.\.\/package\.json; run it from that directory\)/);
+    });
+  });
+
   it("gates accept-edits behind the TUI confirmation dialog", async () => {
     type ExecuteTool = {
       execute: (...args: any[]) => Promise<any>;

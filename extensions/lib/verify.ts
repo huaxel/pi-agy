@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
 
@@ -65,12 +65,28 @@ export async function detectVerifyCommand(
   return (await detectVerifyCommandSource(cwd, deps))?.command ?? null;
 }
 
+/**
+ * The command as it belongs in the agent prompt.
+ *
+ * A gate discovered in an ancestor directory must say where it lives: agy runs
+ * in the workspace, and the same `pnpm run ci` there resolves this directory's
+ * nearest manifest instead — a different project, or no script at all.
+ */
+export function formatVerifyCommand(source: VerifyCommandSource): string {
+  const dir = path.posix.dirname(source.definedIn);
+  if (dir === "." || dir === "") return source.command;
+  return `${source.command} (defined in ${source.definedIn}; run it from that directory)`;
+}
+
 /** As {@link detectVerifyCommand}, but naming the file that defines the command. */
 export async function detectVerifyCommandSource(
   cwd: string,
   deps: VerifyDetectionDeps = {},
 ): Promise<VerifyCommandSource | null> {
-  const key = path.resolve(cwd);
+  // Canonicalize before walking: a symlinked working directory must inspect the
+  // physical checkout, or the ancestor walk never reaches its `.git` boundary
+  // and reports no gate at all.
+  const key = await realpath(cwd).catch(() => path.resolve(cwd));
   if (deps.justAvailable === undefined) {
     const hit = verifyCache.get(key);
     if (hit && Date.now() - hit.at < VERIFY_CACHE_TTL_MS) return hit.source;

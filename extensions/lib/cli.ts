@@ -1,5 +1,11 @@
 import type { AgyModelSelector } from "./model-selection.js";
-export { detectVerifyCommand, detectVerifyCommandFromPackageJson } from "./verify.js";
+export {
+  detectVerifyCommand,
+  detectVerifyCommandFromPackageJson,
+  detectVerifyCommandSource,
+  formatVerifyCommand,
+  type VerifyCommandSource,
+} from "./verify.js";
 export { parseJsonResponse } from "./parse.js";
 
 export const AGY_MODEL_ALIASES = [

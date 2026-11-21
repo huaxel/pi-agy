@@ -4,7 +4,8 @@ import { stat } from "node:fs/promises";
 
 import {
   buildAgyPrompt,
-  detectVerifyCommand,
+  detectVerifyCommandSource,
+  formatVerifyCommand,
   findAgyQuotaEntries,
   formatAgyUsage,
   getAgyConversationId,
@@ -157,10 +158,11 @@ export async function executeAgyTask(
         }
 
         const useDigest = options.digest ?? options.mode !== "accept-edits";
-        const verifyCmd =
+        const verifySource =
           options.mode === "accept-edits"
-            ? await detectVerifyCommand(options.dir)
+            ? await detectVerifyCommandSource(options.dir)
             : null;
+        const verifyCmd = verifySource ? formatVerifyCommand(verifySource) : null;
         const baseline: GitBaseline =
           options.mode === "accept-edits"
             ? await captureGitBaseline(options.dir, abortSignal)
