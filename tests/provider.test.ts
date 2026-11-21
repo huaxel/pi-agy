@@ -325,6 +325,82 @@ describe("provider streamSimple", () => {
     });
   });
 
+  it("only resumes a recorded conversation this transcript continues", async () => {
+    await withIsolatedAgentDir(async () => {
+      const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50));
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-resume-"));
+      const seen: Array<string | undefined> = [];
+      // A fresh factory per "Pi session": the in-memory resume map is per
+      // session, so only a new one exercises the record on disk.
+      const session = (): ((model: { id: string }, messages: unknown[], options: object) => unknown) =>
+        createAgyStreamSimple(createRecordingFactory(), {
+          entries: [...TEST_CATALOG],
+          dir,
+          runner: makeStaticRunner(async (request) => {
+            seen.push(request.resumeConversationId);
+            return { text: "ok", truncated: false, conversationId: "conv-new", activity: [] };
+          }),
+        }) as never;
+
+      const first = [userMessage("one")];
+      session()({ id: "gemini-3-8-flash" }, first, {});
+      await settle();
+      const second = [...first, { role: "assistant", content: "ok" }, userMessage("two")];
+      session()({ id: "gemini-3-8-flash" }, second, {});
+      await settle();
+      assert.deepEqual(seen, [undefined, "conv-new"]);
+
+      // The record describes `second`; only its continuation may claim it.
+      session()(
+        { id: "gemini-3-8-flash" },
+        [...second, { role: "assistant", content: "ok" }, userMessage("three")],
+        {},
+      );
+      await settle();
+      assert.deepEqual(seen, [undefined, "conv-new", "conv-new"]);
+    });
+  });
+
+  it("does not append another session's transcript to a recorded conversation", async () => {
+    await withIsolatedAgentDir(async () => {
+      const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50));
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-resume-other-"));
+      const seen: Array<string | undefined> = [];
+      const session = (): ((model: { id: string }, messages: unknown[], options: object) => unknown) =>
+        createAgyStreamSimple(createRecordingFactory(), {
+          entries: [...TEST_CATALOG],
+          dir,
+          runner: makeStaticRunner(async (request) => {
+            seen.push(request.resumeConversationId);
+            return { text: "ok", truncated: false, conversationId: "conv-a", activity: [] };
+          }),
+        }) as never;
+
+      const mine = [userMessage("one")];
+      session()({ id: "gemini-3-8-flash" }, mine, {});
+      await settle();
+      session()(
+        { id: "gemini-3-8-flash" },
+        [...mine, { role: "assistant", content: "ok" }, userMessage("two")],
+        {},
+      );
+      await settle();
+      seen.length = 0;
+
+      // Another Pi session in the same workspace and model. It has prior
+      // assistant turns, and the record is claimable by model alone — but this
+      // transcript is not the one that conversation consumed, so it must start
+      // its own instead of appending to a stranger's conversation.
+      session()(
+        { id: "gemini-3-8-flash" },
+        [userMessage("unrelated"), { role: "assistant", content: "other provider" }, userMessage("go")],
+        {},
+      );
+      await settle();
+      assert.deepEqual(seen, [undefined]);
+    });
+  });
+
   it("starts a fresh conversation for sessions without a prior assistant turn", async () => {
     await withIsolatedAgentDir(async () => {
     const factory = createRecordingFactory();

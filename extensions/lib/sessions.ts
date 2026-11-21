@@ -25,8 +25,27 @@ export interface AgyConversationEntry {
   summary?: string;
 }
 
+/**
+ * Fingerprint of the Pi transcript an agy conversation last consumed.
+ *
+ * `last_conversation_id` is stored per directory, so without this the record
+ * says "the newest conversation in this workspace", not "the conversation this
+ * transcript is a continuation of". Two Pi sessions in one checkout, or a
+ * transcript that came from a different provider, would resume a conversation
+ * they never took part in and append to it. A record written before this field
+ * existed carries no anchor and therefore cannot be proven, so it is not
+ * resumed.
+ */
+export interface TranscriptAnchor {
+  /** Number of non-system transcript messages the conversation consumed. */
+  count: number;
+  /** `transcriptFingerprint` of exactly those messages. */
+  fingerprint: string;
+}
+
 export interface AgySessionRecord {
   last_conversation_id?: string;
+  last_transcript_anchor?: TranscriptAnchor;
   last_model?: string;
   last_raw_model_id?: AgyModelId;
   last_agent?: string;
@@ -77,6 +96,8 @@ export interface AgySessionStore {
     summary?: string,
     agent?: string,
     rawModelId?: AgyModelId,
+    /** Proof of which transcript this conversation consumed; see TranscriptAnchor. */
+    anchor?: TranscriptAnchor,
   ): Promise<void>;
 }
 
@@ -263,6 +284,7 @@ export function createSessionStore(
     summary?: string,
     agent?: string,
     rawModelId?: AgyModelId,
+    anchor?: TranscriptAnchor,
   ): Promise<void> {
     if (rawModelId !== undefined) validateAgyModelId(rawModelId);
     const operation = waitForMutation(signal).then(() =>
@@ -273,6 +295,7 @@ export function createSessionStore(
         const updatedAt = new Date().toISOString();
         store[key] = {
           last_conversation_id: conversationId,
+          ...(anchor ? { last_transcript_anchor: anchor } : {}),
           last_model: model,
           ...(rawModelId ? { last_raw_model_id: rawModelId } : {}),
           last_agent: agent,
@@ -318,6 +341,7 @@ export function saveSession(
   summary?: string,
   agent?: string,
   rawModelId?: AgyModelId,
+  anchor?: TranscriptAnchor,
 ): Promise<void> {
-  return defaultStore.saveSession(dir, conversationId, model, signal, summary, agent, rawModelId);
+  return defaultStore.saveSession(dir, conversationId, model, signal, summary, agent, rawModelId, anchor);
 }

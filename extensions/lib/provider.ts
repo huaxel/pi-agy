@@ -660,6 +660,42 @@ function hasUserMessageAfterToolCall(messages: ProviderTranscriptMessage[], tool
   return false;
 }
 
+/**
+ * Whether the persisted conversation is a continuation of *this* transcript.
+ *
+ * `last_conversation_id` is per directory, so it answers "newest in this
+ * workspace" — not "mine". Resuming on that alone let a second Pi session in
+ * the same checkout, or a transcript that came from another provider, inherit
+ * and append to a conversation it never took part in. The stored anchor makes
+ * the claim checkable: the transcript must still start with exactly the
+ * messages that conversation consumed, and must have grown past them.
+ *
+ * A record written before anchors existed cannot prove anything, so it is not
+ * resumed; a transcript that has not grown past the anchor is not a
+ * continuation either.
+ */
+export function transcriptContinuesConversation(
+  anchor: { count: number; fingerprint: string } | undefined,
+  messages: readonly ProviderTranscriptMessage[],
+): boolean {
+  if (!anchor || !Number.isInteger(anchor.count) || anchor.count <= 0) return false;
+  if (typeof anchor.fingerprint !== "string" || anchor.fingerprint.length === 0) return false;
+  const conversational = messages.filter((message) => message.role !== "system");
+  if (conversational.length <= anchor.count) return false;
+  return transcriptFingerprint(conversational.slice(0, anchor.count)) === anchor.fingerprint;
+}
+
+/** Anchor for the messages an agy turn just consumed. */
+function transcriptAnchor(
+  messages: readonly ProviderTranscriptMessage[],
+): { count: number; fingerprint: string } {
+  // System messages carry Pi's tool catalog and prompt deltas, which change
+  // mid-session for reasons unrelated to the conversation. Excluding them keeps
+  // the anchor about the exchange, not about the tool list.
+  const conversational = messages.filter((message) => message.role !== "system");
+  return { count: conversational.length, fingerprint: transcriptFingerprint(conversational) };
+}
+
 interface SuspendedToolCall {
   toolCallId: string;
   park: ProviderToolPark;
@@ -929,7 +965,11 @@ export function createAgyStreamSimple(
           if (!resume && hasPriorAssistantTurn) {
             try {
               const record = await getSession(dir);
-              if (record?.last_conversation_id && record.last_model === model.id) {
+              if (
+                record?.last_conversation_id &&
+                record.last_model === model.id &&
+                transcriptContinuesConversation(record.last_transcript_anchor, messages)
+              ) {
                 resume = record.last_conversation_id;
               }
             } catch {
@@ -1129,7 +1169,16 @@ export function createAgyStreamSimple(
             // Native resume still keys on model.id. Delegation needs the exact
             // CLI ID, including the concrete Gemini tier represented by the
             // catalog's base + effort pair (never the normalized Pi ID).
-            await saveSession(dir, result.conversationId, model.id, undefined, summary, prior?.last_agent, executedRawModelId);
+            await saveSession(
+              dir,
+              result.conversationId,
+              model.id,
+              undefined,
+              summary,
+              prior?.last_agent,
+              executedRawModelId,
+              transcriptAnchor(messages),
+            );
           } catch {
             // Recording failures must never fail a completed turn.
           }

@@ -70,6 +70,20 @@ describe("session store", () => {
     assert.equal(mode, 0o600);
   });
 
+  it("records which transcript a conversation consumed", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-sessions-"));
+    const store = createSessionStore(path.join(tmp, "agy-sessions.json"));
+    const anchor = { count: 3, fingerprint: "abc123" };
+
+    await store.saveSession("/p", "c1", "flash-medium", undefined, undefined, undefined, undefined, anchor);
+    assert.deepEqual((await store.getSession("/p"))?.last_transcript_anchor, anchor);
+
+    // A later record without an anchor must not inherit the previous one: the
+    // anchor belongs to the conversation it was written with.
+    await store.saveSession("/p", "c2", "flash-medium");
+    assert.equal((await store.getSession("/p"))?.last_transcript_anchor, undefined);
+  });
+
   it("keeps a capped, most-recent-first history per directory", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-sessions-"));
     const store = createSessionStore(path.join(tmp, "agy-sessions.json"));
