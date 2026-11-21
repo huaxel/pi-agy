@@ -239,7 +239,7 @@ export async function executeAgyTask(
             abortSignal,
             trackProgress,
           );
-        }, onProgress, abortSignal);
+        }, onProgress, abortSignal, { structuredActivity: options.stream ?? true });
 
         if (run.conversation_id) {
           try {
@@ -406,6 +406,15 @@ async function runWithTransientRetry<T>(
   attempt: (trackProgress: (message: string, kind?: "status" | "activity", meta?: AgyProgressMeta) => void) => Promise<T>,
   onProgress?: (message: string, meta?: AgyProgressMeta) => void,
   signal?: AbortSignal,
+  options?: {
+    /**
+     * Whether the run reports structured progress events. The retry below is
+     * only safe because those events prove the failure happened before agy did
+     * any work; without them "no activity seen" means "no events to see", and
+     * re-running an accept-edits task could repeat a non-idempotent edit.
+     */
+    structuredActivity?: boolean;
+  },
 ): Promise<T> {
   for (let tries = 0; ; tries++) {
     let sawActivity = false;
@@ -423,6 +432,7 @@ async function runWithTransientRetry<T>(
       const message = error instanceof Error ? error.message : String(error);
       if (
         tries === 0 &&
+        options?.structuredActivity !== false &&
         !sawActivity &&
         isTransientAgyFailure(message) &&
         !/\b(?:ETIMEDOUT|timed out)\b/i.test(message)

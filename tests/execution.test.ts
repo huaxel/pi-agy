@@ -1590,6 +1590,41 @@ describe("shared executor", () => {
     );
   });
 
+  it("does not retry a non-streaming run, which cannot prove no work happened", async () => {
+    const raw =
+      JSON.stringify({ event: "result", result: { response: "recovered", status: "SUCCESS" } }) +
+      "\n";
+    await withFakeAgy(
+      raw,
+      async (bin) => {
+        resetPreflightCache();
+        const progress: string[] = [];
+        // Plain-text output has no tool-step events, so "no activity seen" says
+        // nothing about whether agy already edited files. Replaying such a run
+        // can repeat a non-idempotent edit, so it must surface the failure.
+        await assert.rejects(
+          executeAgyTask(
+            {
+              prompt: "edit the file",
+              mode: "accept-edits",
+              dir: process.cwd(),
+              timeout_ms: 60_000,
+              new_session: true,
+              stream: false,
+            },
+            undefined,
+            (message) => progress.push(message),
+          ),
+          /rate limit exceeded/,
+        );
+        assert.ok(!progress.some((message) => message.includes("retrying")));
+        const attempts = (await readFile(path.join(bin, "print-invocations"), "utf8")).trim();
+        assert.equal(attempts, "1");
+      },
+      1,
+    );
+  });
+
   it("honors the legacy tier over a configured default", async () => {
     const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-agentdir-"));
     await writeFile(

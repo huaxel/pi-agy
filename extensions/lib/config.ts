@@ -139,21 +139,44 @@ export async function loadAgyConfig(
 }
 
 /**
- * Persist config overrides, preserving unknown keys. Malformed existing
- * files are replaced (the caller just made an explicit choice).
+ * Persist config overrides, preserving unknown keys.
+ *
+ * A config that exists but cannot be parsed is an error, not a blank slate:
+ * writing `{ ...patch }` over it would drop every other setting, including the
+ * `skipPermissions: false` that keeps the approval bypass off — turning a
+ * harmless bridge toggle into a silent policy change. The caller reports the
+ * error and the user fixes or removes the file.
  */
 export async function saveAgyConfig(
   patch: Partial<AgyConfig>,
   configPath = getDefaultConfigPath(),
 ): Promise<void> {
   let base: Record<string, unknown> = {};
+  let text: string | undefined;
   try {
-    const parsed: unknown = JSON.parse(await readFile(configPath, { encoding: "utf8" }));
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      base = parsed as Record<string, unknown>;
+    text = await readFile(configPath, { encoding: "utf8" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      throw new Error(
+        `Cannot update agy config: ${configPath} could not be read ` +
+          `(${(error as Error).message}). Fix or remove the file first.`,
+      );
     }
-  } catch {
-    // Missing or corrupt: start fresh with the patch.
+  }
+  if (text !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error(
+        `Cannot update agy config: ${configPath} is not valid JSON. ` +
+          "Fix or remove the file first — overwriting it would discard its other settings.",
+      );
+    }
+    base = parsed as Record<string, unknown>;
   }
   await mkdir(path.dirname(configPath), { recursive: true });
   const payload = JSON.stringify({ ...base, ...patch }, null, 2) + "\n";

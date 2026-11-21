@@ -66,6 +66,26 @@ describe("agy config", () => {
     assert.deepEqual(await loadAgyConfig(path.join(tmp, "agy-config.json")), {});
   });
 
+  it("refuses to overwrite a config it cannot parse", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
+    const file = path.join(tmp, "agy-config.json");
+    // Overwriting would drop skipPermissions: false, so a harmless bridge
+    // toggle would silently re-enable the approval bypass.
+    await writeFile(file, '{"skipPermissions": false, "providerBrid');
+    await assert.rejects(
+      saveAgyConfig({ providerBridge: true }, file),
+      /is not valid JSON.*discard its other settings/s,
+    );
+    assert.equal(await readFile(file, "utf8"), '{"skipPermissions": false, "providerBrid');
+  });
+
+  it("still creates the config when none exists", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
+    const file = path.join(tmp, "agy-config.json");
+    await saveAgyConfig({ providerBridge: false }, file);
+    assert.deepEqual(await loadAgyConfig(file), { providerBridge: false });
+  });
+
   it("saves by rename so a reader never sees a partial file", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
     const file = path.join(tmp, "agy-config.json");
@@ -123,13 +143,6 @@ describe("agy config", () => {
     assert.deepEqual(await loadAgyConfig(file), { providerBridge: false, skipPermissions: false });
   });
 
-  it("replaces malformed config on save", async () => {
-    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
-    const file = path.join(tmp, "agy-config.json");
-    await writeFile(file, "not json");
-    await saveAgyConfig({ providerBridge: true }, file);
-    assert.deepEqual(await loadAgyConfig(file), { providerBridge: true });
-  });
 });
 
 describe("resolveDefaultModel", () => {
