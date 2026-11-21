@@ -1031,6 +1031,22 @@ describe("provider image staging", () => {
     await cleanup();
   });
 
+  it("rejects an oversized image by size before decoding it", async () => {
+    const { MAX_ENCODED_IMAGE_CHARS, MAX_IMAGE_BYTES, decodedImageBytes, stageImages } = await import(
+      "../extensions/lib/provider.js"
+    );
+    // Anything longer than the encoded cap decodes to more than the byte cap,
+    // so nothing larger is ever handed to the decoder.
+    assert.ok(decodedImageBytes("A".repeat(MAX_ENCODED_IMAGE_CHARS)) <= MAX_IMAGE_BYTES + 2);
+    assert.ok(decodedImageBytes("A".repeat(MAX_ENCODED_IMAGE_CHARS + 4)) > MAX_IMAGE_BYTES);
+
+    // One byte over the cap, encoded: rejected without allocating the payload.
+    const oversized = "A".repeat(4 * Math.ceil((MAX_IMAGE_BYTES + 3) / 3));
+    const staged = await stageImages([{ block: {}, data: oversized, mimeType: "image/png" }]);
+    assert.equal(staged.paths.size, 0);
+    await staged.cleanup();
+  });
+
   it("isolates concurrent stagings from each other's cleanup", async () => {
     const { stageImages } = await import("../extensions/lib/provider.js");
     const { stat } = await import("node:fs/promises");

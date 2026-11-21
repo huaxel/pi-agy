@@ -114,8 +114,32 @@ export function collectImageBlocks(
 /** Strict base64 (Node's decoder silently strips non-alphabet chars). */
 const STRICT_BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
+/**
+ * Cheap upper bound on the base64 length for `MAX_IMAGE_BYTES`: anything longer
+ * decodes to more bytes, so it can be rejected without scanning or allocating.
+ * Generous by up to two bytes (padding granularity); `decodedImageBytes` makes
+ * the exact call, still before decoding.
+ */
+export const MAX_ENCODED_IMAGE_CHARS = 4 * Math.ceil(MAX_IMAGE_BYTES / 3);
+
+/**
+ * Decoded byte count for a structurally valid base64 string, without decoding.
+ * Exact: four characters carry three bytes, minus one byte per padding char.
+ */
+export function decodedImageBytes(data: string): number {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return (data.length / 4) * 3 - padding;
+}
+
 function decodeImageData(data: string): Buffer | undefined {
   if (typeof data !== "string" || data.length === 0 || data.length % 4 !== 0) return undefined;
+  // Bound the input before touching it. Decoding first and comparing after
+  // means an oversized attachment allocates its full payload — and the string
+  // scan is O(len) — before the cap can reject it, which is a memory-exhaustion
+  // path rather than a validation rule.
+  if (data.length > MAX_ENCODED_IMAGE_CHARS) return undefined;
+  const declared = decodedImageBytes(data);
+  if (declared === 0 || declared > MAX_IMAGE_BYTES) return undefined;
   if (!STRICT_BASE64_RE.test(data)) return undefined;
   try {
     const bytes = Buffer.from(data, "base64");
