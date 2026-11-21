@@ -309,6 +309,42 @@ describe("dependency-free MCP transport", () => {
     }
   });
 
+  it("stops spending a batch once its replies exceed the byte budget", async () => {
+    const harness = await startHarness();
+    try {
+      const init = await post(harness.url, INITIALIZE);
+      const sid = init.headers.get(SESSION_HEADER)!;
+      await init.arrayBuffer();
+      // Each call echoes ~1 MiB back. The entry cap allows 32 of these; without
+      // an aggregate budget they are all dispatched and all retained before
+      // anything is serialized.
+      const payload = "x".repeat(1024 * 1024);
+      const call = (id: number) => ({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: TOOLS[0].name, arguments: { text: payload } },
+      });
+      const batch = await post(harness.url, [call(1), call(2), call(3), call(4)], sid);
+      const body = (await batch.json()) as Array<Record<string, unknown>>;
+      assert.deepEqual(
+        body.map((entry) => entry.id),
+        [1, 2, 3, 4],
+      );
+      const results = body.slice(0, 2) as Array<{ result?: unknown }>;
+      assert.ok(results.every((entry) => entry.result !== undefined), "early calls still answer");
+      const refused = body.slice(2) as Array<{ error?: { message?: string } }>;
+      assert.ok(
+        refused.every((entry) => /batch response exceeds/.test(entry.error?.message ?? "")),
+        JSON.stringify(refused.map((entry) => entry.error)),
+      );
+      // The work is refused, not just the reply: calls 3 and 4 never dispatch.
+      assert.deepEqual(harness.calls, [TOOLS[0].name, TOOLS[0].name]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("refuses an oversized batch instead of executing it", async () => {
     const harness = await startHarness();
     try {

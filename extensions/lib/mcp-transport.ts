@@ -39,6 +39,18 @@ export const SESSION_HEADER = "mcp-session-id";
  */
 const MAX_BATCH_ENTRIES = 32;
 
+/**
+ * Aggregate budget for one batch's replies.
+ *
+ * The entry cap bounds how many tools a batch asks for, not how much they
+ * return: 32 `activate_skill` calls inside a 1 MiB skill cap is 32 MiB retained
+ * in `responses` and serialized in one go, from a client that only has to hold
+ * a loopback token. Each item's reply is measured as it is produced, and the
+ * batch stops asking for more once the budget is spent — the remaining messages
+ * get an error naming the budget instead of the work.
+ */
+const MAX_BATCH_RESPONSE_BYTES = 2 * 1024 * 1024;
+
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
@@ -323,6 +335,8 @@ export class StreamableHTTPServerTransport {
     }
 
     const responses: Record<string, unknown>[] = [];
+    let responseBytes = 0;
+    let overBudget = false;
     for (const message of messages) {
       // Session state is re-checked per item: a batch can be closed partway
       // through, and the remaining messages must not dispatch work.
@@ -340,9 +354,26 @@ export class StreamableHTTPServerTransport {
         );
         continue;
       }
+      if (overBudget) {
+        if (hasId(message)) {
+          responses.push(
+            errorResponse(message.id ?? null, {
+              code: INVALID_REQUEST,
+              message: `batch response exceeds ${MAX_BATCH_RESPONSE_BYTES} bytes`,
+            }),
+          );
+        }
+        continue;
+      }
       try {
         const response = await this.server.handle(message);
-        if (response) responses.push(response);
+        if (response) {
+          responses.push(response);
+          responseBytes += JSON.stringify(response).length;
+          // Checked after the item that spent the budget, so the reply that
+          // crossed the line is still delivered whole rather than truncated.
+          if (responseBytes >= MAX_BATCH_RESPONSE_BYTES) overBudget = true;
+        }
       } catch (error) {
         if (hasId(message)) {
           responses.push(
