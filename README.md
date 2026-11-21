@@ -52,7 +52,7 @@ Your last observed model list is cached in `agy-provider-models.json` beside `ag
 | Pin one exact model id | `model=<id>` |
 | Continue earlier work | `conversation_id`, `continue`, `new_session` |
 | Long runs without steering | `background=true`; the footer tracks the newest run, `agy_tasks` polls, collects, or cancels |
-| Bring Pi context along | `context=summary` or `context=recent` (default: none) |
+| Bring Pi context along | `context=summary` or `context=recent` (default: none); `plan`/`sandbox` ask first, naming what leaves |
 | Inspect agents, sessions, quota | `agy_agents`, `agy_history`, `agy_usage` |
 | Ask agy about itself | `/help`, `/usage`, `/skills`, `/permissions`, `/changelog` (answered by agy, zero tokens) |
 
@@ -85,6 +85,8 @@ Aliases resolve against your live catalog, never a shipped table. An alias is a 
 - The concrete id that actually ran is always reported in the run receipt.
 
 In `accept-edits` mode Pi confirms before writes. The dialog names the model that will actually run, the working directory, the pre-run dirty state, and — when the workspace defines one — the verify loop with the file that defines it (`just ci (justfile)`), because approving the run approves that repository code too. agy's own permission behaviour is controlled by its config and by `skipPermissions` below.
+
+`plan` and `sandbox` cannot modify your workspace, so they run without that dialog — that is what makes them the cheap way to iterate. They do ask before `context` forwarding: the dialog names the mode, the size, and an excerpt of what leaves, because the text reaches agy and, through it, a model provider. Without a UI, or on decline, the run does not happen and nothing is forwarded.
 
 ## Configuration
 
