@@ -250,13 +250,15 @@ function spawnAgyInternal(
     let stderrBytes = 0;
     let stdoutTruncated = false;
     let lineBuffer = "";
+    let discarding = false;
     let runResult: AgyRunResult = { response: "" };
     const decoder = new StringDecoder("utf8");
 
     const processStdoutText = (text: string): void => {
       if (!text) return;
-      const chunk = appendStreamChunk(lineBuffer, text, onProgress);
+      const chunk = appendStreamChunk(lineBuffer, text, onProgress, discarding);
       lineBuffer = chunk.lineBuffer;
+      discarding = chunk.discarding === true;
       for (const line of chunk.lines) {
         runResult = processStreamLine(line, runResult, onProgress);
       }

@@ -96,32 +96,54 @@ export async function describePreRunDirt(
   }
 }
 
+/** Paths git reports as changed, read directly rather than scraped from text. */
+interface ChangedPaths {
+  tracked: string[];
+  untracked: string[];
+}
+
+async function readChangedPaths(cwd: string, signal?: AbortSignal): Promise<ChangedPaths> {
+  const opts = { cwd, maxBuffer: 64 * 1024, signal, timeout: 10_000 };
+  const [workingNames, stagedNames, status] = await Promise.all([
+    execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--name-only"], opts),
+    execFileAsync(
+      "git",
+      [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--name-only"],
+      opts,
+    ),
+    execFileAsync("git", STATUS_ARGS, opts),
+  ]);
+  return {
+    tracked: uniqueLines(`${workingNames.stdout}\n${stagedNames.stdout}`),
+    untracked: status.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("??"))
+      .map((line) => line.slice(2).trim())
+      .filter(Boolean),
+  };
+}
+
 /**
  * Summarize workspace changes after accept-edits. Returns null when clean or not a git repo.
  * Covers staged and unstaged tracked modifications plus untracked files.
+ *
+ * This is display text and is truncated for that purpose. Callers that need to
+ * know *which* files changed must use `readChangedPaths` through
+ * `summarizeGitDiffSince` — parsing this string loses paths past the cut and
+ * can return half a path where it stops.
  */
 export async function summarizeGitDiff(cwd: string, signal?: AbortSignal): Promise<string | null> {
   try {
     const opts = { cwd, maxBuffer: 64 * 1024, signal, timeout: 10_000 };
-    const [workingStat, stagedStat, workingNames, stagedNames, status] = await Promise.all([
+    const [paths, workingStat, stagedStat] = await Promise.all([
+      readChangedPaths(cwd, signal),
       execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--stat"], opts),
       execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--stat"], opts),
-      execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--name-only"], opts),
-      execFileAsync(
-        "git",
-        [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--name-only"],
-        opts,
-      ),
-      execFileAsync("git", [...SAFE_GIT_CONFIG, "status", "--short", "--untracked-files=all"], opts),
     ]);
     const unstagedStat = workingStat.stdout.trim();
     const cachedStat = stagedStat.stdout.trim();
-    const names = uniqueLines(`${workingNames.stdout}\n${stagedNames.stdout}`);
-    const untracked = status.stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith("??"))
-      .map((line) => line.slice(2).trim());
+    const { tracked: names, untracked } = paths;
     if (!unstagedStat && !cachedStat && names.length === 0 && untracked.length === 0) return null;
 
     const sections: string[] = [];
@@ -146,6 +168,10 @@ export async function summarizeGitDiff(cwd: string, signal?: AbortSignal): Promi
  * Filter a post-run summary to files agy newly touched. Files already dirty
  * in the baseline are listed separately so pre-existing work is never
  * misattributed to the delegation.
+ *
+ * The structured lists come from git, never from the display text: the receipt
+ * quotes both the paths and their count, so a path past the display cut (or a
+ * half path at it) would be a wrong statement about what the run did.
  */
 export async function summarizeGitDiffSince(
   baseline: GitBaseline,
@@ -154,70 +180,40 @@ export async function summarizeGitDiffSince(
 ): Promise<{ summary: string | null; newFiles: string[]; preexistingFiles: string[] }> {
   const full = await summarizeGitDiff(cwd, signal);
   if (!full) return { summary: null, newFiles: [], preexistingFiles: [] };
-  if (baseline.unavailable || baseline.dirtyFiles.size === 0) {
-    return { summary: full, newFiles: listChangedFiles(full), preexistingFiles: [] };
-  }
+  let paths: ChangedPaths;
   try {
-    const opts = { cwd, maxBuffer: 64 * 1024, signal, timeout: 10_000 };
-    const [workingNames, stagedNames, status] = await Promise.all([
-      execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--name-only"], opts),
-      execFileAsync(
-        "git",
-        [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--name-only"],
-        opts,
-      ),
-      execFileAsync("git", STATUS_ARGS, opts),
-    ]);
-    const current = new Set<string>();
-    for (const name of uniqueLines(`${workingNames.stdout}\n${stagedNames.stdout}`)) {
-      current.add(name);
-    }
-    for (const line of status.stdout.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("??")) {
-        const file = trimmed.slice(2).trim();
-        if (file) current.add(file);
-      }
-    }
-    const newFiles = [...current].filter((f) => !baseline.dirtyFiles.has(f)).sort();
-    const preexistingFiles = [...current].filter((f) => baseline.dirtyFiles.has(f)).sort();
-    if (newFiles.length === 0) {
-      const note =
-        preexistingFiles.length > 0
-          ? `agy made no newly-dirty files; ${preexistingFiles.length} pre-existing dirty file(s) unchanged in attribution:\n` +
-            preexistingFiles.join("\n")
-          : "agy made no newly-dirty files.";
-      return { summary: note, newFiles, preexistingFiles };
-    }
-    let summary = full;
-    if (preexistingFiles.length > 0) {
-      summary +=
-        `\n\n## pre-existing dirty files (not attributed to agy)\n` + preexistingFiles.join("\n");
-    }
-    return { summary, newFiles, preexistingFiles };
+    paths = await readChangedPaths(cwd, signal);
   } catch (error) {
     if (signal?.aborted) throw error;
-    return { summary: full, newFiles: listChangedFiles(full), preexistingFiles: [] };
+    return {
+      summary: `${full}\n\n(could not list changed paths; attribution unavailable)`,
+      newFiles: [],
+      preexistingFiles: [],
+    };
   }
+  const current = [...new Set([...paths.tracked, ...paths.untracked])];
+  if (baseline.unavailable || baseline.dirtyFiles.size === 0) {
+    return { summary: full, newFiles: current.sort(), preexistingFiles: [] };
+  }
+  const newFiles = current.filter((file) => !baseline.dirtyFiles.has(file)).sort();
+  const preexistingFiles = current.filter((file) => baseline.dirtyFiles.has(file)).sort();
+  if (newFiles.length === 0) {
+    const note =
+      preexistingFiles.length > 0
+        ? `agy made no newly-dirty files; ${preexistingFiles.length} pre-existing dirty file(s) unchanged in attribution:\n` +
+          preexistingFiles.join("\n")
+        : "agy made no newly-dirty files.";
+    return { summary: note, newFiles, preexistingFiles };
+  }
+  let summary = full;
+  if (preexistingFiles.length > 0) {
+    summary +=
+      `\n\n## pre-existing dirty files (not attributed to agy)\n` + preexistingFiles.join("\n");
+  }
+  return { summary, newFiles, preexistingFiles };
 }
 
 function uniqueLines(value: string): string[] {
   return [...new Set(value.split("\n").map((line) => line.trim()).filter(Boolean))];
 }
 
-function listChangedFiles(summary: string): string[] {
-  const files: string[] = [];
-  let inList = false;
-  for (const line of summary.split("\n")) {
-    if (line.startsWith("## changed files") || line.startsWith("## untracked files")) {
-      inList = true;
-      continue;
-    }
-    if (line.startsWith("## ")) {
-      inList = false;
-      continue;
-    }
-    if (inList && line.trim()) files.push(line.trim());
-  }
-  return files;
-}

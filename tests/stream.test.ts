@@ -42,6 +42,33 @@ import {
 import { parseJsonResponse } from "../extensions/lib/parse.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
+describe("oversized record framing", () => {
+  it("does not parse the tail of a discarded record as a new one", () => {
+    const limit = MAX_STREAM_LINE_BYTES;
+    const head = '{"event":"init"';
+    const huge = head + "x".repeat(limit);
+    // First chunk: an oversized, still-unterminated record.
+    const first = appendStreamChunk("", huge);
+    assert.deepEqual(first.lines, []);
+    assert.equal(first.discarding, true);
+    // Second chunk: the rest of that record, then a complete record. Only the
+    // complete record may be delivered — the fragment is not a line.
+    const rest = "yyyy\n" + '{"event":"result","result":{"status":"SUCCESS"}}' + "\n";
+    const second = appendStreamChunk(first.lineBuffer, rest, undefined, first.discarding);
+    assert.deepEqual(second.lines, ['{"event":"result","result":{"status":"SUCCESS"}}']);
+    assert.equal(second.discarding, undefined);
+  });
+
+  it("stays discarding until a newline arrives", () => {
+    const limit = MAX_STREAM_LINE_BYTES;
+    const first = appendStreamChunk("", `{"event":"init"${"x".repeat(limit)}`);
+    assert.equal(first.discarding, true);
+    const middle = appendStreamChunk(first.lineBuffer, "still-no-newline", undefined, true);
+    assert.deepEqual(middle.lines, []);
+    assert.equal(middle.discarding, true);
+  });
+});
+
 describe("appendStreamChunk", () => {
   it("splits complete lines and preserves the remainder", () => {
     const warnings: string[] = [];

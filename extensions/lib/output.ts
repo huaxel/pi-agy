@@ -18,17 +18,27 @@ export function truncate(text: string, max = DEFAULT_MAX_OUTPUT_CHARS): string {
 
   const markerPrefix = "\n\n(Output truncated: ";
   const markerSuffix = " chars omitted)\n\n";
-  let marker = `${markerPrefix}${text.length - max}${markerSuffix}`;
-  const available = max - marker.length;
-  if (available <= 0) return text.slice(0, max);
+  const markerFor = (omitted: number) => `${markerPrefix}${omitted}${markerSuffix}`;
 
-  const headLength = Math.ceil(available / 2);
-  const tailLength = available - headLength;
-  const omitted = text.length - headLength - tailLength;
-  marker = `${markerPrefix}${omitted}${markerSuffix}`;
-  return (
-    text.slice(0, headLength) +
-    marker +
-    (tailLength > 0 ? text.slice(-tailLength) : "")
-  );
+  // The omitted count depends on how much room the marker itself takes, and the
+  // marker's width depends on the omitted count's digits. Reserving space from
+  // the first estimate and then reporting the larger true count crosses a power
+  // of ten with the reserved width, and the result came back one character over
+  // the cap this helper promises. Iterate to the fixed point instead; digits
+  // grow at most a few times before it settles.
+  let marker = markerFor(text.length - max);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const available = max - marker.length;
+    if (available <= 0) return text.slice(0, max);
+    const headLength = Math.ceil(available / 2);
+    const tailLength = available - headLength;
+    const handled = headLength + tailLength;
+    const next = markerFor(text.length - handled);
+    if (next.length === marker.length) {
+      return text.slice(0, headLength) + next + (tailLength > 0 ? text.slice(-tailLength) : "");
+    }
+    marker = next;
+  }
+  // Unreachable with sane inputs; never return more than asked for.
+  return text.slice(0, max);
 }

@@ -64,6 +64,36 @@ const ARGV_CATALOG = {
   "gpt-oss": "gpt-oss-9-9-medium",
 } as const;
 
+describe("truncate", () => {
+  it("never returns more than the cap, including at digit-width boundaries", () => {
+    // The marker's own length depends on the omitted count, whose digit width
+    // depends on that length: reserving room from the first estimate came back
+    // one character over the cap whenever the count crossed a power of ten.
+    const offenders: Array<[number, number, number]> = [];
+    for (let length = 120; length <= 4000; length += 7) {
+      const text = "x".repeat(length);
+      for (const max of [50, 99, 100, 137, 200, 1000, 8000]) {
+        const out = truncate(text, max);
+        if (out.length > max) offenders.push([length, max, out.length]);
+      }
+    }
+    assert.deepEqual(offenders, []);
+  });
+
+  it("keeps both ends and reports the true omitted count", () => {
+    const text = `${"A".repeat(500)}MIDDLE${"Z".repeat(500)}`;
+    const out = truncate(text, 200);
+    assert.ok(out.startsWith("A"));
+    assert.ok(out.endsWith("Z"));
+    const reported = Number(/truncated: (\d+) chars omitted/.exec(out)?.[1]);
+    assert.equal(reported, text.length - (out.length - `
+
+(Output truncated: ${reported} chars omitted)
+
+`.length));
+  });
+});
+
 describe("buildAgyArgs", () => {
   beforeEach(() => {
     resetModelCatalog();

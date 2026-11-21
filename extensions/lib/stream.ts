@@ -189,25 +189,41 @@ export interface StreamChunk {
   lines: string[];
   /** Unterminated remainder to prepend to the next chunk. */
   lineBuffer: string;
+  /** A record was discarded; skip bytes until the next newline. */
+  discarding?: boolean;
 }
 
 /**
  * Accumulate stdout text into newline-delimited records. An unterminated
  * remainder past the bound is discarded with a warning, as are oversized
  * complete records — neighbors are still delivered.
+ *
+ * A discarded record leaves `discarding` set until the next newline. Without
+ * that flag the following chunk's tail — the rest of the record nobody kept —
+ * would look like a fresh line, and a suffix that happens to parse as an
+ * envelope would be applied as one. Which bytes land where depends on how the
+ * OS split stdout, so the same run could succeed or not.
  */
 export function appendStreamChunk(
   lineBuffer: string,
   chunk: string,
   onProgress?: AgyProgressHandler,
+  discarding = false,
 ): StreamChunk {
   const warn = () =>
     onProgress?.("agy: warning — discarded oversized stream record", "status");
-  const combined = lineBuffer + chunk;
+  let text = chunk;
+  if (discarding) {
+    const boundary = text.indexOf("\n");
+    if (boundary === -1) return { lines: [], lineBuffer: "", discarding: true };
+    text = text.slice(boundary + 1);
+    discarding = false;
+  }
+  const combined = lineBuffer + text;
   if (!combined.includes("\n")) {
     if (Buffer.byteLength(combined, "utf8") > MAX_STREAM_LINE_BYTES) {
       warn();
-      return { lines: [], lineBuffer: "" };
+      return { lines: [], lineBuffer: "", discarding: true };
     }
     return { lines: [], lineBuffer: combined };
   }
@@ -216,7 +232,14 @@ export function appendStreamChunk(
   if (Buffer.byteLength(remainder, "utf8") > MAX_STREAM_LINE_BYTES) {
     warn();
     remainder = "";
+    // The record is still arriving; its remaining bytes must be dropped, not
+    // parsed as a new record.
+    return { lines: collectLines(parts, warn), lineBuffer: "", discarding: true };
   }
+  return { lines: collectLines(parts, warn), lineBuffer: remainder };
+}
+
+function collectLines(parts: readonly string[], warn: () => void): string[] {
   const lines: string[] = [];
   for (const line of parts) {
     if (Buffer.byteLength(line, "utf8") > MAX_STREAM_LINE_BYTES) {
@@ -225,7 +248,7 @@ export function appendStreamChunk(
     }
     lines.push(line);
   }
-  return { lines, lineBuffer: remainder };
+  return lines;
 }
 
 function capResponse(response: string): string {

@@ -39,6 +39,7 @@ import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withDirLock } from "../extensions/lib/lock.js";
 import { detectVerifyCommand } from "../extensions/lib/verify.js";
 import {
+  type GitBaseline,
   summarizeGitDiff,
   captureGitBaseline,
   summarizeGitDiffSince,
@@ -97,6 +98,32 @@ describe("change attribution", () => {
     const attribution = await summarizeGitDiffSince(baseline, tmp);
     assert.deepEqual(attribution.newFiles, ["notes/new.md"]);
     assert.deepEqual(attribution.preexistingFiles, ["notes/old.md"]);
+  });
+});
+
+describe("changed-file attribution", () => {
+  it("lists every changed path past the display cut, never the marker", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-trunc-"));
+    await execAsync("git", ["init", "-q"], { cwd: tmp });
+    await writeFile(path.join(tmp, "seed.txt"), "seed\n");
+    await execAsync("git", ["add", "seed.txt"], { cwd: tmp });
+    await execAsync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"], {
+      cwd: tmp,
+    });
+    // Enough names that the display summary is cut well before the last one.
+    const created: string[] = [];
+    for (let index = 0; index < 120; index += 1) {
+      const name = `notes/created-with-a-long-name-${String(index).padStart(3, "0")}.md`;
+      await mkdir(path.join(tmp, "notes"), { recursive: true });
+      await writeFile(path.join(tmp, name), "x\n");
+      created.push(name);
+    }
+    const baseline: GitBaseline = { dirtyFiles: new Set(), unavailable: false };
+    const attribution = await summarizeGitDiffSince(baseline, tmp);
+    assert.equal(attribution.newFiles.length, created.length);
+    assert.deepEqual(attribution.newFiles, [...created].sort());
+    assert.ok(!attribution.newFiles.some((file) => file.includes("truncated")));
+    assert.match(attribution.summary ?? "", /diff summary truncated/);
   });
 });
 

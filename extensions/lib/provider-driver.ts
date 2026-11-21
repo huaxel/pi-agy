@@ -194,6 +194,8 @@ export class AgyProviderDriver {
   private readonly parkBatchMs: number;
   private readonly inactivityMs: number;
   private lineBuffer = "";
+  /** A discarded oversized record is still arriving: skip to the next newline. */
+  private discardingRecord = false;
   private readonly decoder = new StringDecoder("utf8");
   /**
    * Stdout lines that arrived with no turn to route to (startup chatter,
@@ -549,6 +551,7 @@ export class AgyProviderDriver {
     // prior session history is never charged to the first resumed turn.
     this.usageBaseline = resume ? undefined : { ...ZERO_USAGE_BASELINE };
     this.lineBuffer = "";
+    this.discardingRecord = false;
     this.pendingLines = [];
     this.primed = false;
     this.stderrTail = "";
@@ -687,8 +690,14 @@ export class AgyProviderDriver {
   }
 
   private onStdout(data: Buffer): void {
-    const chunk = appendStreamChunk(this.lineBuffer, this.decoder.write(data), undefined);
+    const chunk = appendStreamChunk(
+      this.lineBuffer,
+      this.decoder.write(data),
+      undefined,
+      this.discardingRecord,
+    );
     this.lineBuffer = chunk.lineBuffer;
+    this.discardingRecord = chunk.discarding === true;
     const turn = this.active;
     if (!turn || turn.settled) {
       if (!this.primed) {
@@ -815,6 +824,7 @@ export class AgyProviderDriver {
       this.boundConversationId = turn.runResult.conversation_id;
     }
     this.lineBuffer = "";
+    this.discardingRecord = false;
     const phase = turn.phase;
     turn.phase = undefined;
     const end: DriverTurnEnd = {
