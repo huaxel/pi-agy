@@ -5,3 +5,8 @@ dist/
 *.tgz
 .worksheets/
 .pi/
+
+# deepsec scan artifacts (deepsec-allowance workspace state and exports)
+budget/
+data/
+findings/
