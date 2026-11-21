@@ -227,6 +227,12 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
           const waited = Date.now() - lockStart;
           const remaining = Math.max(5_000, request.timeoutMs - waited);
           const bridge = await ensureProviderBridge(request.dir).catch(() => undefined);
+          const guardError = bridgeGuardError({
+            dir: request.dir,
+            bridgeFailure: bridge ? undefined : providerBridgeFailure(request.dir),
+            skipPermissions: request.skipPermissions,
+          });
+          if (guardError) throw new Error(guardError);
           owned.bridge = bridge;
           const imageRoot = await ensureImageStagingRoot().catch(() => undefined);
           owned.assertValid();
@@ -349,6 +355,15 @@ export function getProviderDriver(dir: string): AgyProviderDriver {
  */
 const providerBridges = new Map<string, McpBridgeHandle | undefined>();
 
+/**
+ * Why a bridge is absent, when it is absent because it failed rather than
+ * because `providerBridge: false` turned it off. The callers need the
+ * difference: a plain turn is safe when the user asked for it and unsafe when
+ * an approval bypass is active, since the bridge is what carries the deny
+ * rules for agy's own shell and write tools.
+ */
+const providerBridgeFailures = new Map<string, string>();
+
 async function ensureProviderBridge(dir: string): Promise<McpBridgeHandle | undefined> {
   const key = path.resolve(dir);
   if (providerBridges.has(key)) return providerBridges.get(key);
@@ -359,12 +374,42 @@ async function ensureProviderBridge(dir: string): Promise<McpBridgeHandle | unde
       // Keep the bridge and its MCP SDK off the extension startup path.
       const { startMcpBridge } = await import("./provider-mcp.js");
       handle = await startMcpBridge(dir);
+      providerBridgeFailures.delete(key);
     }
-  } catch {
+  } catch (error) {
     handle = undefined;
+    providerBridgeFailures.set(key, error instanceof Error ? error.message : String(error));
   }
   providerBridges.set(key, handle);
   return handle;
+}
+
+/** The start failure recorded for this directory, if bridging failed. */
+export function providerBridgeFailure(dir: string): string | undefined {
+  return providerBridgeFailures.get(path.resolve(dir));
+}
+
+/**
+ * Decide whether a turn may proceed when the bridge is absent.
+ *
+ * Three states hide behind an absent bridge: healthy-but-off on purpose
+ * (`providerBridge: false`), not yet attempted, and failed to start. Only the
+ * last one is a surprise, and it is dangerous exactly when an approval bypass
+ * is active — that is when the missing deny rules leave agy's own shell and
+ * write tools unmediated while the turn still looks normal.
+ */
+export function bridgeGuardError(input: {
+  dir: string;
+  bridgeFailure?: string;
+  skipPermissions: boolean;
+}): string | undefined {
+  if (!input.bridgeFailure || !input.skipPermissions) return undefined;
+  return (
+    `agy provider bridge failed to start for ${input.dir}: ${input.bridgeFailure}. ` +
+    "Refusing to run with the permission bypass and no Pi tool policy. " +
+    "Fix the bridge, disable skipPermissions, or set providerBridge: false " +
+    "in agy-config.json to run plain deliberately."
+  );
 }
 
 const providerRunners = new Map<string, ProviderTurnRunner>();
@@ -373,6 +418,10 @@ const providerRunners = new Map<string, ProviderTurnRunner>();
 export async function resetProviderBridges(): Promise<void> {
   const bridges = [...providerBridges.values()];
   providerBridges.clear();
+  // A recorded failure is what refuses the next turn, so a deliberate reset
+  // (bridge toggle, config change) must clear it too — otherwise the refusal
+  // outlives the condition it reported.
+  providerBridgeFailures.clear();
   await Promise.all(
     bridges.map((bridge) => bridge?.stop().catch(() => undefined)),
   );
@@ -419,6 +468,8 @@ export interface ProviderStatus {
   };
   /** Bridge description, when a bridge is running for the directory. */
   bridge?: { toolCount: number; pendingResults: number; listening: boolean };
+  /** Why the bridge failed to start for this directory, when it did. */
+  bridgeFailure?: string;
   /** Suspended turns awaiting Pi tool results. */
   suspended: ProviderStatusSuspended[];
   /** Most recent prompt construction and denied-action observations for this workspace. */
@@ -467,6 +518,7 @@ export function getProviderStatus(dir: string): ProviderStatus {
             listening: description.listening,
           }
         : undefined,
+      bridgeFailure: providerBridgeFailures.get(key),
       diagnostics: providerDiagnostics.get(key),
       suspended,
       stagedImages: getLiveImageStagingCount(),

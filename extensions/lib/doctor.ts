@@ -10,7 +10,7 @@ import {
   isAgyQuotaExhausted,
   type AgyUsageSnapshot,
 } from "./cli.js";
-import { getDefaultConfigPath, loadAgyConfig } from "./config.js";
+import { getDefaultConfigPath, loadAgyConfigState } from "./config.js";
 import { getProviderCatalogProvenance } from "./provider-catalog-store.js";
 import { canonicalDir, getDirLockPath } from "./lock.js";
 import { getProviderStatus } from "./provider.js";
@@ -310,9 +310,9 @@ async function providerCheck(cwd: string, signal?: AbortSignal): Promise<AgyDoct
   try {
     const status = getProviderStatus(cwd);
     // The Config check owns config errors; a bad file must not hide runtime state.
-    const bridgeSetting = await loadAgyConfig(undefined, signal).then(
-      (config) => config.providerBridge,
-      () => undefined,
+    const bridgeSetting = await loadAgyConfigState(undefined, signal).then(
+      (loaded) => (loaded.status === "unreadable" ? ("unreadable" as const) : loaded.config.providerBridge),
+      () => "unreadable" as const,
     );
     throwIfCancelled(signal);
     const catalog = getProviderCatalogProvenance();
@@ -328,7 +328,11 @@ async function providerCheck(cwd: string, signal?: AbortSignal): Promise<AgyDoct
       parts.push("driver idle (no provider turns yet)");
     }
     const bridgeEnabled = bridgeSetting !== false;
-    parts.push(!bridgeEnabled
+    parts.push(bridgeSetting === "unreadable"
+      ? "bridge state unknown (config unreadable)"
+      : status.bridgeFailure
+      ? `bridge failed: ${status.bridgeFailure}`
+      : !bridgeEnabled
       ? "bridge disabled by configuration"
       : status.bridge?.listening
         ? `bridge listening (${status.bridge.toolCount} tools${status.bridge.pendingResults ? `, ${status.bridge.pendingResults} pending` : ""})`

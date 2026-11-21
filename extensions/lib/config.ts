@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -61,42 +62,80 @@ export function getDefaultConfigPath(): string {
   return path.join(agentDir, "agy-config.json");
 }
 
+export type AgyConfigStatus = "ok" | "missing" | "unreadable";
+
+export interface AgyConfigLoad {
+  config: AgyConfig;
+  status: AgyConfigStatus;
+}
+
+/**
+ * Read the config and say how the read went.
+ *
+ * Callers that only need the values use `loadAgyConfig`. Doctor and the bridge
+ * guard also need `status`: "no setting" and "could not read the setting" look
+ * identical in the returned object, and only one of them means the user is
+ * running with an approval bypass because nothing said otherwise.
+ */
+export async function loadAgyConfigState(
+  configPath = getDefaultConfigPath(),
+  signal?: AbortSignal,
+): Promise<AgyConfigLoad> {
+  let text: string;
+  try {
+    text = await readFile(configPath, { encoding: "utf8", signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { config: {}, status: "missing" };
+    }
+    return { config: { skipPermissions: false, providerBridge: false }, status: "unreadable" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  // A missing file is the documented default. Anything else — truncated JSON
+  // from an interrupted write, a permissions error, a bad manual edit, or a
+  // top-level value that is not an object — must not fall back to those
+  // defaults: they are permissive (skipPermissions defaults true), so doing so
+  // would silently restore the bypass the file was written to remove.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { config: { skipPermissions: false, providerBridge: false }, status: "unreadable" };
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const config: AgyConfig = {};
+  if (typeof record.defaultModel === "string") config.defaultModel = record.defaultModel;
+  if (typeof record.defaultModelCommand === "string") {
+    config.defaultModelCommand = record.defaultModelCommand;
+  }
+  if (typeof record.quotaBalancing === "boolean") {
+    config.quotaBalancing = record.quotaBalancing;
+  }
+  if (typeof record.skipPermissions === "boolean") {
+    config.skipPermissions = record.skipPermissions;
+  } else if ("skipPermissions" in record) {
+    // A malformed permission setting must never silently enable bypasses.
+    config.skipPermissions = false;
+  }
+  if (typeof record.providerBridge === "boolean") {
+    config.providerBridge = record.providerBridge;
+  } else if ("providerBridge" in record) {
+    // A malformed bridge setting must never silently open new surface.
+    config.providerBridge = false;
+  }
+  return { config, status: "ok" };
+}
+
 export async function loadAgyConfig(
   configPath = getDefaultConfigPath(),
   signal?: AbortSignal,
 ): Promise<AgyConfig> {
-  try {
-    const parsed: unknown = JSON.parse(
-      await readFile(configPath, { encoding: "utf8", signal }),
-    );
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      const record = parsed as Record<string, unknown>;
-      const config: AgyConfig = {};
-      if (typeof record.defaultModel === "string") config.defaultModel = record.defaultModel;
-      if (typeof record.defaultModelCommand === "string") {
-        config.defaultModelCommand = record.defaultModelCommand;
-      }
-      if (typeof record.quotaBalancing === "boolean") {
-        config.quotaBalancing = record.quotaBalancing;
-      }
-      if (typeof record.skipPermissions === "boolean") {
-        config.skipPermissions = record.skipPermissions;
-      } else if ("skipPermissions" in record) {
-        // A malformed permission setting must never silently enable bypasses.
-        config.skipPermissions = false;
-      }
-      if (typeof record.providerBridge === "boolean") {
-        config.providerBridge = record.providerBridge;
-      } else if ("providerBridge" in record) {
-        // A malformed bridge setting must never silently open new surface.
-        config.providerBridge = false;
-      }
-      return config;
-    }
-  } catch {
-    // Missing or malformed config falls back to defaults.
-  }
-  return {};
+  return (await loadAgyConfigState(configPath, signal)).config;
 }
 
 /**
@@ -117,9 +156,14 @@ export async function saveAgyConfig(
     // Missing or corrupt: start fresh with the patch.
   }
   await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, JSON.stringify({ ...base, ...patch }, null, 2) + "\n", {
-    encoding: "utf8",
-  });
+  const payload = JSON.stringify({ ...base, ...patch }, null, 2) + "\n";
+  // Write-then-rename: an in-place write interrupted mid-stream leaves
+  // truncated JSON, which loadAgyConfig now treats as a permission-relevant
+  // failure. rename is atomic within a filesystem, so readers see either the
+  // old file or the complete new one.
+  const staged = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(staged, payload, { encoding: "utf8" });
+  await rename(staged, configPath);
 }
 
 const cachedCommandAliases = new Map<string, { at: number; alias?: AgyModel }>();

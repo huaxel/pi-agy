@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, stat as statFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat as statFile,
+  writeFile,
+} from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -45,6 +54,28 @@ import {
 import { parseJsonResponse } from "../extensions/lib/parse.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
+describe("git probes cannot execute repository configuration", () => {
+  it("does not run a configured core.fsmonitor program", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-fsmon-"));
+    await execAsync("git", ["init", "-q"], { cwd: tmp });
+    await writeFile(path.join(tmp, "tracked.txt"), "hello\n");
+    const hook = path.join(tmp, "hook.sh");
+    await writeFile(hook, '#!/bin/sh\ntouch "$(dirname "$0")/EXECUTED"\necho "1 .Q"\n');
+    await chmod(hook, 0o755);
+    await execAsync("git", ["config", "core.fsmonitor", hook], { cwd: tmp });
+
+    // Sanity: plain git status does run the hook on this machine, so the case
+    // measures the guard rather than git's own behaviour.
+    const exposed = path.join(tmp, "EXECUTED");
+    await execAsync("git", ["status", "--porcelain"], { cwd: tmp }).catch(() => undefined);
+    assert.equal(await statFile(exposed).then(() => true, () => false), true);
+
+    await rm(exposed);
+    await captureGitBaseline(tmp);
+    assert.equal(await statFile(exposed).then(() => true, () => false), false);
+  });
+});
+
 describe("parsePorcelainStatus", () => {
   it("keeps fixed porcelain columns for unstaged statuses", () => {
     const files = parsePorcelainStatus(" M src.ts\nA  added.ts\nM  staged.ts\n?? untracked.txt\n");

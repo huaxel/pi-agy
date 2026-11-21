@@ -72,7 +72,9 @@ describe("agy doctor", () => {
       process.env.PI_CODING_AGENT_DIR = agentDir;
       try {
         const report = await runAgyDoctor(cwd);
-        assert.match(report.text, /• Provider: driver idle \(no provider turns yet\) · bridge configured, not started · catalog empty/);
+        // Runtime state survives the bad file, and the bridge clause says it
+        // does not know rather than claiming the bridge was turned off.
+        assert.match(report.text, /• Provider: driver idle \(no provider turns yet\) · bridge state unknown \(config unreadable\) · catalog empty/);
       } finally {
         if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = previousDir;

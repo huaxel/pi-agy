@@ -41,6 +41,43 @@ import { parseJsonResponse } from "../extensions/lib/parse.js";
 import { parseAgyCommandArgs } from "../extensions/commands.js";
 import { createSessionStore, getDefaultStorePath } from "../extensions/lib/sessions.js";
 describe("agy config", () => {
+  it("fails closed when the config cannot be read at all", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
+    const file = path.join(tmp, "agy-config.json");
+    // A truncated write is the reachable case: saveAgyConfig used to write in
+    // place, so an interrupted save produced exactly this file.
+    await writeFile(file, '{"skipPermissions": false, "defaultMo');
+    assert.deepEqual(await loadAgyConfig(file), {
+      skipPermissions: false,
+      providerBridge: false,
+    });
+    await chmod(file, 0o000);
+    if (process.getuid?.() !== 0) {
+      assert.deepEqual(await loadAgyConfig(file), {
+        skipPermissions: false,
+        providerBridge: false,
+      });
+    }
+    await chmod(file, 0o600);
+  });
+
+  it("keeps the documented defaults when the config is absent", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
+    assert.deepEqual(await loadAgyConfig(path.join(tmp, "agy-config.json")), {});
+  });
+
+  it("saves by rename so a reader never sees a partial file", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
+    const file = path.join(tmp, "agy-config.json");
+    await saveAgyConfig({ skipPermissions: false }, file);
+    await saveAgyConfig({ defaultModel: "sonnet" }, file);
+    assert.deepEqual(await loadAgyConfig(file), {
+      skipPermissions: false,
+      defaultModel: "sonnet",
+    });
+    assert.deepEqual(await readdir(tmp), ["agy-config.json"]);
+  });
+
   it("reads optional overrides from the agent config", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
     const file = path.join(tmp, "agy-config.json");
@@ -54,12 +91,14 @@ describe("agy config", () => {
     assert.equal(config.quotaBalancing, true);
   });
 
-  it("returns defaults for missing or malformed config", async () => {
+  it("distinguishes a missing config from an unreadable one", async () => {
     assert.deepEqual(await loadAgyConfig(path.join(os.tmpdir(), "missing-agy-config.json")), {});
     const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-config-"));
     const file = path.join(tmp, "agy-config.json");
+    // Present but unparseable is not the same as absent: absent means "use the
+    // documented defaults", which are permissive.
     await writeFile(file, "not json");
-    assert.deepEqual(await loadAgyConfig(file), {});
+    assert.deepEqual(await loadAgyConfig(file), { skipPermissions: false, providerBridge: false });
   });
 
   it("fails closed on malformed permission settings", async () => {

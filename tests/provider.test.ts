@@ -3,7 +3,11 @@ import { PassThrough } from "node:stream";
 import { withTimingFakeAgy, awaitWithWatchdog, nativeSetTimeout, type FakeChild } from "./timing-helpers.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { getProviderDriver, getProviderStatus } from "../extensions/lib/provider.js";
+import {
+  bridgeGuardError,
+  getProviderDriver,
+  getProviderStatus,
+} from "../extensions/lib/provider.js";
 import { BRIDGE_TOKEN_HEADER, DEFAULT_PARK_ESCALATE_MS } from "../extensions/lib/provider-mcp.js";
 import { afterEach, describe, it, mock } from "node:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -105,6 +109,33 @@ function makeStaticRunner(
 function userMessage(text: string): ProviderTranscriptMessage {
   return { role: "user", content: text };
 }
+
+describe("bridge guard", () => {
+  it("refuses a turn whose bridge failed while the bypass is active", () => {
+    const error = bridgeGuardError({
+      dir: "/repo",
+      bridgeFailure: "EADDRINUSE",
+      skipPermissions: true,
+    });
+    assert.match(error ?? "", /bridge failed to start for \/repo: EADDRINUSE/);
+    assert.match(error ?? "", /disable skipPermissions/);
+    assert.match(error ?? "", /providerBridge: false/);
+  });
+
+  it("allows a plain turn when approvals are interactive", () => {
+    assert.equal(
+      bridgeGuardError({ dir: "/repo", bridgeFailure: "EADDRINUSE", skipPermissions: false }),
+      undefined,
+    );
+  });
+
+  it("treats a deliberately disabled bridge as no failure", () => {
+    assert.equal(
+      bridgeGuardError({ dir: "/repo", bridgeFailure: undefined, skipPermissions: true }),
+      undefined,
+    );
+  });
+});
 
 describe("provider prompt rendering", () => {
   it("keeps the latest message authoritative with bounded history", () => {

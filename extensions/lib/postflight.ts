@@ -42,10 +42,24 @@ export function parsePorcelainStatus(stdout: string): Set<string> {
   return dirtyFiles;
 }
 
+/**
+ * Git flags that keep these probes from executing repository configuration.
+ *
+ * `git status` runs the configured `core.fsmonitor` program, and `git diff`
+ * honours `diff.external`/textconv drivers, so a probe whose only job is to
+ * describe the tree could execute whatever a config file names. These
+ * invocations run in a directory the caller (sometimes the model) chose, and
+ * the dirt line is read before the user confirms anything — so they must not
+ * be a way to run code. Verified against git 2.x: the fsmonitor hook fires on
+ * `status --porcelain` and does not fire with `-c core.fsmonitor=false`.
+ */
+const SAFE_GIT_CONFIG = ["-c", "core.fsmonitor=false"];
+const SAFE_DIFF_FLAGS = ["--no-ext-diff", "--no-textconv"];
+
 /** Capture dirty state before accept-edits so the summary can attribute only new changes to agy. */
 export async function captureGitBaseline(cwd: string, signal?: AbortSignal): Promise<GitBaseline> {
   try {
-    const { stdout } = await execFileAsync("git", ["status", "--porcelain"], {
+    const { stdout } = await execFileAsync("git", [...SAFE_GIT_CONFIG, "status", "--porcelain"], {
       cwd,
       maxBuffer: 64 * 1024,
       signal,
@@ -81,11 +95,15 @@ export async function summarizeGitDiff(cwd: string, signal?: AbortSignal): Promi
   try {
     const opts = { cwd, maxBuffer: 64 * 1024, signal, timeout: 10_000 };
     const [workingStat, stagedStat, workingNames, stagedNames, status] = await Promise.all([
-      execFileAsync("git", ["diff", "--stat"], opts),
-      execFileAsync("git", ["diff", "--cached", "--stat"], opts),
-      execFileAsync("git", ["diff", "--name-only"], opts),
-      execFileAsync("git", ["diff", "--cached", "--name-only"], opts),
-      execFileAsync("git", ["status", "--short"], opts),
+      execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--stat"], opts),
+      execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--stat"], opts),
+      execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--name-only"], opts),
+      execFileAsync(
+        "git",
+        [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--name-only"],
+        opts,
+      ),
+      execFileAsync("git", [...SAFE_GIT_CONFIG, "status", "--short"], opts),
     ]);
     const unstagedStat = workingStat.stdout.trim();
     const cachedStat = stagedStat.stdout.trim();
@@ -133,9 +151,13 @@ export async function summarizeGitDiffSince(
   try {
     const opts = { cwd, maxBuffer: 64 * 1024, signal, timeout: 10_000 };
     const [workingNames, stagedNames, status] = await Promise.all([
-      execFileAsync("git", ["diff", "--name-only"], opts),
-      execFileAsync("git", ["diff", "--cached", "--name-only"], opts),
-      execFileAsync("git", ["status", "--porcelain"], opts),
+      execFileAsync("git", [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--name-only"], opts),
+      execFileAsync(
+        "git",
+        [...SAFE_GIT_CONFIG, "diff", ...SAFE_DIFF_FLAGS, "--cached", "--name-only"],
+        opts,
+      ),
+      execFileAsync("git", [...SAFE_GIT_CONFIG, "status", "--porcelain"], opts),
     ]);
     const current = new Set<string>();
     for (const name of uniqueLines(`${workingNames.stdout}\n${stagedNames.stdout}`)) {
