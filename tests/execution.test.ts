@@ -322,7 +322,11 @@ describe("extension registration", () => {
           undefined,
           {
             cwd: workDir,
-            hasUI: false,
+            // `plan` writes nothing, so the accept-edits approval does not
+            // apply; forwarding transcript text still asks, because the text
+            // reaches agy and its provider.
+            hasUI: true,
+            ui: { confirm: async () => true },
             sessionManager: {
               buildContextEntries: () => [
                 { type: "message", message: { role: "system", content: "SYSTEM_SECRET" } },
@@ -399,7 +403,8 @@ describe("extension registration", () => {
           undefined,
           {
             cwd: workDir,
-            hasUI: false,
+            hasUI: true,
+            ui: { confirm: async () => true },
             sessionManager: { buildContextEntries: () => entries },
           },
         );
@@ -1923,9 +1928,20 @@ describe("conversation selection entrypoint parity", () => {
               history: [{ conversation_id: "saved-id", agent: "saved-agent", updated_at: new Date().toISOString() }],
             },
           }));
+          const asks: string[] = [];
           const ctx = {
-            cwd, hasUI: false, waitForIdle: async () => {},
-            ui: { setStatus: () => {}, notify: (message: string) => assert.fail(message) },
+            cwd, hasUI: true, waitForIdle: async () => {},
+            ui: {
+              setStatus: () => {},
+              notify: (message: string) => assert.fail(message),
+              // Only the tool asks: `/agy` was typed by the user, so consent
+              // for forwarding context is already explicit there. Counting the
+              // asks pins that difference between the two entrypoints.
+              confirm: async (title: string) => {
+                asks.push(title);
+                return true;
+              },
+            },
             sessionManager: { buildContextEntries: () => [{ type: "message", message: { role: "user", content: "parity context" } }] },
           };
           const receipts: any[] = [];
@@ -1952,6 +1968,11 @@ describe("conversation selection entrypoint parity", () => {
           }
           assert.equal(prints[0][prints[0].indexOf("-p") + 1], prints[1][prints[1].indexOf("-p") + 1]);
           assert.equal(result.details.context_chars, receipts[0].details.context_chars);
+          // The command forwards context silently; the tool shows what leaves.
+          assert.deepEqual(
+            asks,
+            context === "recent" ? ["Forward Pi transcript to agy (plan)?"] : [],
+          );
         });
       });
     }

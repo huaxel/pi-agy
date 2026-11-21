@@ -29,6 +29,51 @@ export interface AcceptEditsConfirmInput {
   verify?: VerifyCommandSource | null;
 }
 
+export interface ContextForwardConfirmInput {
+  mode: string;
+  /** Rendered model line, same convention as the accept-edits dialog. */
+  modelLabel: string;
+  agent?: string;
+  cwd: string;
+  contextMode: string;
+  contextText?: string;
+  background: boolean;
+}
+
+/**
+ * Dialog for forwarding Pi transcript text to agy in a mode that otherwise
+ * runs silently.
+ *
+ * `plan` and `sandbox` are the cheap iterations — no writes, so no accept-edits
+ * dialog, which is deliberate. Forwarding transcript text is a different act:
+ * it hands conversation content to an external CLI (and its model provider)
+ * that would otherwise never see it, and the tool can do that without the user
+ * having typed anything. This is the only place a human sees it leave, so the
+ * dialog covers the excerpt itself rather than the permission grant.
+ */
+export function buildContextForwardConfirm(input: ContextForwardConfirmInput): {
+  title: string;
+  body: string;
+} {
+  const { mode, modelLabel, agent, cwd, contextMode, contextText, background } = input;
+  const agentLine = agent ? `\nagent: ${agent}` : "";
+  const size = contextText
+    ? `${contextText.length.toLocaleString()} chars; text-only`
+    : "0 chars; no eligible text";
+  const excerpt = (contextText ?? "").slice(0, 200).replace(/\s+/g, " ").trim();
+  const excerptLine = excerpt ? `\n\nexcerpt: ${excerpt}${(contextText?.length ?? 0) > 200 ? "…" : ""}` : "";
+  const backgroundLine = background
+    ? "\n\nThe run is detached: this approval outlives the dialog."
+    : "";
+  return {
+    title: `Forward Pi transcript to agy (${mode})?`,
+    body:
+      `model: ${modelLabel}${agentLine}\ndir: ${cwd}\ncontext: ${contextMode} (${size})${excerptLine}` +
+      `\n\n${mode} writes nothing, so it needs no accept-edits approval — this asks only about the transcript, ` +
+      `which leaves this machine for the model provider.${backgroundLine}`,
+  };
+}
+
 export function buildAcceptEditsConfirm(input: AcceptEditsConfirmInput): {
   title: string;
   body: string;
@@ -55,4 +100,41 @@ export function buildAcceptEditsConfirm(input: AcceptEditsConfirmInput): {
     title: "Run agy (accept-edits)?",
     body: `model: ${modelLabel}${agentLine}\ndir: ${cwd}${dirtLine}${verifyLine}${contextLine}\n\ntask: ${excerpt}\n\nThis grants agy permission to modify files and run commands${verifyClause}.${warning}`,
   };
+}
+
+export interface ContextConsentDeps {
+  hasUI: boolean;
+  confirm: (title: string, body: string) => Promise<boolean>;
+}
+
+/**
+ * Whether this run needs the forwarding dialog.
+ *
+ * `accept-edits` already shows `context:` in its own approval, and `none`
+ * forwards nothing, so the dialog exists for the remaining gap: a silent mode
+ * that would still hand transcript text to agy.
+ */
+export function needsContextConsent(mode: string, contextMode: string): boolean {
+  return mode !== "accept-edits" && contextMode !== "none";
+}
+
+/**
+ * Ask before a silent mode forwards transcript text; throw when it may not.
+ *
+ * Fail-closed on both refusals: no UI means the question cannot be asked, and
+ * declining means the content must not leave. Both raise, because returning a
+ * falsy result would let the caller run the turn anyway.
+ */
+export async function requestContextConsent(
+  input: ContextForwardConfirmInput,
+  deps: ContextConsentDeps,
+): Promise<void> {
+  if (!needsContextConsent(input.mode, input.contextMode)) return;
+  if (!deps.hasUI) {
+    throw new Error(`agy ${input.mode} with context forwarding requires interactive confirmation`);
+  }
+  const { title, body } = buildContextForwardConfirm(input);
+  if (!(await deps.confirm(title, body))) {
+    throw new Error(`agy ${input.mode} cancelled by user`);
+  }
 }

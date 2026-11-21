@@ -25,7 +25,7 @@ import { describePreRunDirt } from "./lib/postflight.js";
 import { detectVerifyCommandSource } from "./lib/verify.js";
 import { resolveModelForApproval } from "./lib/model-approval.js";
 import type { AgyModelId } from "./lib/provider-models.js";
-import { buildAcceptEditsConfirm } from "./lib/confirm.js";
+import { buildAcceptEditsConfirm, requestContextConsent } from "./lib/confirm.js";
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./lib/command-args.js";
 import {
   executeAgyTask,
@@ -274,6 +274,23 @@ export function registerAgyTools(pi: ExtensionAPI): void {
         const approved = await ctx.ui.confirm(title, body);
         if (!approved) throw new Error("agy accept-edits cancelled by user");
       }
+
+      // Every other dialog here grants *writes*. Forwarding transcript text is
+      // the one thing plan and sandbox can do that the user never sees: the
+      // content reaches an external CLI and its model provider, and the call
+      // may have been proposed by the model rather than typed by anyone.
+      await requestContextConsent(
+        {
+          mode,
+          modelLabel: String(params.model ?? params.tier ?? "configured default"),
+          agent,
+          cwd,
+          contextMode: effectiveContextMode,
+          contextText,
+          background: params.background === true,
+        },
+        { hasUI: ctx.hasUI, confirm: (title, body) => ctx.ui.confirm(title, body) },
+      );
 
       if (params.background) {
         const runner = getBackgroundRunner();
