@@ -226,32 +226,26 @@ describe("MCP bridge", () => {
     await withIsolatedAgentDir(async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
       const idleMs = 50;
-      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: idleMs });
+      // Manual sweep: with a 50 ms idle window an automatic reaper can close the
+      // second session between the handshake's requests, which is a race in the
+      // test, not in the cap. Reclaim at a known point instead.
+      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: idleMs, idleSweep: "manual" });
       assert.ok(handle);
       handles.push(handle);
       const token = await readToken(handle.configDir);
+      // Keep the session open: an explicit close terminates it, which frees the
+      // slot without any reaping and would make the assertion vacuous.
       const first = await connectClient(handle.url, token);
-      await first.close();
-      // The reaper closes an idle session on its own timer (here every 50ms),
-      // and `active` returns to 0 between the handshake's requests, so a fixed
-      // sleep raced it: too early left the cap full, while a slow handshake
-      // could also be reaped mid-connect. Wait for the observable condition
-      // instead of guessing a duration.
-      const deadline = Date.now() + 10_000;
-      let second: Awaited<ReturnType<typeof connectClient>> | undefined;
-      for (;;) {
-        try {
-          second = await connectClient(handle.url, token);
-          break;
-        } catch (error) {
-          if (Date.now() > deadline) throw error;
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-      }
+      await assert.rejects(connectClient(handle.url, token), /503|Service Unavailable|Streamable HTTP error/);
+      // Idle past the window, the sweep frees the slot for a new session.
+      await new Promise((resolve) => setTimeout(resolve, idleMs + 10));
+      await handle.reapIdleSessions();
+      const second = await connectClient(handle.url, token);
       try {
         assert.equal((await second.listTools()).tools.length, 5);
       } finally {
         await second.close();
+        await first.close();
       }
     });
   });
@@ -299,7 +293,10 @@ describe("MCP bridge", () => {
   it("releases synchronous completed parks before accepting the callback", async () => {
     await withIsolatedAgentDir(async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
-      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: 60, escalateAfterMs: 10 });
+      // Manual sweep: a 60 ms automatic window can close this session between
+      // the handshake's requests. The release-on-complete behaviour under test
+      // does not need the timer.
+      const handle = await startMcpBridge(dir, { sessionCap: 1, sessionIdleMs: 60, escalateAfterMs: 10, idleSweep: "manual" });
       assert.ok(handle);
       handles.push(handle);
       handle.setTools([{ name: "instant", piName: "instant", description: "Instant", inputSchema: { type: "object" } }]);
@@ -318,6 +315,7 @@ describe("MCP bridge", () => {
         await client.close();
       }
       await new Promise((resolve) => setTimeout(resolve, 150));
+      await handle.reapIdleSessions();
       const fresh = await connectClient(handle.url, token);
       await fresh.close();
     });
@@ -326,7 +324,7 @@ describe("MCP bridge", () => {
   it("keeps a raw HTTP escalated park alive past idle expiry", async () => {
     await withIsolatedAgentDir(async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
-      const handle = await startMcpBridge(dir, { sessionIdleMs: 60, escalateAfterMs: 10 });
+      const handle = await startMcpBridge(dir, { sessionIdleMs: 60, escalateAfterMs: 10, idleSweep: "manual" });
       assert.ok(handle);
       handles.push(handle);
       handle.setTools([{ name: "slow", piName: "slow", description: "Slow", inputSchema: { type: "object" } }]);
@@ -351,7 +349,10 @@ describe("MCP bridge", () => {
       const pendingBody = await pending.text();
       assert.match(pendingBody, /STILL RUNNING/);
       assert.ok(parked);
+      // Well past the idle window, with the sweep driven by hand: an outstanding
+      // park must keep the session alive.
       await new Promise((resolve) => setTimeout(resolve, 120));
+      await handle.reapIdleSessions();
       const ping = await fetch(handle.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ping" }) });
       assert.equal(ping.status, 200);
       await ping.arrayBuffer();
@@ -854,7 +855,7 @@ describe("MCP bridge", () => {
     await withIsolatedAgentDir(async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-mcp-dir-"));
       // Escalate quickly after 50ms for testing
-      const handle = await startMcpBridge(dir, { escalateAfterMs: 50, sessionIdleMs: 50 });
+      const handle = await startMcpBridge(dir, { escalateAfterMs: 50, sessionIdleMs: 50, idleSweep: "manual" });
       assert.ok(handle);
       handles.push(handle);
       handle.setTools([

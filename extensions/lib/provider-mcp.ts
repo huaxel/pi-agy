@@ -238,6 +238,8 @@ export interface McpBridgeHandle {
   failAllParks: (message: string) => void;
   /** Release call IDs whose owning provider operation can no longer poll them. */
   discardParks: (callIds: Iterable<string>) => void;
+  /** Close sessions idle past `sessionIdleMs`; also runs on a timer unless `idleSweep: "manual"`. */
+  reapIdleSessions: () => Promise<void>;
   /** Point-in-time description for status surfaces. */
   describe: () => { configDir: string; url: string; toolCount: number; pendingResults: number; listening: boolean };
 }
@@ -265,6 +267,13 @@ export interface StartMcpBridgeOptions {
   escalateAfterMs?: number;
   sessionCap?: number;
   sessionIdleMs?: number;
+  /**
+   * `"manual"` leaves idle reclamation to `reapIdleSessions()` instead of the
+   * timer. A millisecond `sessionIdleMs` otherwise races a handshake's several
+   * requests — `active` returns to zero between them — and closes a session the
+   * caller is still establishing.
+   */
+  idleSweep?: "auto" | "manual";
 }
 
 /**
@@ -572,13 +581,21 @@ export async function startMcpBridge(
     await session.transport.close().catch(() => undefined);
     await session.mcp.close().catch(() => undefined);
   };
-  const sweep = setInterval(() => {
+  const reapIdleSessions = async (): Promise<void> => {
     const now = Date.now();
+    const idle: Array<[string, BridgeSession]> = [];
     for (const [id, session] of sessions) {
-      if (session.active === 0 && session.parks === 0 && now - session.last >= sessionIdleMs) void closeSession(id, session);
+      if (session.active === 0 && session.parks === 0 && now - session.last >= sessionIdleMs) idle.push([id, session]);
     }
-  }, Math.max(50, Math.min(sessionIdleMs, 60_000)));
-  sweep.unref();
+    await Promise.all(idle.map(([id, session]) => closeSession(id, session)));
+  };
+  const sweep =
+    options?.idleSweep === "manual"
+      ? undefined
+      : setInterval(() => {
+          void reapIdleSessions();
+        }, Math.max(50, Math.min(sessionIdleMs, 60_000)));
+  sweep?.unref();
 
   const configDir = allocateBridgeConfigDir();
   // Filled after bind; the request handler validates Host against it
@@ -792,6 +809,7 @@ export async function startMcpBridge(
       completePark,
       failAllParks,
       discardParks,
+      reapIdleSessions,
     };
   } catch {
     try {
