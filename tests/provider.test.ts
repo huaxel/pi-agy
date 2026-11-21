@@ -1298,6 +1298,13 @@ describe("provider status", () => {
   });
 });
 
+/**
+ * Hang guard for a fixture turn, not a latency assertion: the fake agy answers in
+ * milliseconds, but a spawn plus a discovery round trip took 9.1 s while another
+ * suite ran on the same machine. A tight bound turned that load into a failure.
+ */
+const TURN_HANG_GUARD_MS = 30_000;
+
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -1429,7 +1436,7 @@ async function runRegisteredCatalogScenario(withOptions: boolean): Promise<strin
           ];
           try {
             const stream = provider!.streamSimple!({ id: "gemini-3-8-flash" }, { messages }, withOptions ? {} : undefined);
-            const completed = await withTimeout(stream.result(), 3_000);
+            const completed = await withTimeout(stream.result(), TURN_HANG_GUARD_MS);
             assert.equal(completed.stopReason, "stop");
           } finally {
             await closeProviderDrivers();
@@ -1495,7 +1502,7 @@ describe("provider registration", () => {
           ]);
           // The originally registered handler must see the refreshed catalog too.
           const stream = providers[0].streamSimple!({ id: "argon" }, { messages: [userMessage("hello")] }, { reasoning: "high" });
-          assert.equal((await withTimeout(stream.result(), 3_000)).stopReason, "stop");
+          assert.equal((await withTimeout(stream.result(), TURN_HANG_GUARD_MS)).stopReason, "stop");
           assert.equal(seen.length, 1);
           assert.equal(seen[0].fullModel, "argon");
           assert.equal(seen[0].effort, undefined);
