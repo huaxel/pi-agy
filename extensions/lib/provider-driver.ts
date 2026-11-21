@@ -771,7 +771,17 @@ export class AgyProviderDriver {
       );
       return;
     }
-    if ((result.denied_actions?.length ?? 0) > 0 && !result.response_complete && !turn.text) {
+    // The terminal response is authoritative when present (identical final
+    // text to the per-turn runner); streamed deltas already reached the UI.
+    // Presence, not truthiness: an explicit empty response is still an answer,
+    // and `!response_complete` alone missed it because an empty string sets the
+    // flag too.
+    const terminalText = result.response_complete ? (result.response ?? "") : undefined;
+    const text = terminalText ?? turn.text;
+    // Content, not completeness — the same test the one-shot runner applies
+    // (spawn.ts). A turn that denied everything and said nothing is a failure,
+    // even though its envelope is complete.
+    if ((result.denied_actions?.length ?? 0) > 0 && !text.trim()) {
       this.settleError(
         turn,
         new Error(
@@ -780,11 +790,9 @@ export class AgyProviderDriver {
       );
       return;
     }
-    // The terminal response is authoritative when present (identical final
-    // text to the per-turn runner); streamed deltas already reached the UI.
-    let text = result.response_complete && result.response ? result.response : turn.text;
-    if (text.length > MAX_TURN_TEXT_CHARS) {
-      text = text.slice(0, MAX_TURN_TEXT_CHARS);
+    let capped = text;
+    if (capped.length > MAX_TURN_TEXT_CHARS) {
+      capped = capped.slice(0, MAX_TURN_TEXT_CHARS);
       turn.truncated = true;
     }
     let usage: NormalizedProviderUsage | undefined;
@@ -795,7 +803,7 @@ export class AgyProviderDriver {
       }
       this.usageBaseline = validatedUsage;
     }
-    this.settleDone(turn, { text, usage });
+    this.settleDone(turn, { text: capped, usage });
   }
 
   private settleDone(

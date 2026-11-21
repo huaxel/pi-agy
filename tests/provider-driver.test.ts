@@ -302,6 +302,37 @@ describe("persistent provider driver", () => {
     });
   });
 
+  it("treats an empty terminal response with denied actions as a failure", async () => {
+    const bin = await mkdtemp(path.join(os.tmpdir(), "pi-agy-denied-bin-"));
+    await writeFile(
+      path.join(bin, "agy"),
+      `#!/usr/bin/env bash
+set -eu
+printf '%s\n' '{"event":"init","init":{"model":"fake"}}'
+while IFS= read -r _line; do
+  printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"write"}],"conversation_id":"conv-denied"}}'
+done
+`,
+    );
+    await chmod(path.join(bin, "agy"), 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`;
+    try {
+      const driver = track(new AgyProviderDriver());
+      const dir = await tempDir();
+      // The envelope is complete (`response` is a string), so a completeness
+      // check treated this as a successful empty turn while agy had denied
+      // every action.
+      await assert.rejects(
+        driver.turn({ ...profile, dir }, turnOptions()),
+        /denied all actions for this turn/,
+      );
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
   it("streams live text deltas during the turn", async () => {
     await withPersistentFakeAgy(async () => {
       const driver = track(new AgyProviderDriver());
