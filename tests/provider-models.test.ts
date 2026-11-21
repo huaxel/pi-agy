@@ -175,6 +175,24 @@ describe("provider catalog", () => {
       }),
       { type: "object", properties: { a: { type: "string" }, b: { type: "number" } }, required: ["a", "b"] },
     );
+    // allOf with a constraint the merge cannot carry is left composed: dropping
+    // `additionalProperties: false` would advertise arguments the tool rejects.
+    const constrained = {
+      allOf: [
+        { type: "object", properties: { a: { type: "string" } }, additionalProperties: false },
+        { type: "object", properties: { b: { type: "number" } } },
+      ],
+    };
+    assert.deepEqual(schemaOf(constrained), constrained);
+    // Two branches constraining one property are a conjunction, not last-wins.
+    const overlapping = {
+      allOf: [
+        { type: "object", properties: { a: { type: "string" } } },
+        { type: "object", properties: { a: { minLength: 3 } } },
+      ],
+    };
+    assert.deepEqual(schemaOf(overlapping), overlapping);
+
     // A genuinely ambiguous root keeps its branches: emptying it would tell the
     // model the tool takes no arguments and make every call fail.
     const ambiguous = { oneOf: [{ type: "object", properties: { a: { type: "string" } } }, { type: "object", properties: { b: { type: "number" } } }] };

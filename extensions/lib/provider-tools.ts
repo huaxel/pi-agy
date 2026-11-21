@@ -87,6 +87,19 @@ function unwrapRootComposition(
     for (const branch of branches) {
       const record = jsonClone(branch);
       if (!record || !isObjectSchema(record)) return undefined;
+      // Flatten only where it is provably equivalent. `type`, `properties` and
+      // `required` are the keywords this merge carries over; a branch that also
+      // states `additionalProperties`, `dependentRequired`, `patternProperties`
+      // or anything else would have that constraint silently dropped, which
+      // advertises arguments the real Pi tool rejects.
+      for (const key of Object.keys(record)) {
+        if (key !== "type" && key !== "properties" && key !== "required") return undefined;
+      }
+      // Two branches constraining one property are a conjunction, not a
+      // last-one-wins assignment.
+      for (const key of Object.keys(record.properties as Record<string, unknown>)) {
+        if (Object.hasOwn(properties, key)) return undefined;
+      }
       Object.assign(properties, record.properties as Record<string, unknown>);
       if (Array.isArray(record.required)) {
         for (const key of record.required) if (typeof key === "string") required.add(key);
