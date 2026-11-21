@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
-import { access, readFile, realpath } from "node:fs/promises";
+import { access, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
+
+import { MAX_MARKER_BYTES, readFileBounded } from "./safe-read.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -123,13 +125,19 @@ async function detectVerifyCommandAt(
   cwd: string,
   deps: VerifyDetectionDeps,
 ): Promise<DetectedVerify | null> {
-  const justfile = await findJustCi(cwd);
+  const justfile = await findJustCi(cwd, deps.signal);
   if (justfile && (await (deps.justAvailable?.() ?? justBinaryAvailable()))) {
     return { command: "just ci", definedIn: justfile, dir: cwd };
   }
 
+  const manifest = await readFileBounded(
+    path.join(cwd, "package.json"),
+    { maxBytes: MAX_MARKER_BYTES },
+    deps.signal,
+  );
   try {
-    const pkg = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8")) as PackageJson;
+    if (manifest === null) throw new Error("no usable package.json");
+    const pkg = JSON.parse(manifest) as PackageJson;
     const scripts = pkg.scripts ?? {};
     const runner = await detectPackageRunner(cwd, pkg.packageManager);
     const definedIn = "package.json";
@@ -143,20 +151,24 @@ async function detectVerifyCommandAt(
     // no package.json or unreadable package metadata
   }
 
-  const uv = await detectUvCommand(cwd);
+  const uv = await detectUvCommand(cwd, deps.signal);
   return uv ? { command: uv, definedIn: "pyproject.toml", dir: cwd } : null;
 }
 
 /** The Justfile spelling that defines a `ci` recipe, if any. */
-async function findJustCi(cwd: string): Promise<string | null> {
+async function findJustCi(cwd: string, signal?: AbortSignal): Promise<string | null> {
   for (const filename of ["justfile", "Justfile", ".justfile"]) {
-    try {
-      const justfile = await readFile(path.join(cwd, filename), "utf8");
-      if (justfile.split("\n").some((line) => /^(?:alias\s+)?ci\s*(?::|:=)/.test(line))) {
-        return filename;
-      }
-    } catch {
-      // try the next Justfile spelling
+    // Bounded and regular-file-only: a marker symlinked to a character device
+    // or a multi-gigabyte file is not a Justfile, and reading it to EOF would
+    // hang or exhaust the host before the walk ever reached its boundary.
+    const justfile = await readFileBounded(
+      path.join(cwd, filename),
+      { maxBytes: MAX_MARKER_BYTES },
+      signal,
+    );
+    if (!justfile) continue;
+    if (justfile.split("\n").some((line) => /^(?:alias\s+)?ci\s*(?::|:=)/.test(line))) {
+      return filename;
     }
   }
   return null;
@@ -179,13 +191,13 @@ async function justBinaryAvailable(): Promise<boolean> {
 }
 
 /** Python projects: `uv run pytest` when pyproject uses uv and references pytest. */
-async function detectUvCommand(cwd: string): Promise<string | null> {
-  let pyproject: string;
-  try {
-    pyproject = await readFile(path.join(cwd, "pyproject.toml"), "utf8");
-  } catch {
-    return null;
-  }
+async function detectUvCommand(cwd: string, signal?: AbortSignal): Promise<string | null> {
+  const pyproject = await readFileBounded(
+    path.join(cwd, "pyproject.toml"),
+    { maxBytes: MAX_MARKER_BYTES },
+    signal,
+  );
+  if (pyproject === null) return null;
   const hasUv = (await fileExists(path.join(cwd, "uv.lock"))) || pyproject.includes("[tool.uv]");
   const hasPytest = pyproject.includes("pytest");
   return hasUv && hasPytest ? "uv run pytest" : null;
@@ -223,8 +235,12 @@ function runScript(runner: string, script: string): string {
 
 // Kept alongside detectVerifyCommand: tests imported it from cli in upstream.
 export async function detectVerifyCommandFromPackageJson(cwd: string): Promise<string | null> {
+  const manifest = await readFileBounded(path.join(cwd, "package.json"), {
+    maxBytes: MAX_MARKER_BYTES,
+  });
+  if (manifest === null) return null;
   try {
-    const pkg = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
+    const pkg = JSON.parse(manifest);
     if (pkg?.scripts?.test) return "npm test";
   } catch {
     // ignore
