@@ -235,7 +235,7 @@ describe("provider streamSimple", () => {
       }),
     });
     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("hi")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await settleStream(factory);
     const types = factory.events.map((event) => event.type);
     assert.deepEqual(types, ["start", "text_start", "text_delta", "text_delta", "text_end", "done", "__end"]);
     const done = factory.events.find((event) => event.type === "done") as unknown as {
@@ -259,7 +259,7 @@ describe("provider streamSimple", () => {
       }),
     });
     streamSimple({ id: "claude-sonnet-4-6" }, [userMessage("edit foo")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await settleStream(factory);
     const types = factory.events.map((event) => event.type);
     assert.equal(types.includes("thinking_start"), false);
     assert.equal(types.includes("thinking_delta"), false);
@@ -280,7 +280,7 @@ describe("provider streamSimple", () => {
       }),
     });
     streamSimple({ id: "nope" }, [userMessage("hi")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => factory.events.some((event) => event.type === "error"), "the unknown-model error");
     assert.equal(spawned, false);
     const error = factory.events.find((event) => event.type === "error") as unknown as {
       error: { stopReason: string; errorMessage: string };
@@ -308,14 +308,14 @@ describe("provider streamSimple", () => {
     });
     const controller = new AbortController();
     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("one")], { signal: controller.signal, reasoning: "low" });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => seen.length === 1, "the first turn");
     // A follow-up turn (prior assistant message present) resumes.
     streamSimple(
       { id: "gemini-3-8-flash" },
       [userMessage("one"), { role: "assistant", content: "ok" }, userMessage("two")],
       { signal: controller.signal },
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => seen.length === 2, "the second turn");
     assert.equal(seen.length, 2);
     assert.equal(seen[0].fullModel, "gemini-3.8-flash");
     assert.equal(seen[0].effort, "low");
@@ -327,7 +327,7 @@ describe("provider streamSimple", () => {
 
   it("only resumes a recorded conversation this transcript continues", async () => {
     await withIsolatedAgentDir(async () => {
-      const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50));
+      const settle = (turns: number): Promise<void> => waitFor(() => seen.length >= turns, `recorded turn ${turns}`);
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-resume-"));
       const seen: Array<string | undefined> = [];
       // A fresh factory per "Pi session": the in-memory resume map is per
@@ -344,10 +344,10 @@ describe("provider streamSimple", () => {
 
       const first = [userMessage("one")];
       session()({ id: "gemini-3-8-flash" }, first, {});
-      await settle();
+      await settle(1);
       const second = [...first, { role: "assistant", content: "ok" }, userMessage("two")];
       session()({ id: "gemini-3-8-flash" }, second, {});
-      await settle();
+      await settle(2);
       assert.deepEqual(seen, [undefined, "conv-new"]);
 
       // The record describes `second`; only its continuation may claim it.
@@ -356,14 +356,14 @@ describe("provider streamSimple", () => {
         [...second, { role: "assistant", content: "ok" }, userMessage("three")],
         {},
       );
-      await settle();
+      await settle(3);
       assert.deepEqual(seen, [undefined, "conv-new", "conv-new"]);
     });
   });
 
   it("does not append another session's transcript to a recorded conversation", async () => {
     await withIsolatedAgentDir(async () => {
-      const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50));
+      const settle = (turns: number): Promise<void> => waitFor(() => seen.length >= turns, `recorded turn ${turns}`);
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-resume-other-"));
       const seen: Array<string | undefined> = [];
       const session = (): ((model: { id: string }, messages: unknown[], options: object) => unknown) =>
@@ -378,13 +378,13 @@ describe("provider streamSimple", () => {
 
       const mine = [userMessage("one")];
       session()({ id: "gemini-3-8-flash" }, mine, {});
-      await settle();
+      await settle(1);
       session()(
         { id: "gemini-3-8-flash" },
         [...mine, { role: "assistant", content: "ok" }, userMessage("two")],
         {},
       );
-      await settle();
+      await settle(2);
       seen.length = 0;
 
       // Another Pi session in the same workspace and model. It has prior
@@ -396,7 +396,7 @@ describe("provider streamSimple", () => {
         [userMessage("unrelated"), { role: "assistant", content: "other provider" }, userMessage("go")],
         {},
       );
-      await settle();
+      await settle(1);
       assert.deepEqual(seen, [undefined]);
     });
   });
@@ -414,7 +414,7 @@ describe("provider streamSimple", () => {
     });
     // User message only: must not inherit a stale recorded conversation.
     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("fresh start")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => seen.length === 1, "the fresh turn");
     assert.deepEqual(seen, [undefined]);
     });
   });
@@ -434,7 +434,7 @@ describe("provider streamSimple", () => {
       [userMessage("a"), { role: "assistant", content: "b" }, userMessage("c")],
       {},
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await settleStream(factory);
     const done = factory.events.find((event) => event.type === "done") as unknown as {
       reason: string;
       message: { stopReason: string };
@@ -461,7 +461,7 @@ describe("provider streamSimple", () => {
       }),
     });
     streamSimple({ id: "claude-sonnet-4-6" }, [userMessage("edit foo")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await settleStream(factory);
     const types = factory.events.map((event) => event.type);
     assert.ok(types.includes("thinking_start"));
     assert.ok(types.includes("thinking_delta"));
@@ -997,7 +997,7 @@ describe("provider tool round-trip", () => {
       runner,
     });
     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("first")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await settleStream(factory);
     const toolUse = factory.events.find((event) => event.type === "done") as unknown as {
       message: { content: Array<{ type: string; id: string }> };
     };
@@ -1012,7 +1012,7 @@ describe("provider tool round-trip", () => {
       ],
       {},
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => cancels === 1 && runs === 2, "the cancelling turn");
     assert.equal(cancels, 1);
     assert.equal(runs, 2);
     const dones = factory.events.filter((event) => event.type === "done") as unknown as Array<{
@@ -1045,7 +1045,7 @@ describe("provider tool round-trip", () => {
     });
     // No suspended turn exists and no toolResult matches: plain fresh run.
     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("hi")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => runs === 1, "the fresh run");
     assert.equal(runs, 1);
     });
   });
@@ -1198,7 +1198,7 @@ describe("provider image staging", () => {
       [{ role: "user", content: [{ type: "text", text: "describe" }, imageBlock()] }],
       {},
     );
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitFor(() => /attached image saved at \S+\.png/.test(seenPrompt), "the staged path in the prompt");
     const match = /attached image saved at (\S+\.png)/.exec(seenPrompt);
     assert.ok(match, "prompt must reference the staged file");
     const { stat } = await import("node:fs/promises");
@@ -1233,7 +1233,7 @@ describe("provider image staging", () => {
       [{ role: "user", content: [{ type: "text", text: "read this" }, imageBlock()] }],
       {},
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => prompts.length > 0, "the parked turn");
     const match = /attached image saved at (\S+\.png)/.exec(prompts[0]);
     assert.ok(match);
     const { stat } = await import("node:fs/promises");
@@ -1289,7 +1289,7 @@ describe("provider status", () => {
       dir,
     });
     streamSimple({ id: "gemini-3-8-flash" }, [userMessage("go")], {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => getProviderStatus(dir).suspended.length === 1, "the suspended turn");
     const status = getProviderStatus(dir);
     assert.equal(status.suspended.length, 1);
     assert.equal(status.suspended[0].toolName, "read");
@@ -1297,6 +1297,26 @@ describe("provider status", () => {
     });
   });
 });
+
+/**
+ * Wait until `predicate` holds. A fixed sleep after starting a turn is a bet on
+ * machine load: under a parallel suite the same 50 ms sometimes carried the
+ * whole turn and sometimes none of it, which is how this file's flakes showed
+ * up. Polling for the condition the assertion needs is the same wait without
+ * the bet, and it still fails (with a label) rather than hanging.
+ */
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/** Resolve once a recorded turn has finished (the factory's `__end` marker). */
+function settleStream(factory: { events: Array<Record<string, unknown>> }): Promise<void> {
+  return waitFor(() => factory.events.some((event) => event.type === "__end"), "stream end");
+}
 
 /**
  * Hang guard for a fixture turn, not a latency assertion: the fake agy answers in
