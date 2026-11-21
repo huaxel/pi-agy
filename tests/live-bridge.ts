@@ -5,10 +5,11 @@
  * native usage. Neither can prove the two behaviours that only exist when a
  * real `agy` child talks to the loopback MCP bridge:
  *
- *   1. `--settings` `permissions.deny` actually stops a built-in tool that Pi
- *      shadows with a bridged one (`buildProviderPermissionSettings`). Proven with a
- *      positive and a negative control around a filesystem side effect, so a
- *      passing run cannot be an artifact of the model declining to act.
+ *   1. `--settings` `permissions.deny` actually stops a built-in tool
+ *      (`buildProviderPermissionSettings`), which is what keeps agy's own shell
+ *      and write tools out of a bridged turn. Proven with a positive and a
+ *      negative control around a filesystem side effect, so a passing run
+ *      cannot be an artifact of the model declining to act.
  *   2. Parallel bridged tool calls collapse into one parked phase
  *      (`notifyPark` batching) instead of one Pi turn per call.
  *

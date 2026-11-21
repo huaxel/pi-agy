@@ -100,8 +100,9 @@ export interface ProviderTurnCallbacks {
  *
  * Intentionally emits only `deny` rules (no blanket `allow`) so other MCP
  * servers keep the user's configured permission policy. Verified against agy
- * 1.5.13 by `npm run test:bridge`: the document holds despite
- * `--dangerously-skip-permissions`, and the same request without it succeeds.
+ * 1.5.14 by `npm run test:bridge`: agy reports the request as "blocked by a
+ * permission check matching a user-configured deny rule", the file is never
+ * created, and the same request without the document does run.
  */
 export function buildProviderPermissionSettings(): string {
   return JSON.stringify({ permissions: { deny: ["command(*)", "write_file(*)"] } });
