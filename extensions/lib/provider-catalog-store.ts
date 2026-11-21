@@ -15,6 +15,7 @@
  * corrupt or unwritable cache degrades to today's empty-start behaviour.
  */
 
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 
@@ -138,7 +139,13 @@ export function saveProviderCatalogCache(
 ): void {
   if (entries.length === 0) return;
   const target = providerCatalogCachePath(configPath);
-  const temp = `${target}.${process.pid}.tmp`;
+  // A predictable `${target}.${pid}.tmp` name is a clobber primitive: anyone
+  // who can write in the agent directory can plant a symlink there and have a
+  // successful refresh follow it and truncate whatever it points at. The name
+  // is unguessable and `wx` refuses to open a file that already exists, so the
+  // only file this can ever write is the one it just created.
+  const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  let created = false;
   try {
     mkdirSync(path.dirname(target), { recursive: true });
     const payload = JSON.stringify(
@@ -146,10 +153,13 @@ export function saveProviderCatalogCache(
       null,
       2,
     );
-    writeFileSync(temp, payload, { encoding: "utf8", mode: 0o600 });
+    writeFileSync(temp, payload, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    created = true;
     renameSync(temp, target);
   } catch {
-    // Best effort: an unwritable cache must never fail a refresh.
+    // Best effort: an unwritable cache must never fail a refresh. `wx` failing
+    // means the path was not ours, so only a file this call created is removed.
+    if (!created) return;
     try {
       unlinkSync(temp);
     } catch {

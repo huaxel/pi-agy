@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import * as os from "node:os";
 import * as path from "node:path";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
 import {
@@ -24,6 +24,34 @@ const configPathIn = async (): Promise<{ dir: string; configPath: string; cleanu
 };
 
 describe("provider catalog store", () => {
+  it("cannot be pointed at another file through a planted temp symlink", async () => {
+    const { dir, configPath, cleanup } = await configPathIn();
+    try {
+      // The writer used `${target}.${pid}.tmp`, which anyone who can write in
+      // this directory can predict; a symlink left there made a successful
+      // refresh truncate whatever it pointed at.
+      const victim = path.join(dir, "victim.txt");
+      await writeFile(victim, "keep me");
+      await symlink(victim, `${providerCatalogCachePath(configPath)}.${process.pid}.tmp`);
+
+      saveProviderCatalogCache([{ full: "gemini-3.8-flash", id: "flash-medium" }], configPath);
+
+      assert.equal(await readFile(victim, "utf8"), "keep me");
+      assert.deepEqual(
+        loadProviderCatalogCache(configPath).map((entry) => entry.id),
+        ["flash-medium"],
+      );
+      // The symlink is not ours, so it is left alone rather than unlinked.
+      assert.deepEqual((await readdir(dir)).sort(), [
+        "agy-provider-models.json",
+        `agy-provider-models.json.${process.pid}.tmp`,
+        "victim.txt",
+      ].sort());
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("returns nothing before a roster has been observed", async () => {
     const { configPath, cleanup } = await configPathIn();
     try {
