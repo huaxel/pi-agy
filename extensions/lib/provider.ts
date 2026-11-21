@@ -245,7 +245,9 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
           });
           if (guardError) throw new Error(guardError);
           owned.bridge = bridge;
-          const imageRoot = await ensureImageStagingRoot().catch(() => undefined);
+          // Workspace-scoped: this child may read its own workspace's staged
+          // attachments, never another workspace's.
+          const imageRoot = await ensureImageStagingRoot(request.dir).catch(() => undefined);
           owned.assertValid();
           const fingerprint = bridgeToolsFingerprint(request.bridgedTools);
           driver.onParksOrphaned = (message) => {
@@ -871,7 +873,10 @@ export function createAgyStreamSimple(
           // on each delivered tool result are staged per tool call.
           const deliveries: ProviderToolDelivery[] = [];
           for (const { call, bodies } of deliveredByCall) {
-            const deliveryImages = await stageImages(collectImageBlocks(messages, call.toolCallId));
+            const deliveryImages = await stageImages(
+              collectImageBlocks(messages, call.toolCallId),
+              dir,
+            );
             resumeCleanups.push(deliveryImages.cleanup);
             const imageRefs = [...deliveryImages.paths.values()];
             for (const body of bodies) {
@@ -960,7 +965,7 @@ export function createAgyStreamSimple(
           if (canDelta) {
             const deltaSync = sync!;
             const deltaMessages = messages.slice(deltaSync.syncedInputCount + 1);
-            const staged = await stageImages(collectImageBlocks(deltaMessages));
+            const staged = await stageImages(collectImageBlocks(deltaMessages), dir);
             pendingImageCleanups.push(staged.cleanup);
             prompt = renderProviderDeltaPrompt(deltaMessages, staged.paths);
           } else {
@@ -968,7 +973,7 @@ export function createAgyStreamSimple(
             // paths render inline, failures degrade to omitted notes. Held
             // for the driver turn: terminal settle below cleans it, a park
             // carries it into the suspension.
-            const staged = await stageImages(collectImageBlocks(messages));
+            const staged = await stageImages(collectImageBlocks(messages), dir);
             pendingImageCleanups.push(staged.cleanup);
             prompt = renderProviderPrompt(messages, systemPrompt || undefined, staged.paths, {
               bridgedToolNames: bridgedTools.map((tool) => tool.name),

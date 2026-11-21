@@ -150,7 +150,7 @@ function decodeImageData(data: string): Buffer | undefined {
   }
 }
 
-/** Process-stable staging root (0700): per-turn subdirs, one --add-dir. */
+/** Process-stable staging root (0700): per-workspace subdirs, per-turn files. */
 let imageStagingRoot: string | undefined;
 
 /** Live staging dirs (teardown sweep; per-turn cleanup disposes handles). */
@@ -160,8 +160,25 @@ export function getLiveImageStagingCount(): number {
   return liveStagingDirs.size;
 }
 
-/** Resolve (creating once) the process staging root for agy --add-dir. */
-export async function ensureImageStagingRoot(): Promise<string> {
+/**
+ * Workspace-scoped staging root for `--add-dir`.
+ *
+ * Every agy child in the process used to receive the same staging root, so a
+ * model running in one workspace could list and read the attachments another
+ * workspace had staged for its own turn (overlapping turns, including a turn
+ * parked on Pi tools). One root per workspace keeps staging readable by the
+ * child that needs it and nothing else; the shared parent stays 0700.
+ */
+export async function ensureImageStagingRoot(workspaceDir?: string): Promise<string> {
+  const root = await ensureSharedImageStagingRoot();
+  if (!workspaceDir) return root;
+  const scoped = path.join(root, createHash("sha256").update(path.resolve(workspaceDir)).digest("hex").slice(0, 16));
+  await mkdir(scoped, { recursive: true, mode: 0o700 });
+  return scoped;
+}
+
+/** Resolve (creating once) the process staging root that scopes live in. */
+async function ensureSharedImageStagingRoot(): Promise<string> {
   if (!imageStagingRoot) {
     // mkdtemp (not join+mkdir): atomic, unique, 0700 — no pre-creation or
     // symlink race between check and creation.
@@ -181,14 +198,17 @@ export async function ensureImageStagingRoot(): Promise<string> {
  * behind history. Failures degrade to omitted notes, never to turn
  * failures. Each call owns its subdir; dispose via the returned cleanup.
  */
-export async function stageImages(blocks: PromptImageBlock[]): Promise<StagedImages> {
+export async function stageImages(
+  blocks: PromptImageBlock[],
+  workspaceDir?: string,
+): Promise<StagedImages> {
   const paths = new Map<object, string>();
   const noop = async (): Promise<void> => undefined;
   const bounded = blocks.slice(-MAX_STAGED_IMAGES);
   if (bounded.length === 0) return { dir: undefined, paths, cleanup: noop };
   let root: string;
   try {
-    root = await ensureImageStagingRoot();
+    root = await ensureImageStagingRoot(workspaceDir);
   } catch {
     return { dir: undefined, paths, cleanup: noop };
   }

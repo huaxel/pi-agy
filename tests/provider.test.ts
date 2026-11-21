@@ -1031,6 +1031,28 @@ describe("provider image staging", () => {
     await cleanup();
   });
 
+  it("scopes staged attachments to their own workspace", async () => {
+    const { ensureImageStagingRoot, stageImages } = await import("../extensions/lib/provider.js");
+    const { stat } = await import("node:fs/promises");
+    const workspaceA = await mkdtemp(path.join(os.tmpdir(), "pi-agy-ws-a-"));
+    const workspaceB = await mkdtemp(path.join(os.tmpdir(), "pi-agy-ws-b-"));
+    const rootA = await ensureImageStagingRoot(workspaceA);
+    const rootB = await ensureImageStagingRoot(workspaceB);
+    // Distinct roots: the child in A gets only A's --add-dir, so B's staged
+    // attachments are not listable from A.
+    assert.notEqual(rootA, rootB);
+    assert.equal(await ensureImageStagingRoot(workspaceA), rootA);
+
+    const staged = await stageImages([{ block: {}, data: pngBase64, mimeType: "image/png" }], workspaceA);
+    const [file] = [...staged.paths.values()];
+    assert.ok(file.startsWith(rootA + path.sep), file);
+    assert.ok(!file.startsWith(rootB + path.sep), file);
+    // The other workspace's root exists but holds nothing of A's.
+    assert.deepEqual(await (await import("node:fs/promises")).readdir(rootB), []);
+    await stat(file);
+    await staged.cleanup();
+  });
+
   it("rejects an oversized image by size before decoding it", async () => {
     const { MAX_ENCODED_IMAGE_CHARS, MAX_IMAGE_BYTES, decodedImageBytes, stageImages } = await import(
       "../extensions/lib/provider.js"
