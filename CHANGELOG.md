@@ -7,6 +7,18 @@ reasoning belong in the commit body. Group by release only; themed subsections a
 for releases big enough to need them.
 -->
 
+## 0.8.3
+
+- `plan` and `sandbox` ask before forwarding transcript context, naming the mode, the size and an excerpt; with no UI, or on decline, nothing leaves.
+- A resumed conversation belongs to the transcript that consumed it, so another session in the same directory starts fresh.
+- Reads outside any approval step are bounded and confined to the workspace.
+- One bridge client can no longer make the host do unbounded work per batch.
+- An oversized image is rejected before its payload is decoded, and a planted temp file can no longer redirect the catalog cache write.
+- Rendered agy output carries no terminal control sequences.
+- Deep effort tiers survive a cold start, and each workspace keeps its own roster and reasoning baseline.
+- A tool schema that cannot be flattened without losing constraints is advertised composed instead of widened.
+- The verification gate is found on the physical path, and the dialog names the directory that defines it.
+
 ## 0.8.2
 
 - A bridged turn denies agy's own shell and write tools unconditionally, and a bridge that fails to start refuses the turn instead of running without deny rules.
