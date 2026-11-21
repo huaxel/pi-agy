@@ -92,9 +92,11 @@ export function diffAgyUsage(
   if (input < 0 || output < 0 || cacheRead < 0) return undefined;
 
   let reasoning: number | undefined;
-  if (current.thinking !== undefined) {
-    const baseThinking = baseline.thinking ?? 0;
-    const deltaThinking = current.thinking - baseThinking;
+  // Both sides must know their thinking counter. Treating a missing baseline as
+  // zero would charge the whole cumulative session's reasoning to this turn;
+  // ZERO_USAGE_BASELINE states its zero explicitly for exactly that reason.
+  if (current.thinking !== undefined && baseline.thinking !== undefined) {
+    const deltaThinking = current.thinking - baseline.thinking;
     if (deltaThinking < 0) return undefined;
     if (deltaThinking <= output) {
       reasoning = deltaThinking === 0 ? 0 : deltaThinking;

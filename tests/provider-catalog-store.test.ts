@@ -60,6 +60,7 @@ describe("provider catalog store", () => {
           version: 1,
           models: [
             { full: "ok-model", id: "ok-model", efforts: ["high", "bogus", 7] },
+            { full: "deep-model", id: "deep-model", efforts: ["xhigh", "max"] },
             { full: "", id: "no-full" },
             { full: "no-id" },
             { full: "dup", id: "dup" },
@@ -71,6 +72,9 @@ describe("provider catalog store", () => {
       );
       assert.deepEqual(loadProviderCatalogCache(configPath), [
         { full: "ok-model", id: "ok-model", efforts: ["high"] },
+        // xhigh/max round-trip: a family that only ships deep tiers would
+        // otherwise lose its whole effort list on a cold start.
+        { full: "deep-model", id: "deep-model", efforts: ["xhigh", "max"] },
         { full: "dup", id: "dup" },
       ]);
     } finally {

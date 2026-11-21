@@ -74,6 +74,25 @@ describe("provider usage normalization", () => {
       totalTokens: 125,
     });
 
+    // A baseline that never knew its thinking counter cannot be subtracted
+    // from: charging the whole cumulative total to this turn is worse than
+    // reporting no reasoning delta at all.
+    const unknownBaseline = diffAgyUsage(
+      { input: 160, output: 35, cacheRead: 350, thinking: 6 },
+      { input: 100, output: 20, cacheRead: 300 },
+    );
+    assert.equal(unknownBaseline?.reasoning, undefined);
+    // The other counters stay independently measurable.
+    assert.equal(unknownBaseline?.output, 15);
+    // A known-zero baseline still yields a reasoning delta.
+    assert.equal(
+      diffAgyUsage(
+        { input: 10, output: 6, cacheRead: 0, thinking: 4 },
+        ZERO_USAGE_BASELINE,
+      )?.reasoning,
+      4,
+    );
+
     // Regression returns undefined instead of clamping to zero.
     assert.equal(
       diffAgyUsage(

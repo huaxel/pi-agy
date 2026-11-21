@@ -5,6 +5,8 @@
  * so existing importers are untouched.
  */
 
+import * as path from "node:path";
+
 import { parseAgyModelIds, type AgyModelId } from "./provider-models.js";
 
 import { compareModelIds } from "./model-sort.js";
@@ -138,6 +140,19 @@ const UNSTABLE_MODEL_PATTERN =
 
 let modelCatalog: AgyModelCatalog = {};
 
+/**
+ * Workspace the current catalog was discovered in. The catalog is
+ * process-wide, but `agy models` is answered per workspace, so a roster read in
+ * one directory must not silently answer alias resolution in another while that
+ * directory's own preflight cache still looks fresh.
+ */
+let modelCatalogSourceDir: string | undefined;
+
+/** Directory whose roster the current catalog came from, when known. */
+export function getModelCatalogSourceDir(): string | undefined {
+  return modelCatalogSourceDir;
+}
+
 export function isStableModelId(id: string): boolean {
   return !UNSTABLE_MODEL_PATTERN.test(id);
 }
@@ -213,8 +228,9 @@ export function parseModelCatalog(output: string, allowPreview = false): AgyMode
  * partial view must not install it (an incomplete roster would look like a
  * retirement).
  */
-export function updateModelCatalog(catalog: AgyModelCatalog): void {
+export function updateModelCatalog(catalog: AgyModelCatalog, sourceDir?: string): void {
   modelCatalog = { ...catalog };
+  if (sourceDir !== undefined) modelCatalogSourceDir = path.resolve(sourceDir);
 }
 
 export function getModelCatalog(): AgyModelCatalog {
@@ -224,6 +240,7 @@ export function getModelCatalog(): AgyModelCatalog {
 /** Test helper — drop in-process catalog state. */
 export function resetModelCatalog(): void {
   modelCatalog = {};
+  modelCatalogSourceDir = undefined;
 }
 
 export async function inspectAgyVersion(
@@ -265,7 +282,7 @@ export async function inspectAgyModels(
     timeoutMs,
   );
   const catalog = parseModelCatalog(output);
-  if (Object.keys(catalog).length > 0) updateModelCatalog(catalog);
+  if (Object.keys(catalog).length > 0) updateModelCatalog(catalog, cwd);
   return catalog;
 }
 

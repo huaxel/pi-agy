@@ -41,7 +41,18 @@ const EFFORT_RANK: Record<AgyProviderEffort, number> = {
   max: 4,
 };
 
-const EFFORT_ORDER: readonly AgyProviderEffort[] = ["low", "medium", "high", "xhigh", "max"];
+/**
+ * Every effort tier the CLI is known to advertise, weakest first. Exported so
+ * the catalog cache validates against the same list live discovery produces —
+ * a shorter copy there silently dropped `xhigh`/`max` on cold start.
+ */
+export const EFFORT_ORDER: readonly AgyProviderEffort[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 
 /**
  * Split an agy slug into (base, tier); tier is null without a tier suffix.

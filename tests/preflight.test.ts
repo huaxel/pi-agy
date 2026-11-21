@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { describe, it, mock } from "node:test";
 
 import { resetPreflightCache, runPreflight } from "../extensions/lib/preflight.js";
+import { resetModelCatalog } from "../extensions/lib/inspect.js";
 import { readFakeAgyArgs, withFakeAgy } from "./helpers.js";
 import { awaitNativeTurn, awaitWithWatchdog, withTimingFakeAgy, type FakeChild } from "./timing-helpers.js";
 
@@ -90,6 +91,42 @@ describe("preflight cold-start retry", () => {
       0,
       modelsOutput,
     );
+  });
+
+  it("rediscovers when another workspace installed the alias catalog", async () => {
+    const rosterA = "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n";
+    const rosterB = "gemini-4-neon-medium\tGemini 4 Neon (Medium)\n";
+    await withFakeAgy(
+      "{}",
+      async (bin) => {
+        resetPreflightCache();
+        resetModelCatalog();
+        const dirA = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preflight-a-"));
+        const dirB = await mkdtemp(path.join(os.tmpdir(), "pi-agy-preflight-b-"));
+        const invocations = async () => (await readFakeAgyArgs(bin)).length;
+        await runPreflight(dirA, undefined, 60_000);
+        const afterA = await invocations();
+        // B refreshes the process-wide catalog while A's own timestamp is fresh.
+        await runPreflight(dirB, undefined, 60_000);
+        assert.ok((await invocations()) > afterA);
+        // A must not resolve aliases through B's roster just because its own
+        // preflight timestamp has not expired.
+        const beforeSecondA = await invocations();
+        await runPreflight(dirA, undefined, 60_000);
+        assert.ok(
+          (await invocations()) > beforeSecondA,
+          "a foreign catalog must force rediscovery in this workspace",
+        );
+      },
+      0,
+      0,
+      "",
+      "",
+      "{}",
+      0,
+      rosterA,
+    );
+    void rosterB;
   });
 
   it("keeps the health retry inside the remaining timeout budget", async () => {

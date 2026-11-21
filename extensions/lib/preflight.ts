@@ -1,5 +1,6 @@
 import * as path from "node:path";
 
+import { getModelCatalogSourceDir } from "./inspect.js";
 import {
   checkAgyConnectivity,
   checkAgyHealth,
@@ -45,7 +46,13 @@ export async function runPreflight(
 ): Promise<AgyUsageSnapshot | undefined> {
   const entry = entryFor(cwd);
   const now = Date.now();
-  const healthFresh = entry.healthAt > 0 && now - entry.healthAt < TTL_MS;
+  // A fresh timestamp is not enough: the alias catalog this run will resolve
+  // through is process-wide, so if another workspace refreshed it last, this
+  // one must rediscover rather than borrow that roster.
+  const catalogFromThisDir =
+    getModelCatalogSourceDir() === path.resolve(cwd);
+  const healthFresh =
+    entry.healthAt > 0 && now - entry.healthAt < TTL_MS && catalogFromThisDir;
   const usageTtl =
     entry.usage?.error || !entry.usage ? USAGE_FAILURE_TTL_MS : USAGE_TTL_MS;
   const usageFresh = entry.usageAt > 0 && now - entry.usageAt < usageTtl;

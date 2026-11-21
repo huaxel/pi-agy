@@ -20,6 +20,7 @@ import * as path from "node:path";
 
 import { getDefaultConfigPath } from "./config.js";
 import {
+  EFFORT_ORDER,
   isAgyModelId,
   type AgyProviderEffort,
   type AgyProviderModelEntry,
@@ -27,7 +28,7 @@ import {
 
 const CACHE_FILENAME = "agy-provider-models.json";
 const MAX_CACHED_ENTRIES = 500;
-const EFFORT_VALUES: readonly AgyProviderEffort[] = ["low", "medium", "high"];
+
 
 let observedCatalog: { source: "cache" | "live"; count: number; observedAt: number } | undefined;
 
@@ -90,7 +91,7 @@ function toEntry(value: unknown): AgyProviderModelEntry | undefined {
   if (Array.isArray(record.efforts)) {
     const efforts = record.efforts.filter(
       (effort): effort is AgyProviderEffort =>
-        typeof effort === "string" && (EFFORT_VALUES as readonly string[]).includes(effort),
+        typeof effort === "string" && (EFFORT_ORDER as readonly string[]).includes(effort),
     );
     // A base entry is only effort-driven when it still carries usable tiers.
     if (efforts.length > 0) entry.efforts = [...new Set(efforts)];
