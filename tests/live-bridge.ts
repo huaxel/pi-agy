@@ -6,7 +6,7 @@
  * real `agy` child talks to the loopback MCP bridge:
  *
  *   1. `--settings` `permissions.deny` actually stops a built-in tool that Pi
- *      shadows with a bridged one (`buildBridgeSettings`). Proven with a
+ *      shadows with a bridged one (`buildProviderPermissionSettings`). Proven with a
  *      positive and a negative control around a filesystem side effect, so a
  *      passing run cannot be an artifact of the model declining to act.
  *   2. Parallel bridged tool calls collapse into one parked phase
@@ -20,7 +20,7 @@ import * as path from "node:path";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 
 import { AgyProviderDriver, type DriverPark } from "../extensions/lib/provider-driver.js";
-import { buildBridgeSettings } from "../extensions/lib/provider.js";
+import { buildProviderPermissionSettings } from "../extensions/lib/provider.js";
 import { startMcpBridge } from "../extensions/lib/provider-mcp.js";
 import { bridgeToolsFingerprint, type BridgeToolDef } from "../extensions/lib/provider-tools.js";
 import { resolveAgyModelId } from "../extensions/lib/args.js";
@@ -79,12 +79,13 @@ try {
   // ---------------------------------------------------------------------
   // 1. The deny document must survive `--dangerously-skip-permissions`.
   //    A `touch` request is a filesystem observation, not a model opinion:
-  //    either the file appears or it does not.
+  //    either the file appears or it does not. The document is the one a
+  //    bridged turn always gets, independent of which Pi tools exist.
   // ---------------------------------------------------------------------
   const denied = path.join(dir, "deny-probe.txt");
   const control = path.join(dir, "control-probe.txt");
-  const settingsJson = buildBridgeSettings(shadowingTools);
-  assert.ok(settingsJson, "buildBridgeSettings produced no document for shadowed tools");
+  const settingsJson = buildProviderPermissionSettings();
+  assert.ok(settingsJson, "no permission document for a bridged turn");
   const parsedSettings = JSON.parse(settingsJson) as { permissions: { deny: string[] } };
   assert.deepEqual(
     parsedSettings.permissions.deny.sort(),

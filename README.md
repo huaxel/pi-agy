@@ -36,7 +36,7 @@ Either one works alone; both work together.
 - **Persistent turns** — one warm `agy` process per working directory, and attached images are staged where agy can read them.
 - **Real Pi integration** — by default a localhost MCP bridge gives agy read-only Pi context and lets it call your active Pi tools through Pi's normal approval flow. Switch it off with `"providerBridge": false` or `/agy bridge off`.
 
-  What that does and doesn't cover: agy keeps one merged MCP registry, so your globally configured agy servers sit alongside the bridge and stay reachable during a Pi turn — the bridge adds Pi's tools, it does not sandbox agy's own. Shell and file writes are the strict part. While Pi exposes `bash`/`write`/`edit`, agy's own equivalents are denied for the session, so those calls can only happen through Pi — and that deny holds even under `--dangerously-skip-permissions`, which is on by default. Reads are not denied: agy opens and lists files itself, steered toward Pi's tools by guidance rather than blocked. So the bridge controls the operations that change your workspace, not every action agy takes, and agy still runs its own tool loop.
+  What that does and doesn't cover: agy keeps one merged MCP registry, so your globally configured agy servers sit alongside the bridge and stay reachable during a Pi turn — the bridge adds Pi's tools, it does not sandbox agy's own. Shell and file writes are the strict part. While the bridge is on, agy's own shell and write tools are denied for the session regardless of which Pi tools this session has, so those operations can only happen through Pi's tools — and a session whose allowlist excludes them simply has none. That deny holds even under `--dangerously-skip-permissions`, which is on by default. Reads are not denied: agy opens and lists files itself, steered toward Pi's tools by guidance rather than blocked. So the bridge controls the operations that change your workspace, not every action agy takes, and agy still runs its own tool loop. Turning the bridge off (`"providerBridge": false`) is the deliberate way to run agy plain, with its own tools and no Pi policy.
 
 Your last observed model list is cached in `agy-provider-models.json` beside `agy-config.json`. It holds only ids `agy models` actually returned, and exists because Pi resolves configured model scopes at startup — without it, a configured `antigravity/<id>` reports `No models match pattern` before the provider has discovered anything.
 
@@ -84,7 +84,7 @@ Aliases resolve against your live catalog, never a shipped table. An alias is a 
 - A retired tier stops resolving and fails with an actionable message instead of quietly substituting a neighbour.
 - The concrete id that actually ran is always reported in the run receipt.
 
-In `accept-edits` mode Pi confirms before writes. agy's own permission behaviour is controlled by its config and by `skipPermissions` below.
+In `accept-edits` mode Pi confirms before writes. The dialog names the model that will actually run, the working directory, the pre-run dirty state, and — when the workspace defines one — the verify loop with the file that defines it (`just ci (justfile)`), because approving the run approves that repository code too. agy's own permission behaviour is controlled by its config and by `skipPermissions` below.
 
 ## Configuration
 

@@ -4,6 +4,7 @@ import { resolveModelForApproval } from "./lib/model-approval.js";
 import type { AgyModelId } from "./lib/provider-models.js";
 import { buildAgyContextFromEntries, effectiveResumeContextMode, type AgyContextMode } from "./lib/context.js";
 import { describePreRunDirt } from "./lib/postflight.js";
+import { detectVerifyCommandSource } from "./lib/verify.js";
 import { DEFAULT_TIMEOUT_MS } from "./lib/command-args.js";
 import { executeAgyTask } from "./lib/execute.js";
 import { describeWhen, truncate } from "./lib/output.js";
@@ -133,6 +134,9 @@ export async function executeConfirmedRun(
       return;
     }
     const dirt = await describePreRunDirt(cwd, ctx.signal).catch(() => null);
+    // Approving the run approves the verify loop too, so name the repository
+    // file that defines it before the user says yes.
+    const verify = await detectVerifyCommandSource(cwd, { signal: ctx.signal }).catch(() => null);
     const { title, body } = buildAcceptEditsConfirm({
       modelLabel: approvedModelId ?? "configured default",
       agent: run.agent,
@@ -141,6 +145,7 @@ export async function executeConfirmedRun(
       contextMode,
       contextText,
       dirt,
+      verify,
     });
     const ok = await ctx.ui.confirm(title, body);
     if (!ok) {

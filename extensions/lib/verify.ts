@@ -13,6 +13,30 @@ interface PackageJson {
 export interface VerifyDetectionDeps {
   /** Test hook — override the `just` binary availability probe. */
   justAvailable?: () => Promise<boolean>;
+  /** Cancels the upward walk; checked once per directory level. */
+  signal?: AbortSignal;
+}
+
+/**
+ * A detected verify loop plus where it came from.
+ *
+ * The command string is safe to inject, but the code it runs is defined by the
+ * checkout (`just ci` is whatever `justfile` says, `npm run ci` is whatever
+ * `package.json` says). An approval dialog that shows only "run commands"
+ * approves source the user never saw, so detection reports the defining file
+ * alongside the command.
+ */
+export interface VerifyCommandSource {
+  /** Command injected into the agy prompt, e.g. `just ci`. */
+  command: string;
+  /** Defining file, relative to the workspace: `justfile`, `package.json`, `pyproject.toml`. */
+  definedIn: string;
+}
+
+/** Detection result before the defining file is expressed relative to the workspace. */
+interface DetectedVerify extends VerifyCommandSource {
+  /** Directory the defining file was found in. */
+  dir: string;
 }
 
 // Detection walks up to the repo boundary reading several marker files per
@@ -21,7 +45,7 @@ export interface VerifyDetectionDeps {
 // reuses an equivalent verify loop for under a minute. Bypassed when the
 // test hook overrides the `just` probe so tests never poison each other.
 const VERIFY_CACHE_TTL_MS = 60_000;
-const verifyCache = new Map<string, { at: number; command: string | null }>();
+const verifyCache = new Map<string, { at: number; source: VerifyCommandSource | null }>();
 
 /** Test helper — drop cached verify-command detections. */
 export function resetVerifyDetectionCache(): void {
@@ -38,26 +62,38 @@ export async function detectVerifyCommand(
   cwd: string,
   deps: VerifyDetectionDeps = {},
 ): Promise<string | null> {
+  return (await detectVerifyCommandSource(cwd, deps))?.command ?? null;
+}
+
+/** As {@link detectVerifyCommand}, but naming the file that defines the command. */
+export async function detectVerifyCommandSource(
+  cwd: string,
+  deps: VerifyDetectionDeps = {},
+): Promise<VerifyCommandSource | null> {
   const key = path.resolve(cwd);
   if (deps.justAvailable === undefined) {
     const hit = verifyCache.get(key);
-    if (hit && Date.now() - hit.at < VERIFY_CACHE_TTL_MS) return hit.command;
+    if (hit && Date.now() - hit.at < VERIFY_CACHE_TTL_MS) return hit.source;
   }
-  const command = await detectVerifyCommandUncached(key, deps);
+  const source = await detectVerifyCommandUncached(key, deps);
   if (deps.justAvailable === undefined) {
-    verifyCache.set(key, { at: Date.now(), command });
+    verifyCache.set(key, { at: Date.now(), source });
   }
-  return command;
+  return source;
 }
 
 async function detectVerifyCommandUncached(
   startDir: string,
   deps: VerifyDetectionDeps,
-): Promise<string | null> {
+): Promise<VerifyCommandSource | null> {
   let current = startDir;
   while (true) {
-    const command = await detectVerifyCommandAt(current, deps);
-    if (command) return command;
+    deps.signal?.throwIfAborted();
+    const found = await detectVerifyCommandAt(current, deps);
+    if (found) {
+      const marker = path.join(found.dir, found.definedIn);
+      return { command: found.command, definedIn: path.relative(startDir, marker) || found.definedIn };
+    }
 
     if (await fileExists(path.join(current, ".git"))) return null;
 
@@ -70,36 +106,44 @@ async function detectVerifyCommandUncached(
 async function detectVerifyCommandAt(
   cwd: string,
   deps: VerifyDetectionDeps,
-): Promise<string | null> {
-  if ((await hasJustCi(cwd)) && (await (deps.justAvailable?.() ?? justBinaryAvailable()))) {
-    return "just ci";
+): Promise<DetectedVerify | null> {
+  const justfile = await findJustCi(cwd);
+  if (justfile && (await (deps.justAvailable?.() ?? justBinaryAvailable()))) {
+    return { command: "just ci", definedIn: justfile, dir: cwd };
   }
 
   try {
     const pkg = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8")) as PackageJson;
     const scripts = pkg.scripts ?? {};
     const runner = await detectPackageRunner(cwd, pkg.packageManager);
-    if (typeof scripts.ci === "string" && scripts.ci.trim()) return runScript(runner, "ci");
-    if (typeof scripts.test === "string" && scripts.test.trim()) return runScript(runner, "test");
+    const definedIn = "package.json";
+    if (typeof scripts.ci === "string" && scripts.ci.trim()) {
+      return { command: runScript(runner, "ci"), definedIn, dir: cwd };
+    }
+    if (typeof scripts.test === "string" && scripts.test.trim()) {
+      return { command: runScript(runner, "test"), definedIn, dir: cwd };
+    }
   } catch {
     // no package.json or unreadable package metadata
   }
 
-  return detectUvCommand(cwd);
+  const uv = await detectUvCommand(cwd);
+  return uv ? { command: uv, definedIn: "pyproject.toml", dir: cwd } : null;
 }
 
-async function hasJustCi(cwd: string): Promise<boolean> {
+/** The Justfile spelling that defines a `ci` recipe, if any. */
+async function findJustCi(cwd: string): Promise<string | null> {
   for (const filename of ["justfile", "Justfile", ".justfile"]) {
     try {
       const justfile = await readFile(path.join(cwd, filename), "utf8");
       if (justfile.split("\n").some((line) => /^(?:alias\s+)?ci\s*(?::|:=)/.test(line))) {
-        return true;
+        return filename;
       }
     } catch {
       // try the next Justfile spelling
     }
   }
-  return false;
+  return null;
 }
 
 let justBinaryProbe: Promise<boolean> | undefined;

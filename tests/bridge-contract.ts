@@ -292,6 +292,23 @@ try {
   assert.equal(final.stopReason, "stop");
   assert.ok(JSON.stringify(final.content).includes("bridge-contract-ok"));
   assert.equal(firstToolResult, "bridge-contract-ok");
+
+  // The deny document must not depend on which Pi tools this session has. The
+  // fixture declares no bash and no write, which is exactly the restricted
+  // allowlist case: a presence-derived document would emit no --settings and
+  // leave agy's native shell reachable under the default approval bypass.
+  const turnLaunch = simulatedLaunches.find((launch) => launch.args.includes("--input-format"));
+  assert.ok(turnLaunch, "no provider turn launch recorded");
+  const settingsAt = turnLaunch.args.indexOf("--settings");
+  assert.ok(settingsAt >= 0, "bridged turn launched without a permission document");
+  const document = JSON.parse(turnLaunch.args[settingsAt + 1] ?? "{}") as {
+    permissions?: { deny?: string[] };
+  };
+  assert.deepEqual(
+    [...(document.permissions?.deny ?? [])].sort(),
+    ["command(*)", "write_file(*)"],
+    "the turn did not deny agy's native shell and write tools",
+  );
   assert.equal(observedLists.length, 2);
   assert.deepEqual(observedLists[0], observedLists[1]);
   assert.equal(forbiddenLaunches.length, 0, `unexpected launch/API use: ${forbiddenLaunches.join(", ")}`);

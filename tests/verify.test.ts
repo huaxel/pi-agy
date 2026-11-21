@@ -28,7 +28,11 @@ import { registerAgyCommand } from "../extensions/commands.js";
 import { executeAgyTask } from "../extensions/lib/execute.js";
 import { resetPreflightCache } from "../extensions/lib/preflight.js";
 import { withDirLock } from "../extensions/lib/lock.js";
-import { detectVerifyCommand, resetVerifyDetectionCache } from "../extensions/lib/verify.js";
+import {
+  detectVerifyCommand,
+  detectVerifyCommandSource,
+  resetVerifyDetectionCache,
+} from "../extensions/lib/verify.js";
 import { summarizeGitDiff } from "../extensions/lib/postflight.js";
 import { loadAgyConfig, resetDefaultModelCache, resolveDefaultModel } from "../extensions/lib/config.js";
 import {
@@ -135,6 +139,62 @@ describe("detectVerifyCommand", () => {
     );
     await writeFile(path.join(tmp, "uv.lock"), "");
     assert.equal(await detectVerifyCommand(tmp), "uv run pytest");
+  });
+});
+
+describe("detectVerifyCommandSource", () => {
+  // The approval dialog has to name the file that defines the command: the
+  // command string is allowlisted, the code it runs is whatever the checkout
+  // says. These assertions are what the dialog renders.
+  it("names the justfile that defines just ci", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
+    await writeFile(path.join(tmp, "Justfile"), "alias ci := check\n");
+    assert.deepEqual(await detectVerifyCommandSource(tmp, { justAvailable: async () => true }), {
+      command: "just ci",
+      definedIn: "Justfile",
+    });
+  });
+
+  it("names package.json for a package script", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
+    await writeFile(
+      path.join(tmp, "package.json"),
+      JSON.stringify({ scripts: { ci: "npm run lint && npm test" } }),
+    );
+    assert.deepEqual(await detectVerifyCommandSource(tmp), {
+      command: "npm run ci",
+      definedIn: "package.json",
+    });
+  });
+
+  it("names pyproject.toml for uv pytest", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
+    await writeFile(
+      path.join(tmp, "pyproject.toml"),
+      "[tool.uv]\n[dependency-groups]\ndev = ['pytest']\n",
+    );
+    await writeFile(path.join(tmp, "uv.lock"), "");
+    assert.deepEqual(await detectVerifyCommandSource(tmp), {
+      command: "uv run pytest",
+      definedIn: "pyproject.toml",
+    });
+  });
+
+  it("expresses a defining file above the workspace relative to it", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
+    await execAsync("git", ["init", "-q"], { cwd: tmp });
+    await writeFile(path.join(tmp, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+    const nested = path.join(tmp, "packages", "inner");
+    await mkdir(nested, { recursive: true });
+    assert.deepEqual(await detectVerifyCommandSource(nested), {
+      command: "npm test",
+      definedIn: path.join("..", "..", "package.json"),
+    });
+  });
+
+  it("returns null when the workspace defines no verify loop", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-verify-"));
+    assert.equal(await detectVerifyCommandSource(tmp), null);
   });
 });
 

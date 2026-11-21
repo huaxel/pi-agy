@@ -84,24 +84,27 @@ export interface ProviderTurnCallbacks {
 }
 
 /**
- * Build session-only `agy --settings` JSON that denies agy's built-in shell
- * and file-write tools when Pi already bridges their equivalents via MCP,
- * preventing built-in tools from shadowing Pi's native approvals and diffs.
+ * Session-only `agy --settings` JSON for a bridged turn: always deny agy's
+ * built-in shell and file-write tools.
+ *
+ * This used to deny a native tool only when Pi bridged its equivalent, which
+ * inverted the policy: a Pi session with a restricted allowlist (no `bash`, no
+ * `write`) got *no* deny rules, so agy's own shell stayed reachable under the
+ * default `--dangerously-skip-permissions`. The two cases are the same rule
+ * from opposite sides — capabilities come only from bridged Pi tools, which
+ * carry Pi's approvals and diffs:
+ *
+ * - equivalent bridged: the native tool would shadow Pi's approval path;
+ * - equivalent absent: Pi does not grant that capability at all, so the native
+ *   tool would act outside the allowlist the user configured.
+ *
  * Intentionally emits only `deny` rules (no blanket `allow`) so other MCP
- * servers keep the user's configured permission policy.
+ * servers keep the user's configured permission policy. Verified against agy
+ * 1.5.13 by `npm run test:bridge`: the document holds despite
+ * `--dangerously-skip-permissions`, and the same request without it succeeds.
  */
-export function buildBridgeSettings(bridgedTools: readonly BridgeToolDef[]): string | undefined {
-  if (bridgedTools.length === 0) return undefined;
-  const names = new Set(bridgedTools.map((tool) => tool.piName.toLowerCase()));
-  const deny: string[] = [];
-  if (names.has("bash") || names.has("shell") || names.has("run_command")) {
-    deny.push("command(*)");
-  }
-  if (names.has("write") || names.has("edit") || names.has("write_file") || names.has("edit_file")) {
-    deny.push("write_file(*)");
-  }
-  if (deny.length === 0) return undefined;
-  return JSON.stringify({ permissions: { deny } });
+export function buildProviderPermissionSettings(): string {
+  return JSON.stringify({ permissions: { deny: ["command(*)", "write_file(*)"] } });
 }
 
 export interface ProviderTurnRequest {
@@ -257,7 +260,7 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
             dir: request.dir, fullModel: request.fullModel, effort: request.effort,
             skipPermissions: request.skipPermissions, bridgeDir: bridge?.configDir,
             bridgeTools: bridge ? fingerprint : undefined, imageRoot,
-            settingsJson: bridge ? buildBridgeSettings(request.bridgedTools) : undefined,
+            settingsJson: bridge ? buildProviderPermissionSettings() : undefined,
           }, {
             prompt: request.prompt, resumeConversationId: request.resumeConversationId,
             signal: request.signal, timeoutMs: remaining,

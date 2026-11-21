@@ -16,7 +16,7 @@ import { canonicalDir, getDirLockPath } from "./lock.js";
 import { getProviderStatus } from "./provider.js";
 import { getDefaultStorePath, getHistory } from "./sessions.js";
 import { formatSubagentCounts } from "./subagents.js";
-import { detectVerifyCommand } from "./verify.js";
+import { detectVerifyCommandSource } from "./verify.js";
 
 export type AgyDoctorStatus = "ok" | "info" | "warn" | "error";
 
@@ -118,11 +118,15 @@ export async function runAgyDoctor(
   throwIfCancelled(signal);
 
   try {
-    const verify = await detectVerifyCommand(resolvedCwd);
+    const verify = await detectVerifyCommandSource(resolvedCwd);
     checks.push({
       name: "Verify",
       status: verify ? "ok" : "info",
-      detail: verify ?? "no supported repository gate detected",
+      // Name the defining file: the command is injected into agy's prompt, so
+      // what it runs is the checkout's code, not the command string.
+      detail: verify
+        ? `${verify.command} (${verify.definedIn})`
+        : "no supported repository gate detected",
     });
   } catch (error) {
     checks.push({ name: "Verify", status: "warn", detail: errorMessage(error) });

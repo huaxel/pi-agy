@@ -13,7 +13,7 @@ import { afterEach, describe, it, mock } from "node:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import {
-  buildBridgeSettings,
+  buildProviderPermissionSettings,
   createAgyStreamSimple,
   getProviderRunner,
   renderProviderDeltaPrompt,
@@ -183,18 +183,11 @@ describe("provider prompt rendering", () => {
     assert.match(multi, /Current message:\ncontinue/);
   });
 
-  it("builds session-only deny settings for bridged shell and file-write tools", () => {
-    assert.equal(buildBridgeSettings([]), undefined);
-    assert.equal(
-      buildBridgeSettings([{ name: "read", piName: "read", description: "Read", inputSchema: { type: "object" } }]),
-      undefined,
-    );
-    const settings = buildBridgeSettings([
-      { name: "bash", piName: "bash", description: "Shell", inputSchema: { type: "object" } },
-      { name: "edit", piName: "edit", description: "Edit", inputSchema: { type: "object" } },
-    ]);
-    assert.ok(settings);
-    assert.deepEqual(JSON.parse(settings!), {
+  it("denies native shell and write on every bridged turn", () => {
+    // Unconditional by design: a Pi session whose allowlist excludes bash or
+    // write bridges nothing, so a presence-derived deny set would leave agy's
+    // own shell reachable under the default --dangerously-skip-permissions.
+    assert.deepEqual(JSON.parse(buildProviderPermissionSettings()), {
       permissions: { deny: ["command(*)", "write_file(*)"] },
     });
   });

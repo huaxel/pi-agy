@@ -51,7 +51,7 @@ describe("agy doctor", () => {
         assert.match(report.text, /• Config: defaults/);
         assert.match(report.text, /✓ Sessions: 1 recorded for this workspace/);
         assert.match(report.text, /✓ Workspace lock: free/);
-        assert.match(report.text, /✓ Verify: npm test/);
+        assert.match(report.text, /✓ Verify: npm test \(package\.json\)/);
         assert.match(report.text, /• Provider: driver idle \(no provider turns yet\) · bridge configured, not started · catalog empty/);
       } finally {
         if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

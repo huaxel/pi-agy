@@ -22,6 +22,7 @@ import {
   type AgyContextMode,
 } from "./lib/context.js";
 import { describePreRunDirt } from "./lib/postflight.js";
+import { detectVerifyCommandSource } from "./lib/verify.js";
 import { resolveModelForApproval } from "./lib/model-approval.js";
 import type { AgyModelId } from "./lib/provider-models.js";
 import { buildAcceptEditsConfirm } from "./lib/confirm.js";
@@ -255,6 +256,11 @@ export function registerAgyTools(pi: ExtensionAPI): void {
       if (mode === "accept-edits") {
         const modelLabel = approvedModelId ?? "configured default";
         const dirt = await describePreRunDirt(cwd, abortSignal).catch(() => null);
+        // Shown before approval, because approving a verify loop approves the
+        // repository code that defines it.
+        const verify = await detectVerifyCommandSource(cwd, { signal: abortSignal }).catch(
+          () => null,
+        );
         const { title, body } = buildAcceptEditsConfirm({
           modelLabel,
           agent,
@@ -263,6 +269,7 @@ export function registerAgyTools(pi: ExtensionAPI): void {
           contextMode: effectiveContextMode,
           contextText,
           dirt,
+          verify,
         });
         const approved = await ctx.ui.confirm(title, body);
         if (!approved) throw new Error("agy accept-edits cancelled by user");
