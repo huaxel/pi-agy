@@ -30,6 +30,23 @@ interface RenderContext {
   isError?: boolean;
 }
 
+/**
+ * C0/C1 controls that survive `stripTerminalSequences`, which only recognises
+ * sequences that begin with ESC. A bare `\r` still repositions the cursor, so
+ * text that came back from agy — a delegated response, a tool result — could
+ * rewrite the line it is drawn on without a single escape byte.
+ *
+ * Newline and tab are kept: they are layout, not control.
+ */
+const NON_PRINTING_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+
+/** Make untrusted text safe to hand to the renderer: no escapes, no line rewriting. */
+export function sanitizeForDisplay(text: string): string {
+  return stripTerminalSequences(text)
+    .replace(/\r\n?/g, "\n")
+    .replace(NON_PRINTING_CONTROLS, "");
+}
+
 function oneLine(value: unknown, max: number): string {
   const text = stripTerminalSequences(String(value ?? ""))
     .replace(/\s+/g, " ")
@@ -102,7 +119,9 @@ function formatAgyResult(
   theme: Theme,
   context: RenderContext,
 ): string {
-  const body = firstText(result.content);
+  // Every path below draws this text, including a receipt replayed from a
+  // previous session, so sanitize once here rather than per branch.
+  const body = sanitizeForDisplay(firstText(result.content));
   if (isPartial) {
     return theme.fg("warning", "◌ ") + theme.fg("muted", oneLine(body || "agy: working…", 180));
   }

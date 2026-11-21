@@ -64,6 +64,28 @@ describe("agy run receipt rendering", () => {
     assert.match(expanded, /~ README\.md \(pre-existing\)/);
   });
 
+  it("strips terminal controls from a persisted response body", () => {
+    // The response is model output influenced by task material, and reopening a
+    // session renders it again, so the escape has to be gone in both views: a
+    // bare CR rewrites the line it lands on, and an OSC 52 sets the clipboard.
+    const receipt = {
+      task: "summarize the log",
+      text: "before\u001b[2Jafter\rOVERWRITTEN\u0000end\u001b]52;c;aGFjaw==\u0007tail",
+      completed_at: "2026-09-20T12:00:00.000Z",
+      details: { model: "sonnet", mode: "plan", dir: "/repo", verify_cmd: null },
+    };
+    for (const expanded of [false, true]) {
+      const text = rendered(renderAgyRunReceipt(receipt, { expanded }, theme as any));
+      assert.ok(!text.includes("\u001b"), "escape sequence survived rendering");
+      assert.ok(!text.includes("\r"), "carriage return survived rendering");
+      assert.ok(!text.includes("\u0000"), "NUL survived rendering");
+      assert.ok(!text.includes("aGFjaw=="), "OSC payload survived rendering");
+      // The text itself is still there, just no longer able to control the terminal.
+      assert.match(text, /beforeafter/);
+      assert.match(text, /OVERWRITTEN/);
+    }
+  });
+
   it("fails closed for malformed persisted receipt data", () => {
     const text = rendered(renderAgyRunReceipt({ text: "missing fields" }, { expanded: false }, theme as any));
     assert.match(text, /Invalid agy run receipt/);
