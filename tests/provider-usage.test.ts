@@ -181,6 +181,61 @@ describe("provider driver cumulative usage accounting", () => {
     });
   });
 
+  it("keeps differing after a recycle that resumes the same conversation", async () => {
+    await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+      const driver = new AgyProviderDriver();
+      try {
+        const t1 = driver.turn(profile, { prompt: "one", signal: new AbortController().signal, timeoutMs: 2000 });
+        await Promise.resolve();
+        [...children][0].stdout.write(JSON.stringify({
+          event: "result",
+          result: {
+            status: "SUCCESS",
+            response: "r1",
+            conversation_id: "conv-keep",
+            usage: { input_tokens: 100, output_tokens: 20, thinking_tokens: 5, cache_read_tokens: 300 },
+          },
+        }) + "\n");
+        const r1 = await awaitWithWatchdog(t1, "turn 1");
+        assert.equal(r1.kind, "done");
+        if (r1.kind === "done") {
+          assert.deepEqual(r1.outcome.usage, {
+            input: 100, output: 20, cacheRead: 300, cacheWrite: 0, reasoning: 5, totalTokens: 420,
+          });
+        }
+
+        // Changing the thinking tier recycles the child. agy's counters are
+        // conversation-cumulative (verified live across processes), so the
+        // resumed conversation keeps differing instead of re-priming to an
+        // empty usage row.
+        const t2 = driver.turn(
+          { ...profile, effort: "high" },
+          { prompt: "two", resumeConversationId: "conv-keep", signal: new AbortController().signal, timeoutMs: 2000 },
+        );
+        await Promise.resolve();
+        assert.equal(children.size, 1, "the recycled child is the only live one");
+        [...children][0].stdout.write(JSON.stringify({
+          event: "result",
+          result: {
+            status: "SUCCESS",
+            response: "r2",
+            conversation_id: "conv-keep",
+            usage: { input_tokens: 160, output_tokens: 35, thinking_tokens: 8, cache_read_tokens: 1350 },
+          },
+        }) + "\n");
+        const r2 = await awaitWithWatchdog(t2, "turn 2 after recycle");
+        assert.equal(r2.kind, "done");
+        if (r2.kind === "done") {
+          assert.deepEqual(r2.outcome.usage, {
+            input: 60, output: 15, cacheRead: 1050, cacheWrite: 0, reasoning: 3, totalTokens: 1125,
+          });
+        }
+      } finally {
+        await driver.close();
+      }
+    });
+  });
+
   it("primes baseline on external cold resume without charging prior history, then diffs turn 2", async () => {
     await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
       const driver = new AgyProviderDriver();

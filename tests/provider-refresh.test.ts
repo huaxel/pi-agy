@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { normalizeContext, type Provider, type ModelsRefreshOptions, type RefreshModelsContext, type AssistantMessage } from "@earendil-works/pi-ai";
+import { normalizeContext, type Provider, type ModelsRefreshOptions, type RefreshModelsContext, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
 import { describe, it, mock } from "node:test";
 import { ModelRuntime, ModelRegistry, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piAgyExtension from "../extensions/index.js";
@@ -122,11 +122,16 @@ async function withDiscovery(
   });
 }
 
-async function recordTurn(registry: ModelRegistry, id: string, text = "hello", prior?: AssistantMessage) {
+async function recordTurn(
+  registry: ModelRegistry,
+  id: string,
+  text = "hello",
+  history: Message[] = [],
+) {
   const model = registry.find(providerId, id)!;
   assert.ok(model);
   return bounded(registry.streamSimple(model, {
-    messages: [...(prior ? [prior] : []), { role: "user", content: text, timestamp: 0 }],
+    messages: [...history, { role: "user", content: text, timestamp: 0 }],
   }, { reasoning: "high" }).result());
 }
 
@@ -185,7 +190,15 @@ describe("catalog lifecycle through native Pi", { timeout: 15000 }, () => {
         assert.equal(calls(), 2);
         assert.equal(registry.getProvider(providerId)!.streamSimple, handler);
         assert.equal(provider.getModels(), modelList, "identical refresh keeps model objects stable");
-        assert.equal((await recordTurn(registry, "argon", "again", argonReply)).stopReason, "stop");
+        // A real follow-up keeps its opening user turn; an assistant-first
+        // transcript is not something Pi produces, and reads as a rewind.
+        assert.equal(
+          (await recordTurn(registry, "argon", "again", [
+            { role: "user" as const, content: "hello", timestamp: 0 },
+            ...(argonReply ? [argonReply] : []),
+          ])).stopReason,
+          "stop",
+        );
         assert.equal(seen.at(-1)!.resumeConversationId, "fixture-conversation");
         assert.equal(getProviderRunner(process.cwd()), runner);
         output = "argon Argon\ngemini-9.1-flash-low Low\ngemini-9.1-flash-medium Medium\nnewcomer New\n";

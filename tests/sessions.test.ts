@@ -194,6 +194,36 @@ describe("session store", () => {
     assert.equal(history[0]?.summary, "first task again");
   });
 
+  it("round-trips the extended transcript anchor and refuses a broken one", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-agy-sessions-"));
+    const store = createSessionStore(path.join(tmp, "agy-sessions.json"));
+    const anchor = {
+      count: 3,
+      fingerprint: "m3-aaaaaaaaaaaaaaaa",
+      assistant_fingerprint: "m1-bbbbbbbbbbbbbbbb",
+      system_prompt_hash: "s42-cccccccccccccccc",
+      bridge_tools_key: "n1-hdeadbeef",
+      usage_snapshot: { input: 120, output: 8, cache_read: 900 },
+    };
+    await store.saveSession("/p", "c1", "flash-medium", undefined, undefined, undefined, undefined, anchor);
+    assert.deepEqual((await store.getSession("/p"))?.last_transcript_anchor, anchor);
+
+    // A record this package did not write cannot prove a delta.
+    const { normalizeTranscriptAnchor } = await import("../extensions/lib/sessions.js");
+    assert.equal(normalizeTranscriptAnchor({ count: 0, fingerprint: "m0-x" }), undefined);
+    assert.equal(normalizeTranscriptAnchor({ count: 3 }), undefined);
+    assert.equal(normalizeTranscriptAnchor("nope"), undefined);
+    const partial = normalizeTranscriptAnchor({ count: 2, fingerprint: "m2-aaaaaaaaaaaaaaaa" });
+    assert.deepEqual(partial, { count: 2, fingerprint: "m2-aaaaaaaaaaaaaaaa" });
+    // A malformed snapshot is dropped, not trusted.
+    const dropped = normalizeTranscriptAnchor({
+      count: 2,
+      fingerprint: "m2-aaaaaaaaaaaaaaaa",
+      usage_snapshot: { input: -1, output: 0, cache_read: 0 },
+    });
+    assert.equal(dropped?.usage_snapshot, undefined);
+  });
+
   it("collapses prompts into compact one-line summaries", () => {
     assert.equal(conversationSummary("line one\n  line\ttwo   three"), "line one line two three");
     assert.equal(conversationSummary("short prompt"), "short prompt");

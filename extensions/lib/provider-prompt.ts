@@ -284,6 +284,14 @@ function makeImageRef(imagePaths?: Map<object, string>): (block: object) => stri
 }
 
 /**
+ * Deterministic fingerprint of one block of text (the system prompt), so a
+ * prelude comparison can be persisted without storing the prompt itself.
+ */
+export function textFingerprint(text: string): string {
+  return `s${text.length}-${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+}
+
+/**
  * Deterministic fingerprint of a transcript prefix so resumed turns can
  * detect compaction, /tree rewinds, replaced replies, or edited history
  * (including image payloads and tool-call arguments) and fall back to a

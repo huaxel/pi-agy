@@ -26,6 +26,28 @@ export interface NormalizedProviderUsage {
   totalTokens: number;
 }
 
+/**
+ * Validate an already-normalized snapshot (as read back from the session
+ * store) without trusting the file: every field must be a non-negative safe
+ * integer, and an unknown shape is discarded rather than coerced.
+ */
+export function normalizeUsageSnapshot(raw: unknown): ValidatedAgyUsage | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const input = parseNonNegSafeInt(record.input);
+  const output = parseNonNegSafeInt(record.output);
+  const cacheRead = parseNonNegSafeInt(record.cache_read);
+  if (input === undefined || output === undefined || cacheRead === undefined) return undefined;
+  let thinking: number | undefined;
+  if (record.thinking !== undefined) {
+    thinking = parseNonNegSafeInt(record.thinking);
+    if (thinking === undefined) return undefined;
+  }
+  return thinking !== undefined
+    ? { input, output, cacheRead, thinking }
+    : { input, output, cacheRead };
+}
+
 export const ZERO_USAGE_BASELINE: Readonly<ValidatedAgyUsage> = Object.freeze({
   input: 0,
   output: 0,

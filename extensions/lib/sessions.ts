@@ -1,4 +1,5 @@
 import { isAgyModelId, validateAgyModelId, type AgyModelId } from "./provider-models.js";
+import { normalizeUsageSnapshot, type ValidatedAgyUsage } from "./provider-usage.js";
 import {
   chmod,
   mkdir,
@@ -41,6 +42,59 @@ export interface TranscriptAnchor {
   count: number;
   /** `transcriptFingerprint` of exactly those messages. */
   fingerprint: string;
+  /**
+   * What else that turn had in force, so a *new* process can continue with a
+   * delta instead of replaying the transcript, and can still report the turn's
+   * own tokens. All optional: a record written before these existed simply
+   * cannot prove a delta and falls back to a full prompt.
+   */
+  assistant_fingerprint?: string;
+  /** Hash of the system prompt in force; the prompt itself is never stored. */
+  system_prompt_hash?: string;
+  /** Bridged tool catalog key in force. */
+  bridge_tools_key?: string;
+  /** Cumulative native usage of the conversation after that turn. */
+  usage_snapshot?: { input: number; output: number; cache_read: number; thinking?: number };
+}
+
+/** Fingerprints are short opaque tokens; anything else is corruption. */
+const MAX_FINGERPRINT_CHARS = 64;
+
+function isFingerprint(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_FINGERPRINT_CHARS;
+}
+
+/**
+ * Validate an anchor read back from disk. An unrecognisable part is dropped
+ * rather than trusted: the worst case is a full prompt, never a wrong delta.
+ */
+export function normalizeTranscriptAnchor(value: unknown): TranscriptAnchor | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.count !== "number" ||
+    !Number.isSafeInteger(record.count) ||
+    record.count <= 0 ||
+    !isFingerprint(record.fingerprint)
+  ) {
+    return undefined;
+  }
+  const anchor: TranscriptAnchor = { count: record.count, fingerprint: record.fingerprint };
+  if (isFingerprint(record.assistant_fingerprint)) {
+    anchor.assistant_fingerprint = record.assistant_fingerprint;
+  }
+  if (isFingerprint(record.system_prompt_hash)) anchor.system_prompt_hash = record.system_prompt_hash;
+  if (isFingerprint(record.bridge_tools_key)) anchor.bridge_tools_key = record.bridge_tools_key;
+  const snapshot = normalizeUsageSnapshot(record.usage_snapshot);
+  if (snapshot) {
+    anchor.usage_snapshot = {
+      input: snapshot.input,
+      output: snapshot.output,
+      cache_read: snapshot.cacheRead,
+      ...(snapshot.thinking !== undefined ? { thinking: snapshot.thinking } : {}),
+    };
+  }
+  return anchor;
 }
 
 export interface AgySessionRecord {
@@ -83,6 +137,27 @@ export function getDefaultStorePath(): string {
   const agentDir =
     process.env.PI_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), ".pi", "agent");
   return path.join(agentDir, "agy-sessions.json");
+}
+
+/** The driver shape of a stored snapshot. */
+export function anchorUsageSnapshot(usage: ValidatedAgyUsage): NonNullable<TranscriptAnchor["usage_snapshot"]> {
+  return {
+    input: usage.input,
+    output: usage.output,
+    cache_read: usage.cacheRead,
+    ...(usage.thinking !== undefined ? { thinking: usage.thinking } : {}),
+  };
+}
+
+export function snapshotFromAnchor(
+  snapshot: NonNullable<TranscriptAnchor["usage_snapshot"]>,
+): ValidatedAgyUsage {
+  return {
+    input: snapshot.input,
+    output: snapshot.output,
+    cacheRead: snapshot.cache_read,
+    ...(snapshot.thinking !== undefined ? { thinking: snapshot.thinking } : {}),
+  };
 }
 
 export interface AgySessionStore {

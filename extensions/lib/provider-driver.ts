@@ -69,6 +69,13 @@ export interface ProviderDriverProfile {
 export interface ProviderDriverTurn {
   prompt: string;
   resumeConversationId?: string;
+  /**
+   * Cumulative usage snapshot this process has not seen yet (it comes from the
+   * session store after a restart). Used only when this driver remembers
+   * nothing about the conversation, so a recycled child still reports the
+   * turn's own tokens instead of a blank row.
+   */
+  usageBaseline?: ValidatedAgyUsage;
   signal: AbortSignal;
   timeoutMs: number;
   onText?: (delta: string) => void;
@@ -86,6 +93,8 @@ export interface ProviderDriverOutcome {
   deniedActions?: Array<{ action?: string; display_name?: string }>;
   /** Validated per-turn native usage delta, when a same-generation baseline is known. */
   usage?: NormalizedProviderUsage;
+  /** Cumulative conversation usage after this turn, for the session store. */
+  usageSnapshot?: ValidatedAgyUsage;
 }
 
 /** A bridged Pi-tool call parked mid-turn: agy waits on the MCP response. */
@@ -121,8 +130,19 @@ export interface ProviderDriverSnapshot {
   lifecycle: string[];
 }
 
-/** Idle children are reaped so stale auth/processes never linger. */
-export const PROVIDER_DRIVER_IDLE_MS = 5 * 60_000;
+/**
+ * Idle children are reaped so stale auth/processes never linger. The window
+ * matches the upstream prompt-cache lifetime, so a pause inside it keeps the
+ * warm child instead of paying a cold start and a re-primed usage baseline for
+ * a turn whose prefix is still cached server-side.
+ */
+export const PROVIDER_DRIVER_IDLE_MS = 15 * 60_000;
+/**
+ * How many conversations keep a committed usage baseline across recycles.
+ * agy reports conversation-cumulative usage (verified live across processes),
+ * so a bounded map lets a respawned driver still report the real delta.
+ */
+const USAGE_BASELINE_LIMIT = 8;
 /** Cap streamed response text per turn. */
 const MAX_TURN_TEXT_CHARS = 512_000;
 const MAX_ACTIVITY_ENTRIES = 32;
@@ -185,8 +205,14 @@ export class AgyProviderDriver {
   private generation = 0;
   private profile?: ProviderDriverProfile;
   private boundConversationId?: string;
-  /** Committed cumulative usage baseline for this child process generation (undefined until primed on external resume). */
+  /** Committed cumulative usage snapshot for the live child's bound conversation. */
   private usageBaseline?: ValidatedAgyUsage;
+  /**
+   * Last committed cumulative snapshot per conversation id, so a recycled child
+   * that resumes the same conversation keeps differing instead of re-priming and
+   * reporting an empty usage row. Insertion order is recency.
+   */
+  private readonly usageByConversation = new Map<string, ValidatedAgyUsage>();
   private active?: ActiveTurn;
   private queue: Promise<void> = Promise.resolve();
   private idleTimer?: NodeJS.Timeout;
@@ -519,7 +545,7 @@ export class AgyProviderDriver {
     if (child) killProcessTree(child);
   }
 
-  private spawn(profile: ProviderDriverProfile, resume?: string): void {
+  private spawn(profile: ProviderDriverProfile, resume?: string, hint?: ValidatedAgyUsage): void {
     const spawn = getSpawn();
     const args = ["--add-dir", profile.dir, "--model", profile.fullModel];
     if (profile.effort) args.push("--effort", profile.effort);
@@ -546,10 +572,14 @@ export class AgyProviderDriver {
     this.child = child;
     this.profile = profile;
     this.boundConversationId = resume ?? undefined;
-    // Fresh processes start at known zero cumulative usage; externally resumed
-    // conversations prime their baseline on the first terminal snapshot so
-    // prior session history is never charged to the first resumed turn.
-    this.usageBaseline = resume ? undefined : { ...ZERO_USAGE_BASELINE };
+    // Fresh processes start at known zero cumulative usage. A resumed
+    // conversation reuses the snapshot this driver last committed for it (or the
+    // one an earlier process recorded), so a recycle still reports the turn's
+    // real delta; a conversation never seen here primes instead, so prior
+    // session history is never charged to it.
+    this.usageBaseline = resume
+      ? (this.usageByConversation.get(resume) ?? hint)
+      : { ...ZERO_USAGE_BASELINE };
     this.lineBuffer = "";
     this.discardingRecord = false;
     this.pendingLines = [];
@@ -622,7 +652,11 @@ export class AgyProviderDriver {
     });
   }
 
-  private ensureProcess(profile: ProviderDriverProfile, resume?: string): void {
+  private ensureProcess(
+    profile: ProviderDriverProfile,
+    resume?: string,
+    hint?: ValidatedAgyUsage,
+  ): void {
     const reason = this.recycleReason(profile, resume);
     if (reason === undefined && this.child) {
       this.stats.reuses += 1;
@@ -635,7 +669,7 @@ export class AgyProviderDriver {
       this.log(`recycle:${reason ?? "unknown"}`);
       this.killChild();
     }
-    this.spawn(profile, resume);
+    this.spawn(profile, resume, hint);
   }
 
   private pushText(turn: ActiveTurn, delta: string): void {
@@ -802,13 +836,36 @@ export class AgyProviderDriver {
         usage = diffAgyUsage(validatedUsage, this.usageBaseline);
       }
       this.usageBaseline = validatedUsage;
+      this.rememberUsageBaseline(result.conversation_id, validatedUsage);
     }
-    this.settleDone(turn, { text: capped, usage });
+    this.settleDone(turn, { text: capped, usage, usageSnapshot: validatedUsage });
+  }
+
+  /**
+   * Keep the newest cumulative snapshot per conversation. agy's counters are
+   * conversation-cumulative across processes, so this outlives a child; the
+   * bound stops a long session from pinning every conversation it ever ran.
+   */
+  private rememberUsageBaseline(conversationId: string | undefined, usage: ValidatedAgyUsage): void {
+    if (!conversationId) return;
+    this.usageByConversation.delete(conversationId);
+    this.usageByConversation.set(conversationId, usage);
+    while (this.usageByConversation.size > USAGE_BASELINE_LIMIT) {
+      const oldest = this.usageByConversation.keys().next();
+      if (oldest.done) break;
+      this.usageByConversation.delete(oldest.value);
+    }
   }
 
   private settleDone(
     turn: ActiveTurn,
-    overrides?: { text?: string; aborted?: boolean; timedOut?: boolean; usage?: NormalizedProviderUsage },
+    overrides?: {
+      text?: string;
+      aborted?: boolean;
+      timedOut?: boolean;
+      usage?: NormalizedProviderUsage;
+      usageSnapshot?: ValidatedAgyUsage;
+    },
   ): void {
     if (turn.settled) return;
     this.clearParkBatchTimer(turn);
@@ -846,6 +903,7 @@ export class AgyProviderDriver {
         activity: turn.activity,
         deniedActions: turn.runResult.denied_actions,
         ...(overrides?.usage ? { usage: overrides.usage } : {}),
+        ...(overrides?.usageSnapshot ? { usageSnapshot: overrides.usageSnapshot } : {}),
       },
     };
     if (retain) turn.pendingTerminal = { kind: "done", end };
@@ -901,7 +959,7 @@ export class AgyProviderDriver {
           "another agy turn owns this driver (running or suspended awaiting Pi tools)",
         );
       }
-      this.ensureProcess(profile, options.resumeConversationId);
+      this.ensureProcess(profile, options.resumeConversationId, options.usageBaseline);
       const child = this.child;
       if (!child) {
         reject(new Error("agy provider driver has no process"));

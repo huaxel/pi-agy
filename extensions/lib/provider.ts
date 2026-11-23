@@ -31,6 +31,7 @@ import {
   renderProviderDeltaPrompt,
   renderProviderPrompt,
   stageImages,
+  textFingerprint,
   textOfContent,
   transcriptFingerprint,
   type ProviderTranscriptMessage,
@@ -43,6 +44,7 @@ export {
   renderProviderDeltaPrompt,
   renderProviderPrompt,
   stageImages,
+  textFingerprint,
   transcriptFingerprint,
   MAX_ENCODED_IMAGE_CHARS,
   MAX_IMAGE_BYTES,
@@ -57,10 +59,18 @@ export {
 import { withDirLock } from "./lock.js";
 import type { McpBridgeHandle } from "./provider-mcp.js";
 import type { BridgeToolDef } from "./provider-tools.js";
-import { getSession, saveSession } from "./sessions.js";
+import {
+  anchorUsageSnapshot,
+  getSession,
+  normalizeTranscriptAnchor,
+  saveSession,
+  snapshotFromAnchor,
+  type AgySessionRecord,
+  type TranscriptAnchor,
+} from "./sessions.js";
 import { AgyProviderDriver, PROVIDER_TURN_TIMEOUT_MS } from "./provider-driver.js";
 import type { AgySubagentSummary } from "./subagents.js";
-import type { NormalizedProviderUsage } from "./provider-usage.js";
+import type { NormalizedProviderUsage, ValidatedAgyUsage } from "./provider-usage.js";
 export {
   diffAgyUsage,
   validateAgyUsage,
@@ -126,6 +136,8 @@ export interface ProviderTurnRequest {
   timeoutMs: number;
   /** Resume this agy conversation instead of starting a new one. */
   resumeConversationId?: string;
+  /** Cumulative usage snapshot an earlier process recorded for that conversation. */
+  usageBaseline?: ValidatedAgyUsage;
   skipPermissions: boolean;
   /** Pi tools projected for this turn (refreshed per turn). */
   bridgedTools: BridgeToolDef[];
@@ -184,6 +196,8 @@ export interface ProviderTurnResult {
   deniedActions?: Array<{ action?: string; display_name?: string }>;
   /** Validated per-turn native usage delta, when available. */
   usage?: NormalizedProviderUsage;
+  /** Cumulative conversation usage after this turn, for the session store. */
+  usageSnapshot?: ValidatedAgyUsage;
 }
 
 /**
@@ -273,6 +287,7 @@ export function getProviderRunner(dir: string): ProviderTurnRunner {
             settingsJson: bridge ? buildProviderPermissionSettings() : undefined,
           }, {
             prompt: request.prompt, resumeConversationId: request.resumeConversationId,
+            usageBaseline: request.usageBaseline,
             signal: request.signal, timeoutMs: remaining,
             onText: request.callbacks?.onText, onThinking: request.callbacks?.onThinking,
             onActivity: request.callbacks?.onActivity,
@@ -347,7 +362,15 @@ function toRunEnd(
  * across turns. Reset via closeProviderDrivers() (session shutdown, tests).
  */
 const providerDrivers = new Map<string, AgyProviderDriver>();
-const providerDiagnostics = new Map<string, { promptMode?: "full" | "delta"; promptFallbackReason?: string; deniedActions: number }>();
+interface ProviderDiagnostics {
+  promptMode?: "full" | "delta";
+  promptFallbackReason?: string;
+  /** The fallback started a fresh agy conversation because the transcript diverged. */
+  conversationRestarted?: boolean;
+  deniedActions: number;
+}
+
+const providerDiagnostics = new Map<string, ProviderDiagnostics>();
 
 export function getProviderDriver(dir: string): AgyProviderDriver {
   // Resolve spelling variants (./, ../) to one driver per directory. (Symlink
@@ -486,7 +509,7 @@ export interface ProviderStatus {
   /** Suspended turns awaiting Pi tool results. */
   suspended: ProviderStatusSuspended[];
   /** Most recent prompt construction and denied-action observations for this workspace. */
-  diagnostics?: { promptMode?: "full" | "delta"; promptFallbackReason?: string; deniedActions: number };
+  diagnostics?: ProviderDiagnostics;
   /** Live image staging dirs process-wide. */
   stagedImages: number;
 }
@@ -718,11 +741,50 @@ interface SuspendedTurn {
 
 interface ConversationSyncState {
   conversationId: string;
-  systemPrompt: string;
+  /** Fingerprint of the system prompt in force; never the prompt itself. */
+  systemPromptHash: string;
   bridgeToolsKey: string;
   syncedInputCount: number;
   syncedInputFingerprint: string;
   syncedAssistantFingerprint: string;
+  /** Cumulative usage the conversation had reached, for a cold resume. */
+  usageSnapshot?: ValidatedAgyUsage;
+}
+
+/**
+ * Rebuild the delta decision from the record an earlier process wrote. Every
+ * field is compared again by the ladder below, so a stale record degrades to a
+ * full prompt and never to a wrong delta.
+ */
+function syncFromAnchor(
+  anchor: TranscriptAnchor | undefined,
+): ConversationSyncState | undefined {
+  if (!anchor?.assistant_fingerprint || !anchor.system_prompt_hash || !anchor.bridge_tools_key) {
+    return undefined;
+  }
+  return {
+    conversationId: "",
+    systemPromptHash: anchor.system_prompt_hash,
+    bridgeToolsKey: anchor.bridge_tools_key,
+    syncedInputCount: anchor.count,
+    syncedInputFingerprint: anchor.fingerprint,
+    syncedAssistantFingerprint: anchor.assistant_fingerprint,
+    ...(anchor.usage_snapshot ? { usageSnapshot: snapshotFromAnchor(anchor.usage_snapshot) } : {}),
+  };
+}
+
+/** The anchor filed for the messages a turn consumed. */
+function anchorForTurn(
+  messages: readonly ProviderTranscriptMessage[],
+  turn: { assistantFingerprint: string; systemPromptHash: string; bridgeToolsKey: string; usageSnapshot?: ValidatedAgyUsage },
+): TranscriptAnchor {
+  return {
+    ...transcriptAnchor(messages),
+    assistant_fingerprint: turn.assistantFingerprint,
+    system_prompt_hash: turn.systemPromptHash,
+    bridge_tools_key: turn.bridgeToolsKey,
+    ...(turn.usageSnapshot ? { usage_snapshot: anchorUsageSnapshot(turn.usageSnapshot) } : {}),
+  };
 }
 
 /** Run cleanups sequentially, never throwing. */
@@ -896,10 +958,13 @@ export function createAgyStreamSimple(
         let end: ProviderRunEnd;
         let executedRawModelId: AgyModelId;
         let activeSystemPrompt = systemPrompt;
+        // Compared against a persisted hash, never against a stored prompt.
+        let activeSystemPromptHash = textFingerprint(activeSystemPrompt ?? "");
         let activeBridgeToolsKey = "";
         if (prior && hasCompleteDelivery) {
           executedRawModelId = prior.rawModelId;
           activeSystemPrompt = prior.systemPrompt;
+          activeSystemPromptHash = textFingerprint(activeSystemPrompt ?? "");
           activeBridgeToolsKey = prior.bridgeToolsKey;
           prior.ownership?.assertValid();
           suspendedByDir.delete(skey);
@@ -962,45 +1027,83 @@ export function createAgyStreamSimple(
             await runImageCleanups(prior.imageCleanups);
           }
           let resume = hasPriorAssistantTurn ? resumeByModel.get(model.id) : undefined;
-          if (!resume && hasPriorAssistantTurn) {
+          let stored: AgySessionRecord | undefined;
+          if (hasPriorAssistantTurn) {
             try {
-              const record = await getSession(dir);
-              if (
-                record?.last_conversation_id &&
-                record.last_model === model.id &&
-                transcriptContinuesConversation(record.last_transcript_anchor, messages)
-              ) {
-                resume = record.last_conversation_id;
-              }
+              stored = await getSession(dir);
             } catch {
               // Session-store failures must never block a turn.
+            }
+          }
+          if (!resume && hasPriorAssistantTurn && stored) {
+            if (
+              stored.last_conversation_id &&
+              stored.last_model === model.id &&
+              transcriptContinuesConversation(stored.last_transcript_anchor, messages)
+            ) {
+              resume = stored.last_conversation_id;
             }
           }
           const bridgedTools = projectBridgeTools(options?.tools ?? deps.tools ?? [], {
             reserved: BUILTIN_BRIDGE_TOOL_NAMES,
           });
           activeBridgeToolsKey = bridgeToolsFingerprint(bridgedTools);
+          // A fresh process has no in-memory sync, but the record remembers what
+          // the last completed turn actually sent. Seeding it is what lets a cold
+          // resume send only the new messages instead of replaying the
+          // transcript.
+          if (resume && !syncByModel.has(model.id)) {
+            const anchor =
+              stored?.last_conversation_id === resume
+                ? normalizeTranscriptAnchor(stored?.last_transcript_anchor)
+                : undefined;
+            const restored = syncFromAnchor(anchor);
+            if (restored) syncByModel.set(model.id, { ...restored, conversationId: resume });
+          }
           const sync = resume ? syncByModel.get(model.id) : undefined;
+          // The stored anchor counts non-system messages: Pi's system prompt and
+          // tool catalog ride in them and change for reasons unrelated to the
+          // conversation. The delta ladder uses the same convention.
+          const conversational = messages.filter((message) => message.role !== "system");
+          const prefixDiverged =
+            !!sync &&
+            transcriptFingerprint(conversational.slice(0, sync.syncedInputCount)) !== sync.syncedInputFingerprint;
+          const anchorDiverged =
+            !!sync &&
+            !prefixDiverged &&
+            conversational.length > sync.syncedInputCount &&
+            conversational[sync.syncedInputCount]?.role === "assistant" &&
+            transcriptFingerprint([conversational[sync.syncedInputCount]]) !== sync.syncedAssistantFingerprint;
           const deltaFailureReason = !resume
             ? "no conversation to resume"
             : !sync
               ? "no synchronized in-memory prompt"
               : sync.conversationId !== resume
                 ? "conversation changed"
-                : sync.systemPrompt !== systemPrompt
+                : sync.systemPromptHash !== activeSystemPromptHash
                   ? "system prompt changed"
                   : sync.bridgeToolsKey !== activeBridgeToolsKey
                     ? "tool catalog changed"
-                    : messages.length <= sync.syncedInputCount + 1
-                      ? "no new messages"
-                      : messages[sync.syncedInputCount]?.role !== "assistant"
-                        ? "assistant anchor missing"
-                        : transcriptFingerprint(messages.slice(0, sync.syncedInputCount)) !== sync.syncedInputFingerprint
-                          ? "earlier transcript changed"
-                          : transcriptFingerprint([messages[sync.syncedInputCount]]) !== sync.syncedAssistantFingerprint
+                    : prefixDiverged
+                      ? "earlier transcript changed"
+                      : conversational.length <= sync.syncedInputCount
+                        ? "no new messages"
+                        : conversational[sync.syncedInputCount]?.role !== "assistant"
+                          ? "assistant anchor missing"
+                          : anchorDiverged
                             ? "assistant anchor changed"
                             : undefined;
           const canDelta = deltaFailureReason === undefined;
+          // A rewind, a regenerated reply or a compaction means agy already holds
+          // turns Pi no longer has. Appending the rewritten transcript would keep
+          // them in the model's context and replay the rest twice, so start clean
+          // and let the full prompt *be* the conversation. The stored anchor
+          // cannot cover this: it only gates resumes that come from the store.
+          const conversationRestarted = !canDelta && (prefixDiverged || anchorDiverged);
+          if (conversationRestarted) {
+            resumeByModel.delete(model.id);
+            resume = undefined;
+          }
           let prompt: string;
           if (canDelta) {
             const deltaSync = sync!;
@@ -1019,12 +1122,17 @@ export function createAgyStreamSimple(
               bridgedToolNames: bridgedTools.map((tool) => tool.name),
             });
           }
-          providerDiagnostics.set(skey, {
+          const nextDiagnostics: ProviderDiagnostics = {
             ...providerDiagnostics.get(skey),
             promptMode: canDelta ? "delta" : "full",
             promptFallbackReason: canDelta ? undefined : deltaFailureReason,
             deniedActions: providerDiagnostics.get(skey)?.deniedActions ?? 0,
-          });
+          };
+          // Absent rather than stale: a later turn that resumed normally must
+          // not keep reporting the restart from an earlier one.
+          if (conversationRestarted) nextDiagnostics.conversationRestarted = true;
+          else delete nextDiagnostics.conversationRestarted;
+          providerDiagnostics.set(skey, nextDiagnostics);
           // Capture before execution: later invocations can resolve a different
           // profile while this child remains parked on its original target.
           executedRawModelId = validateAgyModelId(
@@ -1038,6 +1146,7 @@ export function createAgyStreamSimple(
             signal,
             timeoutMs: deps.timeoutMs ?? PROVIDER_TURN_TIMEOUT_MS,
             resumeConversationId: resume,
+            usageBaseline: sync?.usageSnapshot,
             skipPermissions: deps.skipPermissions ?? true,
             bridgedTools,
             callbacks,
@@ -1148,18 +1257,23 @@ export function createAgyStreamSimple(
         else output.stopReason = "stop";
         if (result.conversationId) {
           resumeByModel.set(model.id, result.conversationId);
-          if (!result.aborted && !result.timedOut) {
-            syncByModel.set(model.id, {
-              conversationId: result.conversationId,
-              systemPrompt: activeSystemPrompt,
-              bridgeToolsKey: activeBridgeToolsKey,
-              syncedInputCount: messages.length,
-              syncedInputFingerprint: transcriptFingerprint(messages),
-              syncedAssistantFingerprint: transcriptFingerprint([output]),
-            });
-          } else {
-            syncByModel.delete(model.id);
-          }
+          const syncedCount = messages.filter((message) => message.role !== "system").length;
+          const syncState: ConversationSyncState | undefined =
+            result.aborted || result.timedOut
+              ? undefined
+              : {
+                  conversationId: result.conversationId,
+                  systemPromptHash: activeSystemPromptHash,
+                  bridgeToolsKey: activeBridgeToolsKey,
+                  syncedInputCount: syncedCount,
+                  syncedInputFingerprint: transcriptFingerprint(
+                    messages.filter((message) => message.role !== "system"),
+                  ),
+                  syncedAssistantFingerprint: transcriptFingerprint([output]),
+                  ...(result.usageSnapshot ? { usageSnapshot: result.usageSnapshot } : {}),
+                };
+          if (syncState) syncByModel.set(model.id, syncState);
+          else syncByModel.delete(model.id);
           const latestUser = [...messages].reverse().find((message) => message.role === "user");
           const summary = textOfContent(latestUser?.content).trim().slice(0, 80) || undefined;
           try {
@@ -1177,7 +1291,14 @@ export function createAgyStreamSimple(
               summary,
               prior?.last_agent,
               executedRawModelId,
-              transcriptAnchor(messages),
+              syncState
+                ? anchorForTurn(messages, {
+                    assistantFingerprint: syncState.syncedAssistantFingerprint,
+                    systemPromptHash: syncState.systemPromptHash,
+                    bridgeToolsKey: syncState.bridgeToolsKey,
+                    ...(result.usageSnapshot ? { usageSnapshot: result.usageSnapshot } : {}),
+                  })
+                : transcriptAnchor(messages),
             );
           } catch {
             // Recording failures must never fail a completed turn.

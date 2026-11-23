@@ -372,6 +372,91 @@ describe("provider streamSimple", () => {
     });
   });
 
+  it("continues a recorded conversation with a delta in a new process", async () => {
+    await withIsolatedAgentDir(async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-cold-delta-"));
+      const prompts: string[] = [];
+      const session = (): ((model: { id: string }, messages: unknown[], options: object) => unknown) =>
+        createAgyStreamSimple(createRecordingFactory(), {
+          entries: [...TEST_CATALOG],
+          dir,
+          runner: makeStaticRunner(async (request) => {
+            prompts.push(request.prompt);
+            return { text: "ok", truncated: false, conversationId: "conv-cold", activity: [] };
+          }),
+        }) as never;
+      const waitForAnchor = async (): Promise<void> => {
+        const { getSession } = await import("../extensions/lib/sessions.js");
+        for (let attempt = 0; attempt < 200; attempt++) {
+          const record = await getSession(dir).catch(() => undefined);
+          if (record?.last_transcript_anchor?.assistant_fingerprint) return;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        throw new Error("store never recorded the anchor");
+      };
+
+      session()({ id: "gemini-3-8-flash" }, [userMessage("one")], {});
+      await waitForAnchor();
+
+      // A fresh session has no in-memory sync: only the record can make this a
+      // delta, and a delta is what keeps the replayed transcript off the bill.
+      session()(
+        { id: "gemini-3-8-flash" },
+        [userMessage("one"), { role: "assistant", content: "ok" }, userMessage("two")],
+        {},
+      );
+      await waitFor(() => prompts.length >= 2, "cold delta turn");
+      assert.equal(prompts[1], "two", "the stored anchor proves the prefix, so only the new message travels");
+      assert.equal(getProviderStatus(dir).diagnostics?.promptMode, "delta");
+    });
+  });
+
+  it("restarts a live conversation whose transcript was rewritten", async () => {
+    await withIsolatedAgentDir(async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-live-rewind-"));
+      const resumes: Array<string | undefined> = [];
+      const factory = createRecordingFactory();
+      const streamSimple = createAgyStreamSimple(factory, {
+        entries: [...TEST_CATALOG],
+        dir,
+        runner: makeStaticRunner(async (request) => {
+          resumes.push(request.resumeConversationId);
+          return { text: "ok", truncated: false, conversationId: "conv-live", activity: [] };
+        }),
+      }) as unknown as (model: { id: string }, messages: unknown[], options: object) => void;
+      // Turns share the session state, so each one has to settle before the
+      // next reads it.
+      const settled = async (turns: number): Promise<void> => {
+        await waitFor(
+          () => factory.events.filter((event) => event.type === "__end").length >= turns,
+          `settled turn ${turns}`,
+        );
+      };
+
+      streamSimple({ id: "gemini-3-8-flash" }, [userMessage("one")], {});
+      await settled(1);
+      streamSimple(
+        { id: "gemini-3-8-flash" },
+        [userMessage("one"), { role: "assistant", content: "ok" }, userMessage("two")],
+        {},
+      );
+      await settled(2);
+      assert.deepEqual(resumes, [undefined, "conv-live"], "a grown transcript resumes");
+
+      // /tree rewind: the opening message is replaced, so agy's conversation
+      // holds turns this transcript no longer has.
+      streamSimple(
+        { id: "gemini-3-8-flash" },
+        [userMessage("one, reworded"), { role: "assistant", content: "ok" }, userMessage("two")],
+        {},
+      );
+      await settled(3);
+      assert.equal(resumes[2], undefined, "the stale conversation is not resumed");
+      assert.equal(getProviderStatus(dir).diagnostics?.conversationRestarted, true);
+      assert.equal(getProviderStatus(dir).diagnostics?.promptFallbackReason, "earlier transcript changed");
+    });
+  });
+
   it("does not append another session's transcript to a recorded conversation", async () => {
     await withIsolatedAgentDir(async () => {
       const settle = (turns: number): Promise<void> => waitFor(() => seen.length >= turns, `recorded turn ${turns}`);

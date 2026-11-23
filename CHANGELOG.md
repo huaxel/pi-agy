@@ -7,6 +7,10 @@ for releases big enough to need them.
 
 ## 0.8.4
 
+- A provider turn keeps its warm `agy` for fifteen minutes, the upstream cache lifetime, instead of five.
+- Usage after a recycled child reports that turn's own cache reads again, and the first turn of a new process reports real tokens instead of zeros.
+- A resumed conversation continues with only the new messages in a new Pi process, instead of replaying the transcript.
+- A transcript that was rewound, regenerated or compacted starts a fresh agy conversation instead of appending to the stale one, and `/agy doctor` names that case.
 - `/agy setup` names whether agy is missing, signed out or ready, offers Google's own installer, and starts the sign-in itself instead of asking for a second terminal.
 - `/login antigravity` exists, and relays agy's own sign-in into Pi; what it stores is a marker, not a token, and `resolve` never gates on the network.
 - A signed-out CLI is recognised as signed out, not as a broken one.

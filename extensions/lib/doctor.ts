@@ -360,7 +360,8 @@ async function providerCheck(cwd: string, signal?: AbortSignal): Promise<AgyDoct
       parts.push(formatSubagentCounts(status.driver.subagents));
     }
     if (status.diagnostics?.promptMode) {
-      parts.push(`last prompt ${status.diagnostics.promptMode}${status.diagnostics.promptFallbackReason ? ` (${status.diagnostics.promptFallbackReason})` : ""}`);
+      const restarted = status.diagnostics.conversationRestarted ? ", fresh conversation" : "";
+      parts.push(`last prompt ${status.diagnostics.promptMode}${status.diagnostics.promptFallbackReason ? ` (${status.diagnostics.promptFallbackReason}${restarted})` : ""}`);
     }
     if (status.diagnostics) parts.push(`${status.diagnostics.deniedActions} denied action(s) last turn`);
     parts.push(catalog.source === "empty"
