@@ -15,7 +15,7 @@ import { getSession } from "./lib/sessions.js";
 
 import { MODEL_ALIASES, MODEL_KEYS, MODE_KEYS, parseAgyCommandArgs } from "./lib/command-args.js";
 import { executeConfirmedRun, MODE_OPTIONS, optionKey, runSessionsPicker, type InteractiveRun } from "./command-run.js";
-import { showAgents, showBridge, showDoctor, showUsage } from "./command-info.js";
+import { showAgents, showBridge, showDoctor, showSetup, showUsage } from "./command-info.js";
 
 export { parseAgyCommandArgs, type AgyCommandArgs } from "./lib/command-args.js";
 
@@ -33,7 +33,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
 
   pi.registerCommand("agy", {
     description:
-      "Run agy directly: /agy [mode] [model|model=id] [agent=name] [continue] [context=summary|recent] [timeout=10m] <prompt>; use /agy agents to list custom agents.",
+      "Run agy directly: /agy [mode] [model|model=id] [agent=name] [continue] [context=summary|recent] [timeout=10m] <prompt>; /agy setup checks the CLI and waits for sign-in; /agy agents lists custom agents.",
     getArgumentCompletions: (prefix: string) => {
       const exactPrefix = /(?:^|\s)model=(\S*)$/.exec(prefix);
       if (exactPrefix) {
@@ -84,6 +84,7 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
           "agents",
           "agent=",
           "doctor",
+          "setup",
           "usage",
           "quota",
           "bridge",
@@ -128,6 +129,15 @@ export function registerAgyCommand(pi: ExtensionAPI): void {
           return;
         }
         await showDoctor(ctx);
+        return;
+      }
+      const setupMatch = /^setup(?:\s+(.+))?$/.exec(command);
+      if (setupMatch) {
+        if (setupMatch[1]) {
+          ctx.ui.notify("agy: setup takes no arguments", "error");
+          return;
+        }
+        await showSetup(ctx);
         return;
       }
       const usageMatch = /^(?:usage|quota)(?:\s+(\S+))?$/.exec(command);

@@ -1,5 +1,31 @@
 # pi-agy improvement plans
 
+## Setup and sign-in as a relay — 021
+
+User: "auth is much easier on his repo than mine" / "not oauth but relay".
+**DONE — implemented locally, uncommitted; gate 590/590, typecheck and pack
+check pass.** `/agy setup` names the state (`missing agy` / `not signed in` /
+`ready`), offers Google's official installer behind a confirmation, and polls
+until the sign-in lands; `/login antigravity` drives `agy acp`'s own
+`authenticate` handshake and relays the URL into Pi, so agy still performs the
+exchange. A live check caught the relay forwarding the tier *upsell* URL as a
+login link, now a pinned regression. The signed-out envelope stays unverified
+(a fake `HOME` cannot sign out a Keychain-backed account), so the terminal
+handoff remains the fallback. [Plan](021-setup-and-signin-relay.md).
+
+## Prompt-cache continuity — 020
+
+User asked why agy's cache hit rate is poor and mentioned the ~15-minute cache.
+**DONE — implemented locally, uncommitted; gate 569/569, typecheck and pack
+check pass.** Live-first: usage is conversation-cumulative *across processes*
+and the upstream cache outlives the client, so the fix keeps the warm child for
+the cache lifetime, keeps differing a conversation's usage after a recycle,
+starts a fresh conversation when Pi's transcript diverged, and persists the sync
+record so a new process sends a delta instead of replaying up to 24 KB of
+transcript. Two candidate causes of unreliable cold-resume cache hits were
+tested and ruled out; what remains open is recorded, and the plan does not claim
+a cache-hit improvement — only the removed replay. [Plan](020-prompt-cache-continuity.md).
+
 ## Full /agy command model discovery — 018
 
 **DONE — released in v0.7.13.** The separate `/agy` picker now shows the full

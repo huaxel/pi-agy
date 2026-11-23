@@ -35,6 +35,7 @@ import {
   saveProviderCatalogCache,
 } from "./lib/provider-catalog-store.js";
 import { runPreflightCommand } from "./lib/spawn.js";
+import { createAgySetup } from "./lib/setup.js";
 
 export { truncate } from "./lib/output.js";
 
@@ -45,6 +46,30 @@ type StatusUi = { setStatus?: (key: string, text: string | undefined) => void };
  * their own keys, so this one only ever reports delegated work.
  */
 let backgroundUi: StatusUi | undefined;
+/**
+ * The runner is a module singleton shared across extension instances; a
+ * reload must detach the previous listener or every reload leaves another one
+ * (each holding its own module graph) on the same set.
+ */
+let backgroundFooterUnsubscribe: (() => void) | undefined;
+
+function attachBackgroundFooter(): void {
+  try {
+    backgroundFooterUnsubscribe?.();
+    backgroundFooterUnsubscribe = getBackgroundRunner().subscribe(refreshBackgroundStatus);
+  } catch {
+    backgroundFooterUnsubscribe = undefined;
+  }
+}
+
+function detachBackgroundFooter(): void {
+  try {
+    backgroundFooterUnsubscribe?.();
+  } catch {
+    // Detaching is best effort; a reload still re-attaches.
+  }
+  backgroundFooterUnsubscribe = undefined;
+}
 
 function setBackgroundStatus(text: string | undefined): void {
   try {
@@ -111,6 +136,7 @@ function registerAgyProvider(pi: ExtensionAPI): void {
     setLiveStatus(undefined);
     activeUi = undefined;
     backgroundUi = undefined;
+    detachBackgroundFooter();
     shutdown.abort();
   });
   const streamSimple = createAgyStreamSimple(
@@ -166,9 +192,25 @@ function registerAgyProvider(pi: ExtensionAPI): void {
     // pattern` — which is the exact failure the persisted roster exists to
     // prevent. A missing or signed-out CLI therefore surfaces where it belongs:
     // an empty picker, a `/agy doctor` line, and a turn error that names it.
+    // `resolve` stays unconditional on purpose (see above), but `login` is
+    // what makes `/login antigravity` exist: Pi lists providers that can
+    // explain how to sign in. Antigravity's sign-in belongs to agy, so the flow
+    // checks and waits — it never performs OAuth and never stores a token.
     auth: {
       apiKey: {
-        name: "Antigravity CLI",
+        name: "Antigravity CLI (sign in with agy)",
+        login: async (interaction) =>
+          createAgySetup().login(
+            {
+              signal: interaction.signal,
+              notify: (event) => interaction.notify(event),
+              // Pi renders this as an openable link. The URL comes from agy's
+              // own handshake; nothing here performs OAuth.
+              notifyUrl: (url) => interaction.notify({ type: "auth_url", url }),
+              prompt: (prompt) => interaction.prompt(prompt),
+            },
+            { cwd: process.cwd() },
+          ),
         resolve: async () => ({ auth: { apiKey: "not-used" } }),
       },
     },
@@ -219,6 +261,7 @@ function registerAgyProvider(pi: ExtensionAPI): void {
     if (ctx.hasUI && typeof ctx.ui?.setStatus === "function") {
       activeUi = ctx.ui;
       backgroundUi = ctx.ui;
+      attachBackgroundFooter();
       refreshBackgroundStatus();
     }
     const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(10_000)]);
@@ -261,11 +304,4 @@ export default function piAgyExtension(pi: ExtensionAPI) {
   }
 
   registerAgyTools(pi);
-  // A background run outlives the tool call that started it, so the footer is
-  // the only place its progress is visible without polling agy_tasks.
-  try {
-    getBackgroundRunner().subscribe(refreshBackgroundStatus);
-  } catch {
-    // Visibility is additive; delegation must work without it.
-  }
 }

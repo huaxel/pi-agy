@@ -327,8 +327,19 @@ describe("provider streamSimple", () => {
 
   it("only resumes a recorded conversation this transcript continues", async () => {
     await withIsolatedAgentDir(async () => {
-      const settle = (turns: number): Promise<void> => waitFor(() => seen.length >= turns, `recorded turn ${turns}`);
       const dir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-resume-"));
+      // The record is written after the turn settles, so waiting for the runner
+      // call alone races the store this test then reads.
+      const settle = async (turns: number): Promise<void> => {
+        await waitFor(() => seen.length >= turns, `recorded turn ${turns}`);
+        const { getSession } = await import("../extensions/lib/sessions.js");
+        for (let attempt = 0; attempt < 200; attempt++) {
+          const record = await getSession(dir).catch(() => undefined);
+          if (record?.last_conversation_id && record.last_transcript_anchor) return;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        throw new Error(`store never recorded turn ${turns}`);
+      };
       const seen: Array<string | undefined> = [];
       // A fresh factory per "Pi session": the in-memory resume map is per
       // session, so only a new one exercises the record on disk.

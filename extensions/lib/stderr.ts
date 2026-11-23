@@ -24,6 +24,21 @@ const AUTH_REQUIRED_STDERR = /authentication required|waiting for authentication
 
 export const MAX_STDERR_WARNING_CHARS = 300;
 export const MAX_STDERR_WARNINGS = 8;
+/**
+ * Key for the one-shot sign-in report. It shares `seen` with the warnings for
+ * dedupe, but it is not a warning: counting it against the cap would silently
+ * drop one real warning from a signed-out run.
+ */
+const AUTH_REQUIRED_KEY = "auth-required";
+
+/** Reportable warnings already emitted, ignoring non-warning markers in `seen`. */
+function warningCount(seen: ReadonlySet<string>): number {
+  let count = 0;
+  for (const key of seen) {
+    if (key !== AUTH_REQUIRED_KEY) count += 1;
+  }
+  return count;
+}
 
 export interface AgyWarnings {
   /** New, still-unreported warnings from the completed lines in `buffer`. */
@@ -51,8 +66,8 @@ export function collectAgyWarnings(
     const line = raw.trim();
     if (AUTH_REQUIRED_STDERR.test(line)) {
       // One report per run: the CLI repeats the prompt while it waits.
-      if (!seen.has("auth-required")) {
-        seen.add("auth-required");
+      if (!seen.has(AUTH_REQUIRED_KEY)) {
+        seen.add(AUTH_REQUIRED_KEY);
         authRequired = true;
       }
       continue;
@@ -62,7 +77,7 @@ export function collectAgyWarnings(
       line.length > MAX_STDERR_WARNING_CHARS
         ? `${line.slice(0, MAX_STDERR_WARNING_CHARS - 1)}…`
         : line;
-    if (seen.has(bounded) || seen.size >= limit) continue;
+    if (seen.has(bounded) || warningCount(seen) >= limit) continue;
     seen.add(bounded);
     warnings.push(bounded);
   }

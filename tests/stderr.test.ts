@@ -54,6 +54,17 @@ describe("agy stderr warnings", () => {
     assert.equal(many.warnings.length, MAX_STDERR_WARNINGS);
   });
 
+  it("keeps the cap for warnings, not for the one-shot sign-in marker", () => {
+    const seen = new Set<string>();
+    const signIn = collectAgyWarnings("Error: authentication required. Run 'agy' to log in, then retry.\n", seen, 2);
+    assert.equal(signIn.authRequired, true);
+    // Two warnings still fit under a limit of two: the marker is not a warning.
+    const both = collectAgyWarnings("warning: first\nwarning: second\n", seen, 2);
+    assert.deepEqual(both.warnings, ["warning: first", "warning: second"]);
+    const over = collectAgyWarnings("warning: third\n", seen, 2);
+    assert.deepEqual(over.warnings, []);
+  });
+
   it("reports a warning from a delegated run as status, not activity", async () => {
     await withTimingFakeAgy(
       { onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } },

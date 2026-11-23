@@ -17,7 +17,61 @@ pi install npm:@juanbenjumea/pi-agy
 - **Model tiers without clutter.** A family with several thinking levels is one picker entry with a level toggle (`low` → `xhigh`), not five near-identical rows.
 - **Delegation when you want it.** `agy_execute` and `/agy` hand a task to agy as a subprocess, with optional background runs and quota reporting.
 
-Quick start: install, make sure `agy` is signed in, open `/model`, choose `antigravity/*`. If anything looks wrong, `/agy doctor`.
+## Setup
+
+Two steps, and only the second one is interactive:
+
+```bash
+pi install npm:@juanbenjumea/pi-agy
+# then, if you do not have it yet:
+curl -fsSL https://antigravity.google/cli/install.sh | bash   # Windows: irm https://antigravity.google/cli/install.ps1 | iex
+```
+
+1. **Install agy** — Google's CLI, if it is not already there.
+2. **Sign in to agy** — run `agy` once and finish its browser sign-in.
+
+Then open `/model` and choose `antigravity/*`.
+
+**Don't want to guess which step you're on?** `/agy setup` names the exact
+state — `missing agy`, `not signed in`, `ready` — offers Google's own installer
+if the CLI is absent, and if you are signed out it *starts* agy's sign-in for
+you: a browser window opens, and the command watches until the account is usable
+(about twenty seconds in practice) then refreshes the picker. The same flow is
+available as `/login antigravity`, for people who look there first.
+
+**Auth deliberately stays with agy.** This package performs no OAuth, stores no
+Google credentials, and opens no connection to Google — it runs Google's own
+binary, which owns the account and the network call. That is why setup is a
+handoff and not a login form: `/login antigravity` only records a marker that
+`agy` is signed in.
+
+It does, however, relay. `agy` ships an agent-protocol mode (`agy acp`) whose
+`authenticate` step exists so a client can trigger its sign-in; `/login
+antigravity` drives that handshake and, when the CLI hands back a sign-in URL,
+shows it as an openable link in Pi. agy still performs the OAuth exchange and
+opens the browser. If no URL arrives, you get the terminal command instead —
+the same handoff as before.
+
+## How this differs from other Antigravity integrations
+
+Several Pi packages expose `antigravity/*` models and mean very different
+things by it. Worth knowing which one you installed:
+
+| | who authenticates | who calls Google | models come from |
+|---|---|---|---|
+| **pi-agy** (this package) | `agy`, untouched by this package | the official `agy` binary, `--input-format stream-json` | `agy models` |
+| `pi-antigravity` and its forks | the package (own OAuth, tokens in `~/.pi/agent/auth.json`) | the package itself, against `cloudcode-pa.googleapis.com` | the Cloud Code Assist API |
+| *reference:* T3 Code (not a Pi package) | the Antigravity runtime it manages | the official `agy` binary, `agy acp` | the CLI's ACP handshake |
+
+The middle row is the shape Google has been disabling accounts over: a
+reimplementation talking to the consumer OAuth endpoints directly. The first and
+last rows differ only in which documented mode of the same binary they drive.
+This package never holds a Google token, never opens a connection to Google, and
+the only `https://` URLs in `extensions/` are the official installer links.
+
+That is a description, not a permission: whether third-party harnesses may drive
+the CLI at all is Google's call, and this package is not affiliated with or
+endorsed by Google. Use it with an account you are willing to carry that risk on.
 
 ## Two ways to use it
 
@@ -117,6 +171,10 @@ Resolution order: `defaultModel` → `defaultModelCommand` → `quotaBalancing` 
   delegated run or a provider turn. That stderr line stops the child and returns one recovery
   sentence, rather than the run idling out its timeout. The OAuth URL is never copied into Pi.
 - **A turn fails on silence, not on duration.** agy can legitimately emit nothing while one shell tool or one large edit runs, and a flat per-turn deadline killed those turns mid-work. A live phase now stops only after 15 minutes with no stream activity, and a 30-minute ceiling bounds a phase that keeps emitting activity without finishing. The error says which one fired: `went quiet for 15m with no stream activity` or `timed out`. A phase parked on a Pi tool is owned by Pi and has its own deadline.
+- **The prompt cache lives upstream, and it outlives a process.** Most of a turn's input is a stable prefix (agy's own system prompt and built-in tool schemas, plus the bridged MCP schemas), so a continued conversation reads it from the provider cache instead of paying for it again: a live two-turn check on one child reported `input 10181 / cache_read 0`, then `input 2119 + cache_read 8137`. Measured on agy 1.5.15, that cache survives a *process* restart too — a second process resuming the same conversation reported `cache_read 28626` on its first turn — so the win comes from continuing the conversation, not from keeping one child alive. The child is still kept for 15 minutes of idle, matching the cache lifetime, because a cold start is latency you do not need to pay inside that window.
+- **Usage counters are conversation-cumulative, not per turn.** agy's `result.usage` is a running total, so consecutive turns are differenced against the last snapshot to avoid double counting. The snapshot is remembered per conversation across recycles (bounded to eight), which is what lets a respawned child still report the `cache_read` of its first resumed turn instead of a blank row.
+- **A new process continues the conversation instead of replaying it.** What the last completed turn sent — transcript length, prefix and reply fingerprints, a hash of the system prompt, the bridged tool catalog key, and the conversation's cumulative usage — is recorded in `agy-sessions.json` beside the conversation id. A fresh process validates that record against the transcript it is about to send and, when it still holds, sends only the new messages; a stale one degrades to a full prompt. The recorded usage snapshot is what lets that first turn report its own tokens instead of a blank row: measured `input 2674 + cache_read 7249` when the upstream prefix cache answered and `input 9732` when it did not, against `~19k` for the same turn replayed in full.
+- **A diverged transcript starts a new conversation.** After a `/tree` rewind, a regenerated reply or a compaction, agy's server-side conversation still holds turns Pi no longer has. Resuming it would put the abandoned turns in the model's context and replay the kept ones a second time, so the next turn starts clean and sends the transcript as the whole conversation. `/agy doctor` names this case. A changed system prompt or tool catalog is *not* divergence: that history is still valid, so it resumes.
 
 ## Development
 

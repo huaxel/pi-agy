@@ -8,7 +8,9 @@ import {
 } from "./lib/cli.js";
 import { runAgyDoctor } from "./lib/doctor.js";
 import { loadAgyConfig, saveAgyConfig } from "./lib/config.js";
-import { describeProviderBridges, resetProviderBridges } from "./lib/provider.js";
+import { AGY_PROVIDER_ID, describeProviderBridges, resetProviderBridges } from "./lib/provider.js";
+import { createAgySetup } from "./lib/setup.js";
+import { INSTALL_HINT } from "./lib/spawn.js";
 
 /** `/agy doctor` — diagnose the CLI and local integration without inference. */
 export async function showDoctor(ctx: ExtensionCommandContext): Promise<void> {
@@ -109,5 +111,105 @@ export async function showBridge(ctx: ExtensionCommandContext, arg?: string): Pr
     }
   } finally {
     ctx.ui.setStatus("agy", undefined);
+  }
+}
+
+/**
+ * The command's own wait bound. Shorter than the library default because a
+ * command blocks the TUI and has no cancellation while the agent is idle;
+ * measured sign-ins completed in well under a minute.
+ */
+const SETUP_COMMAND_WAIT_MS = 2 * 60_000;
+
+/**
+ * `/agy setup` — guided install/sign-in check. Signing in still happens in
+ * agy; this names the exact state, the exact command, and then watches for the
+ * sign-in so the picker fills in without a restart.
+ */
+export async function showSetup(ctx: ExtensionCommandContext): Promise<void> {
+  const setup = createAgySetup();
+  try {
+    await ctx.waitForIdle();
+    ctx.ui.setStatus("agy", "agy: checking installation and sign-in…");
+    const status = await setup.detect({ cwd: ctx.cwd, signal: ctx.signal });
+    if (status.state === "ready") {
+      ctx.ui.notify(`${status.detail}. Open /model and pick antigravity/*.`, "info");
+      await refreshModels(ctx);
+      return;
+    }
+    if (status.state === "missing-cli") {
+      ctx.ui.notify(`${INSTALL_HINT}, then run \`agy\` once to sign in, then /agy setup again.`, "warning");
+      return;
+    }
+    if (status.state === "error") {
+      ctx.ui.notify(`agy setup could not verify the CLI: ${status.detail}`, "error");
+      return;
+    }
+
+    // Signed out. Start agy's own sign-in rather than sending the user to a
+    // second terminal: `agy acp` opens the browser and performs the exchange,
+    // and this only watches. The command context has no abort signal while the
+    // agent is idle, so the wait is bounded and says so instead of promising a
+    // key that does not exist.
+    const relay = setup.startSignIn({
+      cwd: ctx.cwd,
+      signal: ctx.signal,
+      onUrl: (url) =>
+        ctx.ui.notify(`agy asked for this sign-in link: ${url}`, "info"),
+    });
+    ctx.ui.notify(
+      relay
+        ? "Starting agy's sign-in — finish it in the browser window agy opens. If no window appears, run `agy` in a terminal; this keeps waiting either way."
+        : "agy is not signed in. Run `agy` in a terminal and finish the browser sign-in; this keeps waiting either way.",
+      "info",
+    );
+    let relayHintShown = false;
+    const final = await setup.waitForSignIn({
+      cwd: ctx.cwd,
+      signal: ctx.signal,
+      timeoutMs: SETUP_COMMAND_WAIT_MS,
+      onProgress: (elapsedMs) => {
+        ctx.ui.setStatus(
+          "agy",
+          `agy: waiting for sign-in (${Math.round(elapsedMs / 1000)}s, up to ${Math.round(SETUP_COMMAND_WAIT_MS / 60_000)}m)…`,
+        );
+        // One nudge, not a stream of them: the browser path can legitimately
+        // take a while, and the manual command is the only other way in.
+        if (relay && !relayHintShown && elapsedMs > 20_000) {
+          relayHintShown = true;
+          ctx.ui.notify("Still waiting for agy's sign-in. If no browser opened, run `agy` in a terminal — this picks it up.", "info");
+        }
+      },
+    });
+    relay?.stop();
+    if (final.state !== "ready") {
+      ctx.ui.notify(
+        `agy setup: still not signed in after ${Math.round(SETUP_COMMAND_WAIT_MS / 60_000)} minutes. Run \`agy\` in a terminal to sign in, then /agy setup again. ${final.detail}`,
+        "warning",
+      );
+      return;
+    }
+    ctx.ui.notify(`${final.detail}. Open /model and pick antigravity/*.`, "info");
+    await refreshModels(ctx);
+  } catch (error) {
+    if (ctx.signal?.aborted) ctx.ui.notify("agy: setup cancelled", "info");
+    else ctx.ui.notify(`agy setup failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+  } finally {
+    ctx.ui.setStatus("agy", undefined);
+  }
+}
+
+async function refreshModels(ctx: ExtensionCommandContext): Promise<void> {
+  try {
+    const result = await ctx.modelRegistry.refresh({
+      providers: [AGY_PROVIDER_ID],
+      allowNetwork: true,
+      signal: ctx.signal,
+    });
+    if (result.errors.has(AGY_PROVIDER_ID)) {
+      ctx.ui.notify("Antigravity models did not refresh; open /model to retry.", "warning");
+    }
+  } catch {
+    // A refresh failure is not a setup failure: the picker retries on open.
   }
 }

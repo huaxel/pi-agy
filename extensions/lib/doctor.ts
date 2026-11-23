@@ -55,7 +55,7 @@ export async function runAgyDoctor(
     cliAvailable = true;
   } catch (error) {
     throwIfCancelled(signal);
-    checks.push({ name: "CLI", status: "error", detail: errorMessage(error) });
+    checks.push({ name: "CLI", status: "error", detail: withSetupHint(errorMessage(error)) });
   }
 
   if (cliAvailable) {
@@ -76,7 +76,7 @@ export async function runAgyDoctor(
           : "agy models returned no supported stable model aliases",
       });
     } else {
-      checks.push({ name: "Models", status: "error", detail: errorMessage(modelsResult.reason) });
+      checks.push({ name: "Models", status: "error", detail: withSetupHint(errorMessage(modelsResult.reason)) });
     }
 
     if (agentsResult.status === "fulfilled") {
@@ -310,6 +310,17 @@ async function lockCheck(cwd: string): Promise<AgyDoctorCheck> {
 }
 
 /** Provider runtime state and passive model-catalog provenance. Never throws. */
+/**
+ * Both of doctor's actionable failures — no CLI, or a CLI that cannot list
+ * models because it is signed out — are exactly what `/agy setup` exists for,
+ * so name it instead of leaving the user to guess the next command.
+ */
+function withSetupHint(detail: string): string {
+  return /not installed|not authenticated|authentication required|sign in/i.test(detail)
+    ? `${detail} — run /agy setup`
+    : detail;
+}
+
 async function providerCheck(cwd: string, signal?: AbortSignal): Promise<AgyDoctorCheck> {
   try {
     const status = getProviderStatus(cwd);

@@ -11,7 +11,14 @@
  * URL itself is never echoed: it is long, single-use, and belongs in a terminal.
  */
 
-const AUTH_FAILURE = /authentication failed or timed out|authentication required|waiting for authentication/i;
+/**
+ * Every unauthenticated shape agy is known to print. `agy models` does not use
+ * the print-mode wording: measured on 1.5.15, a signed-out CLI answers with
+ * `Error: Please sign in to view available models.` and exits 1, which the
+ * earlier pattern missed — a signed-out machine was reported as a broken CLI.
+ */
+const AUTH_FAILURE =
+  /authentication failed or timed out|authentication required|waiting for authentication|please sign in|sign in to view|not logged in|not logged into|not authenticated|login required/i;
 
 /** One recovery sentence: what is wrong and the only thing that fixes it. */
 export const AGY_AUTH_RECOVERY =
