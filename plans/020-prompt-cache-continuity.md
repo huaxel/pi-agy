@@ -1,6 +1,6 @@
 # Plan 020: Prompt-cache continuity for provider turns
 
-Status DONE (implemented locally, uncommitted) · Priority P1 · Effort M · Risk MEDIUM · Confidence HIGH for the mechanics, MEDIUM for the cache claims
+Status DONE — released in 0.8.4 · Priority P1 · Effort M · Risk MEDIUM · Confidence HIGH for the mechanics and for the cold-resume cache claim
 Category cost/latency. Depends on: none. Written against `26fe09d` on 2026-11-23.
 
 ## Why
@@ -137,7 +137,9 @@ adding a per-process directory would reproduce the same bug).
 
 ## Evidence
 
-- `npm run gate`: typecheck, **569 tests**, pack check.
+- `npm run gate` at release: typecheck, **649 tests**, pack check. The only
+  local failure is `verify.test.ts` expecting `Justfile` on a case-insensitive
+  filesystem; it fails identically on untouched `origin/main` and passes on CI.
 - New regression tests: cold-resume delta from the store, cold-resume divergence
   → fresh conversation, failed turn clears only its own record, store
   round-trip/validation/refusal, retained usage baseline across a recycle,

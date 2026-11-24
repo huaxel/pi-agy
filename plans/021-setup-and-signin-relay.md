@@ -1,6 +1,6 @@
 # Plan 021: Setup and sign-in as a relay, not a login form
 
-Status DONE (implemented locally, uncommitted) · Priority P2 · Effort M · Risk MEDIUM · Confidence HIGH for the mechanism, MEDIUM for the signed-out relay
+Status DONE — released in 0.8.4 · Priority P2 · Effort M · Risk MEDIUM · Confidence HIGH for the mechanism, MEDIUM for the signed-out relay
 Category onboarding/compliance. Depends on: none (extends the provider from 020). Written against `26fe09d` on 2026-11-23.
 
 ## Why
@@ -122,7 +122,7 @@ shell for the `agy` hints it prints).
 
 ## Evidence
 
-- `npm run gate`: typecheck, **593 tests**, pack check.
+- `npm run gate` at release: typecheck, **649 tests**, pack check.
 - `tests/setup.test.ts` (15): all three states, transient error kept distinct,
   cancellation, poll-until-signed-in with a fake clock, deadline, and the login
   flow's four branches.
