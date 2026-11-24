@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -177,19 +177,73 @@ export async function ensureImageStagingRoot(workspaceDir?: string): Promise<str
   return scoped;
 }
 
-/** Resolve (creating once) the process staging root that scopes live in. */
+/** Name of the staging root; stable so every process hands agy the same path. */
+const STAGING_ROOT_NAME = "pi-agy-images";
+/** Leftovers older than this are swept when a process first resolves the root. */
+const STAGING_SWEEP_MS = 24 * 60 * 60_000;
+
+/**
+ * Resolve (creating once) the staging root that workspace scopes live in.
+ *
+ * The path is *stable* rather than a per-process `mkdtemp`. Every agy child is
+ * invoked with this directory in `--add-dir`, so a fresh path per process
+ * changed the workspace surface agy sees and busted the upstream prompt cache on
+ * the next resumed turn: measured on 1.5.15, a cold resume read 0 cached tokens
+ * with a per-process root and ~7.3k with a fixed one.
+ *
+ * Stability must not cost the ownership guarantee the old `mkdtemp` gave, so the
+ * directory is verified (not a symlink, a directory, owned by this user) before
+ * it is used, and a path that fails any check falls back to a private one.
+ */
 async function ensureSharedImageStagingRoot(): Promise<string> {
-  if (!imageStagingRoot) {
-    // mkdtemp (not join+mkdir): atomic, unique, 0700 — no pre-creation or
-    // symlink race between check and creation.
-    imageStagingRoot = await mkdtemp(path.join(os.tmpdir(), "pi-agy-images-"));
-    try {
-      await chmod(imageStagingRoot, 0o700);
-    } catch {
-      // mkdtemp already guarantees 0700; best effort.
+  if (imageStagingRoot) return imageStagingRoot;
+  const stable = path.join(os.tmpdir(), STAGING_ROOT_NAME);
+  try {
+    await mkdir(stable, { recursive: true, mode: 0o700 });
+    const info = await lstat(stable);
+    const uid = process.getuid?.();
+    if (info.isSymbolicLink() || !info.isDirectory() || (uid !== undefined && info.uid !== uid)) {
+      throw new Error("staging root is not a directory owned by this user");
     }
+    await chmod(stable, 0o700).catch(() => undefined);
+    imageStagingRoot = stable;
+    await sweepStaleStaging(stable);
+  } catch {
+    // Never write through a path this user does not own.
+    imageStagingRoot = await mkdtemp(path.join(os.tmpdir(), `${STAGING_ROOT_NAME}-`));
+    await chmod(imageStagingRoot, 0o700).catch(() => undefined);
   }
   return imageStagingRoot;
+}
+
+/**
+ * Drop workspace scopes nothing has touched for a day. A fixed root would
+ * otherwise accumulate one directory per workspace forever, which the old
+ * per-process root did too, just less visibly. A live turn keeps its scope's
+ * mtime fresh, and a parked turn cannot outlive 30 minutes.
+ */
+async function sweepStaleStaging(root: string): Promise<void> {
+  try {
+    const entries = await readdir(root, { withFileTypes: true });
+    const now = Date.now();
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const target = path.join(root, entry.name);
+      try {
+        const info = await stat(target);
+        if (now - info.mtimeMs > STAGING_SWEEP_MS) await rm(target, { recursive: true, force: true });
+      } catch {
+        // Another process may be reaping it already.
+      }
+    }
+  } catch {
+    // A failed sweep only costs disk.
+  }
+}
+
+/** Tests and teardown: forget the resolved root so the next call re-resolves. */
+export function resetImageStagingRoot(): void {
+  imageStagingRoot = undefined;
 }
 
 /**

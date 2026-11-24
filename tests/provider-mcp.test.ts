@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { AgyProviderDriver } from "../extensions/lib/provider-driver.js";
 import { withTimingFakeAgy, awaitWithWatchdog } from "./timing-helpers.js";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -87,6 +87,42 @@ async function advertisedBuiltinNames(): Promise<string[]> {
 }
 
 describe("bridge tool name reservation", () => {
+  it("keeps the config dir and port stable per workspace, and falls back when taken", async () => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bridge-stable-"));
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pi-agy-bridge-ws-"));
+    try {
+      // Two sequential processes (the second after the first released the port)
+      // must hand agy the same --add-dir path, or the prompt cache is busted on
+      // every resumed turn.
+      const first = await startMcpBridge(workspace, { idleSweep: "manual" });
+      assert.ok(first);
+      const firstDir = first.describe().configDir;
+      const firstUrl = first.describe().url;
+      await first.stop();
+
+      const second = await startMcpBridge(workspace, { idleSweep: "manual" });
+      assert.ok(second);
+      assert.equal(second.describe().configDir, firstDir);
+      assert.equal(second.describe().url, firstUrl);
+
+      // A second live session for the same workspace cannot share the port, so
+      // it must not share the config file either.
+      const third = await startMcpBridge(workspace, { idleSweep: "manual" });
+      assert.ok(third);
+      assert.notEqual(third.describe().configDir, firstDir);
+      assert.notEqual(third.describe().url, firstUrl);
+      await third.stop();
+      await second.stop();
+    } finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+      await rm(agentDir, { recursive: true, force: true });
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("renames a Pi tool that sanitizes onto a built-in name", () => {
     const tools = projectBridgeTools(
       [

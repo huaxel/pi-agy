@@ -21,7 +21,7 @@
  * without `--add-dir`.
  */
 
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import * as os from "node:os";
@@ -144,6 +144,34 @@ let bridgeSequence = 0;
 function allocateBridgeConfigDir(): string {
   bridgeSequence += 1;
   return path.join(bridgeBaseDir(), `bridge-${process.pid}-${bridgeSequence}`);
+}
+
+/** Workspace hash used for the stable dir and the preferred port. */
+function workspaceKey(workspaceDir: string): string {
+  return createHash("sha256").update(path.resolve(workspaceDir)).digest("hex");
+}
+
+/**
+ * Path agy sees for this workspace's bridge config. It must be *stable across
+ * processes*: every agy child receives it in `--add-dir`, so a per-process name
+ * changes the workspace surface agy is given and busts the upstream prompt
+ * cache on the next resumed turn. Measured on 1.5.15: a cold resume read 0
+ * cached tokens with a per-process path and ~7.3k with a stable one (the port
+ * inside the config file made no difference).
+ */
+function stableBridgeConfigDir(workspaceDir: string): string {
+  return path.join(bridgeBaseDir(), `ws-${workspaceKey(workspaceDir).slice(0, 16)}`);
+}
+
+/**
+ * Port to try first: stable per workspace for the same reason, chosen from the
+ * dynamic range. If it is taken — another Pi process serving this workspace —
+ * the caller falls back to a unique dir and an ephemeral port, which is the
+ * case the per-process name existed for.
+ */
+function preferredBridgePort(workspaceDir: string): number {
+  const hash = createHash("sha256").update(workspaceKey(workspaceDir)).digest();
+  return 49_152 + (hash.readUInt32BE(0) % 16_000);
 }
 
 function bridgeConfigPath(configDir: string): string {
@@ -597,7 +625,8 @@ export async function startMcpBridge(
         }, Math.max(50, Math.min(sessionIdleMs, 60_000)));
   sweep?.unref();
 
-  const configDir = allocateBridgeConfigDir();
+  // Chosen once the bind succeeds: the stable dir only when its port was free.
+  let configDir = "";
   // Filled after bind; the request handler validates Host against it
   // (defense-in-depth against DNS rebinding past the loopback bind).
   const bound = { port: 0 };
@@ -775,15 +804,31 @@ export async function startMcpBridge(
     }
   };
 
-  try {
-    await sweepStaleBridgeDirs();
-    await new Promise<void>((resolve, reject) => {
-      http.once("error", reject);
-      http.listen(0, "127.0.0.1", () => {
-        http.off("error", reject);
+  const bind = (port: number): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        http.off("error", onError);
+        reject(error);
+      };
+      http.once("error", onError);
+      http.listen(port, "127.0.0.1", () => {
+        http.off("error", onError);
         resolve();
       });
     });
+
+  try {
+    await sweepStaleBridgeDirs();
+    try {
+      await bind(preferredBridgePort(dir));
+      configDir = stableBridgeConfigDir(dir);
+    } catch {
+      // Preferred port is taken (another live session for this workspace) or
+      // unusable: keep the collision-proof per-process dir instead. The path
+      // changes, which costs a prompt-cache re-read rather than correctness.
+      configDir = allocateBridgeConfigDir();
+      await bind(0);
+    }
     const address = http.address();
     const port = typeof address === "object" && address ? address.port : 0;
     if (!port) throw new Error("bridge bound no port");

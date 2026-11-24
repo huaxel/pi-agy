@@ -9,6 +9,7 @@ for releases big enough to need them.
 
 - A provider turn keeps its warm `agy` for fifteen minutes, the upstream cache lifetime, instead of five.
 - Usage after a recycled child reports that turn's own cache reads again, and the first turn of a new process reports real tokens instead of zeros.
+- A resumed turn reads the prompt cache again: the two directories pi-agy adds to agy's workspace (the bridge config and the image staging root) are now stable per workspace instead of per process, which is what invalidated the prefix in a new Pi process. A cold resume went from 0 cached tokens to ~7.4k of 9.7k.
 - A resumed conversation continues with only the new messages in a new Pi process, instead of replaying the transcript.
 - A transcript that was rewound, regenerated or compacted starts a fresh agy conversation instead of appending to the stale one, and `/agy doctor` names that case.
 - `/agy setup` names whether agy is missing, signed out or ready, offers Google's own installer, and starts the sign-in itself instead of asking for a second terminal.

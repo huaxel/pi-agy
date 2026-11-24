@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import { withTimingFakeAgy, awaitWithWatchdog, nativeSetTimeout, type FakeChild } from "./timing-helpers.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -10,7 +11,7 @@ import {
 } from "../extensions/lib/provider.js";
 import { BRIDGE_TOKEN_HEADER, DEFAULT_PARK_ESCALATE_MS } from "../extensions/lib/provider-mcp.js";
 import { afterEach, describe, it, mock } from "node:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 
 import {
   buildProviderPermissionSettings,
@@ -1223,6 +1224,37 @@ describe("provider image staging", () => {
     assert.deepEqual(await (await import("node:fs/promises")).readdir(rootB), []);
     await stat(file);
     await staged.cleanup();
+  });
+
+  it("keeps the --add-dir path stable across processes and refuses a foreign root", async () => {
+    const { ensureImageStagingRoot, resetImageStagingRoot } = await import("../extensions/lib/provider.js");
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "pi-agy-ws-stable-"));
+    const first = await ensureImageStagingRoot(workspace);
+    // Stable across a re-resolve, which is what keeps agy's workspace surface
+    // identical between Pi processes: a per-process root busted the prompt cache
+    // on every resumed turn (measured cache_read 0 vs ~7.3k).
+    resetImageStagingRoot();
+    assert.equal(await ensureImageStagingRoot(workspace), first);
+    assert.ok(first.endsWith(path.sep + createHash("sha256").update(path.resolve(workspace)).digest("hex").slice(0, 16)));
+
+    // A planted symlink must not be written through: the resolver falls back.
+    const planted = await mkdtemp(path.join(os.tmpdir(), "pi-agy-planted-"));
+    const link = path.join(planted, "pi-agy-images");
+    await symlink(planted, link);
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = planted;
+    resetImageStagingRoot();
+    try {
+      const root = await ensureImageStagingRoot(workspace);
+      // The fallback lives in the same TMPDIR, so compare components: what
+      // matters is that the planted symlink is not the entry we used.
+      const top = path.relative(planted, root).split(path.sep)[0];
+      assert.notEqual(top, "pi-agy-images", `must not write through the planted link: ${root}`);
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
+      resetImageStagingRoot();
+    }
   });
 
   it("rejects an oversized image by size before decoding it", async () => {

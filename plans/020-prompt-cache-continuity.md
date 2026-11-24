@@ -87,31 +87,53 @@ Two facts fall out of this, and both were load-bearing for the change:
   snapshot, so the first cold-resumed turn reports its own tokens. A failed or
   partial turn clears the record — only for the conversation that turn touched.
 
-## What is explicitly not claimed
+## The cold-resume miss, found
 
-The prefix-cache hit on a cold resume is **not reliable through pi-agy**: 1 of 5
-samples hit (`input 2674 + cache_read 7249`), while raw `agy` with identical
-flags, directory, model and `--disable-slash-commands` hit 5 of 5. Four
-candidate causes were tested, each with a two-turn raw `agy` run that should
-have reproduced a miss if the cause were real:
+What started as an unexplained 1-in-5 cache hit on cold resumes turned out to be
+pi-agy's own doing, and it took two candidate causes rather than one:
 
-- **per-process `--add-dir` paths** — raw runs whose extra `--add-dir` differed
-  between the two processes still hit the cache (7531 cached).
-- **the MCP bridge** (its `.agents/mcp_config.json` carries a random-port
-  `serverUrl`) — with `providerBridge: false` the provider still missed
-  (`input 9629 / cache_read 0`).
-- **graceful shutdown** — `SIGTERM` between the two raw turns still hit (7283).
-- **the rendered first-turn prompt** — a provider-shaped
-  `System instructions: … Current message: …` first turn followed by a plain
-  delta still hit (7292).
-- **timing** — an immediate resume with no sleep still hit (7282).
+**Two directories pi-agy adds to agy's workspace changed name per process** — the
+MCP bridge's config dir (`bridge-<pid>-<seq>`) and the image staging root
+(`pi-agy-images-<mkdtemp>`). Every agy child receives both in `--add-dir`, so the
+workspace surface it is given differed between Pi processes and the upstream
+prefix cache could not be reused.
 
-What remains is not visible from outside the CLI: the raw harness and the
-provider harness differ only in details already ruled out, so the next step is
-agy-side inspection (its own request log under `~/.gemini/antigravity-cli/`), not
-more guessing. Until then the guaranteed saving is the transcript replay this
-removes — ~9.5k input tokens on a cold resume, and it no longer grows with
-history — not the cache hit.
+Measured on 1.5.15, two turns per row, `cache_read` on the *second* turn of a
+fresh process:
+
+| variation | result |
+|---|---|
+| per-process staging dir (what shipped) | `input 19006 / cache_read 0` |
+| one fixed staging dir for both processes | `cache_read 7326` |
+| staging stable, bridge off | `cache_read 7339` |
+| staging stable, bridge on, stable config dir, **different port inside it** | `cache_read 7293` |
+| everything stable, through the provider | `input 2250 / cache_read 7420` |
+
+Two consequences worth recording:
+
+- The port, the token and the config file's contents do **not** matter; only the
+  directory path does. So the bridge keeps binding an ephemeral port and writing
+  a fresh URL — the path is what had to be stable.
+- The earlier "ruled out" conclusions for `--add-dir` paths and for the bridge
+  were **wrong**: each was confounded by the other, since both were per-process
+  at the same time. Ruling a cause out requires the other causes to be fixed
+  first, which is the real lesson of this plan.
+
+Fixes: the staging root is a stable, verified directory under the temp dir (not a
+symlink, a directory, owned by this user — otherwise it falls back to a private
+`mkdtemp`), with a 24-hour sweep of stale workspace scopes; the bridge prefers a
+workspace-derived port and a workspace-derived config dir, and falls back to the
+old per-process dir and an ephemeral port when that port is already taken by
+another live session in the same workspace.
+
+## What is still not claimed
+
+Nothing about the cache left open: a cold resume now reads the prefix, twice
+measured, with the mechanism understood.
+
+Not verified: the installer path on Windows (plan 021), and behaviour on a
+machine whose `--add-dir` set differs for some other reason (another package
+adding a per-process directory would reproduce the same bug).
 
 ## Evidence
 
@@ -124,9 +146,12 @@ history — not the cache hit.
 - Mutation checks: removing the store seed fails both cold-resume tests;
   removing the abandonment guard fails the restart test; restoring the old
   re-prime path fails the recycle test.
-- Live: `npm run test:provider` (warm child, two turns, reuse) still reports
-  `input 2119 + cache_read 8140`; cold-resume measurements above from 12 billable
-  probe turns.
+- Live: `npm run test:provider` (warm child, two turns) reports
+  `input 2119 + cache_read 8140`; the cold-resume table above came from raw `agy`
+  probes plus provider runs, and the final row is a real provider cold resume.
+- Tests: the bridge's config dir and port are stable per workspace and fall back
+  when the port is taken; the staging root is stable across a re-resolve and
+  refuses a planted symlink.
 
 ## Risks
 
