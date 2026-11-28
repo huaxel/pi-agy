@@ -45,6 +45,7 @@ import type {
 } from "./provider-models.js";
 import {
   diffAgyUsage,
+  normalizeAgyUsage,
   validateAgyUsage,
   ZERO_USAGE_BASELINE,
   type NormalizedProviderUsage,
@@ -110,7 +111,7 @@ export interface DriverPark {
  */
 export type DriverTurnEnd =
   | { kind: "done"; outcome: ProviderDriverOutcome }
-  | { kind: "parked"; park: DriverPark; parks: DriverPark[] };
+  | { kind: "parked"; park: DriverPark; parks: DriverPark[]; usage?: NormalizedProviderUsage };
 
 export interface ProviderDriverStats {
   spawns: number;
@@ -177,6 +178,8 @@ interface ActiveTurn {
   activity: string[];
   seenActivity: Set<string>;
   runResult: AgyRunResult;
+  /** Most recent validated single-step agent_response usage seen in the current phase. */
+  lastStepUsage?: NormalizedProviderUsage;
   /** Process outcome is final; pendingTerminal may still own continuation delivery. */
   settled: boolean;
   /** Suspended mid-turn on a parked bridge call: child alive, timers off. */
@@ -350,7 +353,8 @@ export class AgyProviderDriver {
     (turn.suspendedTimer as unknown as { unref?: () => void }).unref?.();
     const phase = turn.phase;
     turn.phase = undefined;
-    phase.resolve({ kind: "parked", park: parks[0], parks });
+    const usage = turn.lastStepUsage;
+    phase.resolve({ kind: "parked", park: parks[0], parks, ...(usage ? { usage } : {}) });
   }
 
   private clearSuspendedTimer(turn: ActiveTurn): void {
@@ -430,6 +434,7 @@ export class AgyProviderDriver {
       // already-aborted signal may settle synchronously.
       turn.phase = { resolve, reject };
       turn.suspended = false;
+      turn.lastStepUsage = undefined;
       this.clearSuspendedTimer(turn);
       if (options?.onText) turn.onText = options.onText;
       if (options?.onThinking) turn.onThinking = options.onThinking;
@@ -770,6 +775,13 @@ export class AgyProviderDriver {
       if (typeof record.response_text === "string") {
         this.pushLiveText(turn, undefined, record.response_text);
       }
+      if (step.state === "DONE" && step.usage !== undefined) {
+        const validatedStepUsage = validateAgyUsage(step.usage);
+        const normalized = validatedStepUsage ? normalizeAgyUsage(validatedStepUsage) : undefined;
+        if (normalized && normalized.totalTokens > 0) {
+          turn.lastStepUsage = normalized;
+        }
+      }
     }
     // Shared accumulator: terminal status, usage, denied actions, and
     // conversation ids track exactly like the former per-turn runner. It runs
@@ -829,10 +841,10 @@ export class AgyProviderDriver {
       capped = capped.slice(0, MAX_TURN_TEXT_CHARS);
       turn.truncated = true;
     }
-    let usage: NormalizedProviderUsage | undefined;
+    let usage: NormalizedProviderUsage | undefined = turn.lastStepUsage;
     const validatedUsage = validateAgyUsage(result.usage);
     if (validatedUsage) {
-      if (this.usageBaseline) {
+      if (!usage && this.usageBaseline) {
         usage = diffAgyUsage(validatedUsage, this.usageBaseline);
       }
       this.usageBaseline = validatedUsage;

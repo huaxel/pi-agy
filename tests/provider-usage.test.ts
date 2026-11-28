@@ -6,6 +6,7 @@ import { AgyProviderDriver } from "../extensions/lib/provider-driver.js";
 import {
   createAgyStreamSimple,
   diffAgyUsage,
+  normalizeAgyUsage,
   validateAgyUsage,
   ZERO_USAGE_BASELINE,
   type AgyEventStream,
@@ -108,6 +109,34 @@ describe("provider usage normalization", () => {
         { input: Number.MAX_SAFE_INTEGER, output: 1, cacheRead: 0 },
         ZERO_USAGE_BASELINE,
       ),
+      undefined,
+    );
+  });
+
+  it("normalizes single-step usage directly into Pi usage with cacheRead included in totalTokens", () => {
+    assert.deepEqual(
+      normalizeAgyUsage({ input: 3187, output: 26, cacheRead: 10742, thinking: 21 }),
+      {
+        input: 3187,
+        output: 26,
+        cacheRead: 10742,
+        cacheWrite: 0,
+        reasoning: 21,
+        totalTokens: 13955,
+      },
+    );
+    assert.deepEqual(
+      normalizeAgyUsage({ input: 2144, output: 1, cacheRead: 11885 }),
+      {
+        input: 2144,
+        output: 1,
+        cacheRead: 11885,
+        cacheWrite: 0,
+        totalTokens: 14030,
+      },
+    );
+    assert.equal(
+      normalizeAgyUsage({ input: Number.MAX_SAFE_INTEGER, output: 1, cacheRead: 0 }),
       undefined,
     );
   });
@@ -289,6 +318,161 @@ describe("provider driver cumulative usage accounting", () => {
       }
     });
   });
+
+  it("reports the last agent_response step usage on multi-step turns instead of the cumulative result sum", async () => {
+    await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+      const driver = new AgyProviderDriver();
+      try {
+        const t1 = driver.turn(profile, { prompt: "read package.json", signal: new AbortController().signal, timeoutMs: 2000 });
+        await Promise.resolve();
+        const child = [...children][0];
+        child.stdout.write(JSON.stringify({
+          event: "step_update",
+          step_update: {
+            conversation_id: "c-multi",
+            step_index: 1,
+            state: "DONE",
+            step_type: "agent_response",
+            usage: { input_tokens: 12783, output_tokens: 72, thinking_tokens: 42, cache_read_tokens: 0, total_tokens: 12855 },
+          },
+        }) + "\n");
+        // Subagent step usage belongs to a different context window and must be ignored.
+        child.stdout.write(JSON.stringify({
+          event: "step_update",
+          step_update: {
+            conversation_id: "c-multi",
+            step_index: 2,
+            state: "DONE",
+            step_type: "subagent",
+            usage: { input_tokens: 500, output_tokens: 10, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 510 },
+          },
+        }) + "\n");
+        child.stdout.write(JSON.stringify({
+          event: "step_update",
+          step_update: {
+            conversation_id: "c-multi",
+            step_index: 3,
+            state: "DONE",
+            step_type: "agent_response",
+            text_delta: "0.8.4\n",
+            usage: { input_tokens: 3187, output_tokens: 26, thinking_tokens: 21, cache_read_tokens: 10742, total_tokens: 3213 },
+          },
+        }) + "\n");
+        // Non-DONE or all-zero step updates must not overwrite a real step's usage.
+        child.stdout.write(JSON.stringify({
+          event: "step_update",
+          step_update: {
+            conversation_id: "c-multi",
+            step_index: 3,
+            state: "ACTIVE",
+            step_type: "agent_response",
+            usage: { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 0 },
+          },
+        }) + "\n");
+        child.stdout.write(JSON.stringify({
+          event: "result",
+          result: {
+            status: "SUCCESS",
+            response: "0.8.4\n",
+            conversation_id: "c-multi",
+            usage: { input_tokens: 15970, output_tokens: 98, thinking_tokens: 63, cache_read_tokens: 10742, total_tokens: 16068 },
+          },
+        }) + "\n");
+        const r1 = await awaitWithWatchdog(t1, "multi-step turn");
+        assert.equal(r1.kind, "done");
+        if (r1.kind === "done") {
+          assert.deepEqual(r1.outcome.usage, {
+            input: 3187,
+            output: 26,
+            cacheRead: 10742,
+            cacheWrite: 0,
+            reasoning: 21,
+            totalTokens: 13955,
+          });
+          // Cumulative snapshot is still preserved for session persistence and fallback diffing.
+          assert.deepEqual(r1.outcome.usageSnapshot, {
+            input: 15970,
+            output: 98,
+            cacheRead: 10742,
+            thinking: 63,
+          });
+        }
+      } finally {
+        await driver.close();
+      }
+    });
+  });
+
+  it("attaches per-step usage to parked toolUse phases and resets for the resumed phase", async () => {
+    await withTimingFakeAgy({ onSpawn: (_args, child) => { Object.assign(child, { stdin: new PassThrough() }); } }, async (children) => {
+      const driver = new AgyProviderDriver({ parkBatchMs: 0 });
+      try {
+        const t1 = driver.turn(profile, { prompt: "inspect file", signal: new AbortController().signal, timeoutMs: 2000 });
+        await Promise.resolve();
+        const child = [...children][0];
+        child.stdout.write(JSON.stringify({
+          event: "step_update",
+          step_update: {
+            conversation_id: "c-park",
+            step_index: 1,
+            state: "DONE",
+            step_type: "agent_response",
+            usage: { input_tokens: 12000, output_tokens: 60, thinking_tokens: 30, cache_read_tokens: 0, total_tokens: 12060 },
+          },
+        }) + "\n");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.equal(driver.notifyPark({ callId: "p1", toolName: "read", args: { path: "package.json" } }), true);
+        const parked = await awaitWithWatchdog(t1, "parked phase");
+        assert.equal(parked.kind, "parked");
+        if (parked.kind === "parked") {
+          assert.deepEqual(parked.usage, {
+            input: 12000,
+            output: 60,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 30,
+            totalTokens: 12060,
+          });
+        }
+
+        const resumed = driver.continueTurn({ signal: new AbortController().signal, timeoutMs: 2000 });
+        child.stdout.write(JSON.stringify({
+          event: "step_update",
+          step_update: {
+            conversation_id: "c-park",
+            step_index: 3,
+            state: "DONE",
+            step_type: "agent_response",
+            text_delta: "done",
+            usage: { input_tokens: 2500, output_tokens: 12, thinking_tokens: 4, cache_read_tokens: 11000, total_tokens: 2512 },
+          },
+        }) + "\n");
+        child.stdout.write(JSON.stringify({
+          event: "result",
+          result: {
+            status: "SUCCESS",
+            response: "done",
+            conversation_id: "c-park",
+            usage: { input_tokens: 14500, output_tokens: 72, thinking_tokens: 34, cache_read_tokens: 11000, total_tokens: 14572 },
+          },
+        }) + "\n");
+        const final = await awaitWithWatchdog(resumed, "resumed done");
+        assert.equal(final.kind, "done");
+        if (final.kind === "done") {
+          assert.deepEqual(final.outcome.usage, {
+            input: 2500,
+            output: 12,
+            cacheRead: 11000,
+            cacheWrite: 0,
+            reasoning: 4,
+            totalTokens: 13512,
+          });
+        }
+      } finally {
+        await driver.close();
+      }
+    });
+  });
 });
 
 describe("provider streamSimple usage phase accounting", () => {
@@ -355,6 +539,52 @@ describe("provider streamSimple usage phase accounting", () => {
         totalTokens: finalDone.message.usage.totalTokens,
       },
       { input: 60, output: 15, cacheRead: 50, cacheWrite: 0, reasoning: 3, totalTokens: 125 },
+    );
+  });
+
+  it("propagates per-step usage onto parked toolUse messages when the runner supplies it", async () => {
+    const factory = createRecordingFactory();
+    const runner: ProviderTurnRunner = {
+      run: async () => ({
+        kind: "parked" as const,
+        park: { callId: "p1", toolName: "read", args: {} },
+        usage: { input: 12000, output: 60, cacheRead: 0, cacheWrite: 0, reasoning: 30, totalTokens: 12060 },
+      }),
+      resume: async () => ({
+        kind: "done" as const,
+        result: {
+          text: "final answer",
+          truncated: false,
+          activity: [],
+          usage: { input: 2500, output: 12, cacheRead: 11000, cacheWrite: 0, reasoning: 4, totalTokens: 13512 },
+        },
+      }),
+      cancel: () => {},
+    };
+    const streamSimple = createAgyStreamSimple(factory, {
+      entries: [...TEST_CATALOG],
+      runner,
+    });
+    const start1 = factory.events.length;
+    streamSimple({ id: "gemini-3-8-flash" }, [{ role: "user", content: "go" }], {});
+    await waitForStreamEnd(factory, start1);
+    const parkedDone = factory.events.find((e) => e.type === "done") as {
+      message: {
+        stopReason: string;
+        usage: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning?: number; totalTokens: number };
+      };
+    };
+    assert.equal(parkedDone.message.stopReason, "toolUse");
+    assert.deepEqual(
+      {
+        input: parkedDone.message.usage.input,
+        output: parkedDone.message.usage.output,
+        cacheRead: parkedDone.message.usage.cacheRead,
+        cacheWrite: parkedDone.message.usage.cacheWrite,
+        reasoning: parkedDone.message.usage.reasoning,
+        totalTokens: parkedDone.message.usage.totalTokens,
+      },
+      { input: 12000, output: 60, cacheRead: 0, cacheWrite: 0, reasoning: 30, totalTokens: 12060 },
     );
   });
 });

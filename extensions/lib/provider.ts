@@ -75,6 +75,7 @@ import type { AgySubagentSummary } from "./subagents.js";
 import type { NormalizedProviderUsage, ValidatedAgyUsage } from "./provider-usage.js";
 export {
   diffAgyUsage,
+  normalizeAgyUsage,
   validateAgyUsage,
   ZERO_USAGE_BASELINE,
   type NormalizedProviderUsage,
@@ -161,7 +162,13 @@ export interface ProviderTurnOwnership {
 
 export type ProviderRunEnd =
   | { kind: "done"; result: ProviderTurnResult }
-  | { kind: "parked"; park: ProviderToolPark; parks?: ProviderToolPark[]; ownership?: ProviderTurnOwnership };
+  | {
+      kind: "parked";
+      park: ProviderToolPark;
+      parks?: ProviderToolPark[];
+      ownership?: ProviderTurnOwnership;
+      usage?: NormalizedProviderUsage;
+    };
 
 export interface ProviderToolDelivery {
   callId: string;
@@ -346,6 +353,7 @@ function toRunEnd(
         kind: "parked";
         park: { callId: string; toolName: string; args: Record<string, unknown> };
         parks?: Array<{ callId: string; toolName: string; args: Record<string, unknown> }>;
+        usage?: NormalizedProviderUsage;
       },
 ): ProviderRunEnd {
   if (end.kind === "parked") {
@@ -354,9 +362,27 @@ function toRunEnd(
       toolName: park.toolName,
       args: park.args,
     }));
-    return { kind: "parked", park: parks[0], parks };
+    return { kind: "parked", park: parks[0], parks, ...(end.usage ? { usage: end.usage } : {}) };
   }
   return { kind: "done", result: end.outcome };
+}
+
+function applyNormalizedUsage(
+  target: NormalizedProviderUsage,
+  usage: NormalizedProviderUsage | undefined,
+): void {
+  if (usage) {
+    target.input = usage.input;
+    target.output = usage.output;
+    target.cacheRead = usage.cacheRead;
+    target.cacheWrite = usage.cacheWrite;
+    if (usage.reasoning !== undefined) {
+      target.reasoning = usage.reasoning;
+    }
+    target.totalTokens = usage.totalTokens;
+  } else {
+    target.totalTokens = target.input + target.output + target.cacheRead + target.cacheWrite;
+  }
 }
 
 /**
@@ -1204,8 +1230,7 @@ export function createAgyStreamSimple(
             stream.push({ type: "toolcall_start", contentIndex: toolIndex, partial: output });
             stream.push({ type: "toolcall_end", contentIndex: toolIndex, toolCall, partial: output });
           }
-          output.usage.totalTokens =
-            output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+          applyNormalizedUsage(output.usage, end.usage);
           output.stopReason = "toolUse";
           stream.push({ type: "done", reason: output.stopReason, message: output });
           stream.end();
@@ -1238,19 +1263,7 @@ export function createAgyStreamSimple(
         block.text = finalText;
         stream.push({ type: "text_end", contentIndex: index, content: finalText, partial: output });
 
-        if (result.usage) {
-          output.usage.input = result.usage.input;
-          output.usage.output = result.usage.output;
-          output.usage.cacheRead = result.usage.cacheRead;
-          output.usage.cacheWrite = result.usage.cacheWrite;
-          if (result.usage.reasoning !== undefined) {
-            output.usage.reasoning = result.usage.reasoning;
-          }
-          output.usage.totalTokens = result.usage.totalTokens;
-        } else {
-          output.usage.totalTokens =
-            output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-        }
+        applyNormalizedUsage(output.usage, result.usage);
         // Partial turns must never masquerade as clean stops: surface the
         // real terminal state so Pi retries or reports instead of accepting
         // truncated text as a complete answer.
