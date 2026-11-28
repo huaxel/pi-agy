@@ -5,9 +5,11 @@
  * Verified against live `agy --output-format stream-json`:
  * - `input_tokens` excludes `cache_read_tokens`.
  * - `output_tokens` includes `thinking_tokens` (matching Pi's `reasoning` subset).
+ * - `step_update` events for `agent_response` carry per-step (single-request)
+ *   usage, which directly reflects current context window fill and step output.
  * - In persistent `--input-format stream-json` mode, `result.usage` is
- *   cumulative across turns in the process session, so consecutive turns
- *   subtract the previous committed baseline to avoid double-counting.
+ *   cumulative across steps and turns in the process session, so consecutive
+ *   turns subtract the previous committed baseline when falling back to it.
  */
 
 export interface ValidatedAgyUsage {
@@ -98,6 +100,16 @@ export function validateAgyUsage(raw: unknown): ValidatedAgyUsage | undefined {
   return thinking !== undefined
     ? { input, output, cacheRead, thinking }
     : { input, output, cacheRead };
+}
+
+/**
+ * Normalize a single-step (non-cumulative) `agy` usage snapshot directly into
+ * Pi `Usage`. Returns `undefined` on safe-integer overflow.
+ */
+export function normalizeAgyUsage(
+  current: ValidatedAgyUsage,
+): NormalizedProviderUsage | undefined {
+  return diffAgyUsage(current, ZERO_USAGE_BASELINE);
 }
 
 /**
